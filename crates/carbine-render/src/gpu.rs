@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use carbine_core::{DrawItem, MeshHandle, Scene};
+use carbine_core::{MeshData, MeshHandle, Scene};
 use wgpu::util::DeviceExt;
 
 const SHADER: &str = r#"
@@ -24,6 +24,84 @@ fn fragment() -> @location(0) vec4<f32> {
 }
 "#;
 
+/// UI is drawn as a signed distance field over a quad, so a corner radius or a
+/// side count costs nothing to change and every edge is antialiased.
+const UI_SHADER: &str = r#"
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    model: mat4x4<f32>,
+    color: vec4<f32>,
+    size: vec2<f32>,
+    corner_radius: f32,
+    sides: f32,
+    outline: f32,
+};
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+struct Pixel {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) local: vec2<f32>,
+};
+
+const PI: f32 = 3.14159265;
+
+@vertex
+fn versus(@location(0) position: vec3<f32>) -> Pixel {
+    var pixel: Pixel;
+    pixel.clip = uniforms.view_proj * uniforms.model * vec4<f32>(position, 1.0);
+    pixel.local = vec2<f32>(position.x, position.y) * uniforms.size;
+    return pixel;
+}
+
+/// Coverage of a shape whose signed distance is `distance`, in pixels, positive
+/// outside. The field is in screen pixels, so a one pixel feather is exact.
+fn coverage(distance: f32) -> f32 {
+    return 1.0 - smoothstep(-0.5, 0.5, distance);
+}
+
+fn sd_round_box(p: vec2<f32>, half: vec2<f32>, radius: f32) -> f32 {
+    let q = abs(p) - half + radius;
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+/// Distance to a regular polygon, positive outside, from its inradius. The point
+/// is folded into the sector facing +x, so one edge answers for all of them.
+fn sd_polygon(p: vec2<f32>, inradius: f32, sides: f32) -> f32 {
+    let step = 2.0 * PI / sides;
+    let radial = length(p);
+    let bearing = atan2(p.y, p.x);
+    let angle = bearing - floor(bearing / step + 0.5) * step;
+    let q = vec2<f32>(radial * cos(angle), radial * sin(angle));
+    let half_edge = inradius * tan(0.5 * step);
+    let nearest = vec2<f32>(inradius, clamp(q.y, -half_edge, half_edge));
+    let distance = length(q - nearest);
+    return select(-distance, distance, q.x >= inradius);
+}
+
+@fragment
+fn fragment(pixel: Pixel) -> @location(0) vec4<f32> {
+    let half = max(uniforms.size * 0.5, vec2<f32>(0.0));
+    let radius = max(uniforms.corner_radius, 0.0);
+    let sides = max(uniforms.sides, 3.0);
+
+    var distance: f32;
+    if (abs(sides - 4.0) < 0.5) {
+        // A rectangle uses both axes; any other count is a regular polygon
+        // whose points touch the shorter axis of the box.
+        distance = sd_round_box(pixel.local, half, min(radius, min(half.x, half.y)));
+    } else {
+        let flat = min(half.x, half.y) * cos(PI / sides);
+        let rounding = min(radius, flat);
+        distance = sd_polygon(pixel.local, flat - rounding, sides) - rounding;
+    }
+
+    let fill = coverage(distance);
+    let band = fill - coverage(distance + max(uniforms.outline, 0.0));
+    return vec4<f32>(uniforms.color.rgb, max(fill * uniforms.color.a, band));
+}
+"#;
+
 /// Carbine black, the editor viewport background.
 const CLEAR: wgpu::Color = wgpu::Color {
     r: 0.086,
@@ -33,6 +111,7 @@ const CLEAR: wgpu::Color = wgpu::Color {
 };
 
 const UNIFORM_BYTES: usize = std::mem::size_of::<Uniforms>();
+const UI_UNIFORM_BYTES: usize = std::mem::size_of::<UiUniforms>();
 const COPY_ROW_ALIGNMENT: u32 = 256;
 
 #[repr(C)]
@@ -41,6 +120,19 @@ struct Uniforms {
     view_proj: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
     color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct UiUniforms {
+    view_proj: [[f32; 4]; 4],
+    model: [[f32; 4]; 4],
+    color: [f32; 4],
+    size: [f32; 2],
+    corner_radius: f32,
+    sides: f32,
+    outline: f32,
+    _pad: [f32; 3],
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +180,7 @@ pub struct Gpu {
     pub adapter_name: String,
     meshes: HashMap<MeshHandle, GpuMesh>,
     pipelines: HashMap<wgpu::TextureFormat, Pipeline>,
+    ui_pipelines: HashMap<wgpu::TextureFormat, Pipeline>,
 }
 
 struct GpuMesh {
@@ -99,6 +192,7 @@ struct GpuMesh {
 struct Pipeline {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+    uniform_bytes: u64,
     /// One uniform buffer and bind group per draw. Reusing a single buffer for a
     /// whole frame would make every object read the last upload instead of its own.
     slots: Vec<Slot>,
@@ -138,6 +232,7 @@ impl Gpu {
             adapter_name: name,
             meshes: HashMap::new(),
             pipelines: HashMap::new(),
+            ui_pipelines: HashMap::new(),
         })
     }
 
@@ -202,17 +297,28 @@ impl Gpu {
     }
 
     /// Records the scene and submits it, returning the submission index so the
-    /// caller can present the texture it rendered into.
+    /// caller can present the texture it rendered into. `extent` is the target in
+    /// pixels: the world is measured against its aspect ratio, UI against its size.
     pub fn draw(
         &mut self,
         view: &wgpu::TextureView,
         format: wgpu::TextureFormat,
-        aspect: f32,
+        extent: (u32, u32),
         scene: &Scene,
     ) -> Result<wgpu::SubmissionIndex, RenderError> {
         let items = scene.draw_items();
+        let ui_items = scene.ui_items();
+        let aspect = extent.0 as f32 / extent.1.max(1) as f32;
         let view_proj = scene.camera().view_projection(aspect);
-        let pipeline = ensure_pipeline(&mut self.pipelines, &self.device, format, items.len());
+        let pipeline = ensure_pipeline(
+            &mut self.pipelines,
+            &self.device,
+            format,
+            items.len(),
+            SHADER,
+            UNIFORM_BYTES,
+            "carbine unlit",
+        );
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -239,7 +345,7 @@ impl Gpu {
             pass.set_pipeline(&pipeline.pipeline);
 
             for (index, item) in items.iter().enumerate() {
-                let mesh = ensure_mesh(&mut self.meshes, &self.device, item);
+                let mesh = ensure_mesh(&mut self.meshes, &self.device, item.handle, item.mesh);
                 let slot = &pipeline.slots[index];
                 let uniforms = Uniforms {
                     view_proj: view_proj.to_cols_array_2d(),
@@ -252,6 +358,60 @@ impl Gpu {
                 pass.set_vertex_buffer(0, mesh.vertex.slice(..));
                 pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+        }
+
+        if !ui_items.is_empty() {
+            let ui_proj = scene.ui_projection(extent.0, extent.1);
+            let ui_pipeline = ensure_pipeline(
+                &mut self.ui_pipelines,
+                &self.device,
+                format,
+                ui_items.len(),
+                UI_SHADER,
+                UI_UNIFORM_BYTES,
+                "carbine ui",
+            );
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("carbine ui"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&ui_pipeline.pipeline);
+
+                for (index, item) in ui_items.iter().enumerate() {
+                    let mesh = ensure_mesh(&mut self.meshes, &self.device, item.handle, item.mesh);
+                    let slot = &ui_pipeline.slots[index];
+                    let uniforms = UiUniforms {
+                        view_proj: ui_proj.to_cols_array_2d(),
+                        model: item.model.to_cols_array_2d(),
+                        color: item.color,
+                        size: item.size,
+                        corner_radius: item.corner_radius,
+                        sides: item.sides,
+                        outline: item.outline,
+                        _pad: [0.0; 3],
+                    };
+                    self.queue
+                        .write_buffer(&slot.uniforms, 0, bytemuck::bytes_of(&uniforms));
+                    pass.set_bind_group(0, &slot.bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertex.slice(..));
+                    pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
             }
         }
 
@@ -351,14 +511,17 @@ fn ensure_pipeline<'a>(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     draw_count: usize,
+    source: &str,
+    uniform_bytes: usize,
+    label: &str,
 ) -> &'a mut Pipeline {
     let pipeline = pipelines.entry(format).or_insert_with(|| {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("carbine unlit"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("carbine unlit"),
+            label: Some(label),
             layout: None,
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -398,6 +561,7 @@ fn ensure_pipeline<'a>(
         Pipeline {
             pipeline,
             layout,
+            uniform_bytes: uniform_bytes as u64,
             slots: Vec::new(),
         }
     });
@@ -405,7 +569,7 @@ fn ensure_pipeline<'a>(
     while pipeline.slots.len() < draw_count {
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("carbine uniforms"),
-            size: UNIFORM_BYTES as u64,
+            size: pipeline.uniform_bytes,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -429,12 +593,11 @@ fn ensure_pipeline<'a>(
 fn ensure_mesh<'a>(
     meshes: &'a mut HashMap<MeshHandle, GpuMesh>,
     device: &wgpu::Device,
-    item: &DrawItem<'_>,
+    handle: MeshHandle,
+    mesh: &MeshData,
 ) -> &'a GpuMesh {
-    let handle = item.handle;
     meshes.entry(handle).or_insert_with(|| {
-        let vertices: Vec<[f32; 3]> = item
-            .mesh
+        let vertices: Vec<[f32; 3]> = mesh
             .positions
             .iter()
             .map(|position| position.to_array())
@@ -446,13 +609,13 @@ fn ensure_mesh<'a>(
         });
         let index = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("carbine indices"),
-            contents: bytemuck::cast_slice(&item.mesh.indices),
+            contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
         GpuMesh {
             vertex,
             index,
-            index_count: item.mesh.indices.len() as u32,
+            index_count: mesh.indices.len() as u32,
         }
     })
 }

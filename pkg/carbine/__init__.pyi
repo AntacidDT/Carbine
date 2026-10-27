@@ -61,7 +61,14 @@ class Object:
     scale: Vec3
     rotation: Quat
     rotationEuler: Vec3
-    color: Vec3
+    color: Vec3 | str
+    @property
+    def colorHex(self) -> str: ...
+    # UI overlay knobs; a world object raises on them. Sizes are pixels.
+    cornerRadius: float
+    polygon: int
+    outline: float
+    transparent: float
     @property
     def mesh(self) -> Mesh: ...
     def destroy(self) -> None: ...
@@ -97,7 +104,20 @@ class Scene:
     @property
     def entityCount(self) -> int: ...
 
+class Ui:
+    """Screen overlay elements. Their position and size are pixels measured from
+    the viewport's top left corner, not meters."""
+
+    def new(
+        self,
+        kind: str = "square",
+        *,
+        name: str | None = None,
+        parent: Object | Entity | None = None,
+    ) -> Object: ...
+
 scene: Scene
+ui: Ui
 
 def init(
     width: int = 1280,

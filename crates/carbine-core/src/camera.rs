@@ -35,6 +35,16 @@ impl Camera {
         );
         projection * Mat4::from_translation(-self.position)
     }
+
+    /// Maps viewport pixels to clip space: `(0, 0)` is the top left corner and
+    /// y grows downward, the way a layout is measured. The flipped y reverses
+    /// triangle winding, so the overlay pass draws both faces.
+    pub fn pixel_projection(width: u32, height: u32) -> Mat4 {
+        let (width, height) = (width.max(1) as f32, height.max(1) as f32);
+        let centered = Mat4::from_translation(Vec3::new(-width * 0.5, -height * 0.5, 0.0));
+        let to_clip = Mat4::from_scale(Vec3::new(2.0 / width, -2.0 / height, 1.0));
+        to_clip * centered
+    }
 }
 
 impl crate::node::Scene {
@@ -48,6 +58,11 @@ impl crate::node::Scene {
 
     pub fn set_camera_view_height(&mut self, view_height: f32) {
         self.camera.view_height = view_height.max(1e-6);
+    }
+
+    /// The matrix the UI pass draws with: pixels, measured from the top left.
+    pub fn ui_projection(&self, width: u32, height: u32) -> Mat4 {
+        Camera::pixel_projection(width, height)
     }
 }
 
@@ -90,5 +105,18 @@ mod tests {
         };
         let center = camera.view_projection(1.0).project_point3(Vec3::X);
         assert!(center.x.abs() < 1e-6, "panning did not recenter: {center}");
+    }
+
+    #[test]
+    fn pixel_space_measures_ui_from_the_top_left() {
+        let matrix = Scene::new().ui_projection(64, 32);
+        let project = |x, y| matrix.project_point3(Vec3::new(x, y, 0.0));
+
+        let top_left = project(0.0, 0.0);
+        assert_eq!((top_left.x, top_left.y), (-1.0, 1.0));
+        let bottom_right = project(64.0, 32.0);
+        assert_eq!((bottom_right.x, bottom_right.y), (1.0, -1.0));
+        let middle = project(32.0, 16.0);
+        assert!(middle.x.abs() < 1e-6 && middle.y.abs() < 1e-6, "{middle}");
     }
 }

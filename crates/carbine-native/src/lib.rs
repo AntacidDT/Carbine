@@ -4,6 +4,7 @@ mod math;
 mod mesh;
 mod object;
 mod scene;
+mod ui;
 
 use std::cell::RefCell;
 use std::sync::{Mutex, OnceLock};
@@ -20,6 +21,7 @@ use crate::entity::Entity;
 use crate::math::extract_vec3;
 use crate::object::Object;
 use crate::scene::PyScene;
+use crate::ui::PyUi;
 
 create_exception!(carbine, DestroyedError, PyRuntimeError);
 
@@ -187,6 +189,12 @@ fn get_scene() -> PyScene {
     PyScene::new()
 }
 
+/// The screen overlay: `carbine.ui.new("square")`.
+#[pyfunction]
+fn get_ui() -> PyUi {
+    PyUi::overlay()
+}
+
 /// The object kinds `new()` and `spawnEntity()` accept.
 #[pyfunction]
 fn kinds() -> Vec<&'static str> {
@@ -198,6 +206,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Object>()?;
     module.add_class::<Entity>()?;
     module.add_class::<PyScene>()?;
+    module.add_class::<PyUi>()?;
     module.add_class::<PyCamera>()?;
     module.add_class::<math::PyVec3>()?;
     module.add_class::<math::Vec3Iterator>()?;
@@ -214,6 +223,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(kill_entity, module)?)?;
     module.add_function(wrap_pyfunction!(get_camera, module)?)?;
     module.add_function(wrap_pyfunction!(get_scene, module)?)?;
+    module.add_function(wrap_pyfunction!(get_ui, module)?)?;
     module.add_function(wrap_pyfunction!(kinds, module)?)?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add("DestroyedError", module.py().get_type::<DestroyedError>())?;

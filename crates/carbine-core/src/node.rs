@@ -79,6 +79,8 @@ pub enum SceneError {
     Cycle,
     MissingComponent,
     NotAnEntity,
+    NotAUi,
+    BadColor(String),
 }
 
 impl fmt::Display for SceneError {
@@ -95,6 +97,11 @@ impl fmt::Display for SceneError {
             Self::Cycle => write!(formatter, "reparenting would create a cycle"),
             Self::MissingComponent => write!(formatter, "the object is missing a component"),
             Self::NotAnEntity => write!(formatter, "the object is not an entity"),
+            Self::NotAUi => write!(formatter, "the object is not a UI element"),
+            Self::BadColor(color) => write!(
+                formatter,
+                "\"{color}\" is not a colour; use #rgb, #rgba, #rrggbb or #rrggbbaa"
+            ),
         }
     }
 }
@@ -360,6 +367,31 @@ impl Scene {
         Ok(self.component::<ObjectColor>(id)?.0)
     }
 
+    /// The colour the way a design tool writes it: `#rrggbb`, lowercase.
+    pub fn color_hex(&self, id: NodeId) -> Result<String, SceneError> {
+        let color = self.color(id)?;
+        Ok(format!(
+            "#{:02x}{:02x}{:02x}",
+            channel(color.x),
+            channel(color.y),
+            channel(color.z)
+        ))
+    }
+
+    /// Accepts `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa`. A trailing alpha only
+    /// means anything on a UI element, and is dropped elsewhere.
+    pub fn set_color_hex(&mut self, id: NodeId, hex: &str) -> Result<(), SceneError> {
+        let (color, alpha) =
+            parse_hex_color(hex).ok_or_else(|| SceneError::BadColor(hex.to_owned()))?;
+        self.component_mut::<ObjectColor>(id)?.0 = color;
+        if let Some(alpha) = alpha
+            && self.is_ui(id)?
+        {
+            self.set_alpha(id, alpha)?;
+        }
+        Ok(())
+    }
+
     pub fn mesh(&self, id: NodeId) -> Result<MeshData, SceneError> {
         let mesh = self.component::<NodeMesh>(id)?;
         Ok(mesh.data.clone())
@@ -431,6 +463,37 @@ impl Scene {
         }
         Ok(false)
     }
+}
+
+fn channel(value: f32) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn parse_hex_color(hex: &str) -> Option<(Vec3, Option<f32>)> {
+    let digits = hex.strip_prefix('#').unwrap_or(hex);
+    let pairs: Vec<Option<u32>> = match digits.len() {
+        3 | 4 => digits
+            .chars()
+            .map(|d| d.to_digit(16).map(|v| v * 17))
+            .collect(),
+        6 | 8 => digits
+            .as_bytes()
+            .chunks(2)
+            .map(|pair| {
+                std::str::from_utf8(pair)
+                    .ok()
+                    .and_then(|text| u32::from_str_radix(text, 16).ok())
+            })
+            .collect(),
+        _ => return None,
+    };
+    let channels = pairs.into_iter().collect::<Option<Vec<u32>>>()?;
+    let color = Vec3::new(
+        channels[0] as f32 / 255.0,
+        channels[1] as f32 / 255.0,
+        channels[2] as f32 / 255.0,
+    );
+    Some((color, channels.get(3).map(|&v| v as f32)))
 }
 
 fn set_axis(vector: &mut Vec3, axis: Axis, value: f32) {
@@ -590,8 +653,43 @@ mod tests {
     fn unknown_kinds_are_rejected() {
         let mut scene = Scene::new();
         assert!(matches!(
-            scene.create("triangle", None, None),
-            Err(SceneError::UnknownKind(kind)) if kind == "triangle"
+            scene.create("dodecahedron", None, None),
+            Err(SceneError::UnknownKind(kind)) if kind == "dodecahedron"
         ));
+    }
+
+    #[test]
+    fn colours_are_written_as_hex_and_read_back() {
+        let mut scene = Scene::new();
+        let card = scene.create("rectangle", None, None).unwrap();
+
+        scene.set_color_hex(card, "#eb7a34").unwrap();
+        assert_eq!(scene.color_hex(card).unwrap(), "#eb7a34");
+        assert_eq!(
+            scene.color(card).unwrap(),
+            Vec3::new(235.0 / 255.0, 122.0 / 255.0, 52.0 / 255.0)
+        );
+
+        scene.set_color_hex(card, "f00").unwrap();
+        assert_eq!(scene.color(card).unwrap(), Vec3::new(1.0, 0.0, 0.0));
+
+        scene.set_color_hex(card, "#0f0f0fff").unwrap();
+        assert_eq!(scene.color_hex(card).unwrap(), "#0f0f0f");
+    }
+
+    #[test]
+    fn bad_colours_are_rejected() {
+        let mut scene = Scene::new();
+        let card = scene.create("rectangle", None, None).unwrap();
+
+        for bad in ["#ee7a3", "orange", "#gggggg", ""] {
+            assert!(
+                matches!(
+                    scene.set_color_hex(card, bad),
+                    Err(SceneError::BadColor(value)) if value == bad
+                ),
+                "{bad} should not parse"
+            );
+        }
     }
 }

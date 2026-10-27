@@ -7,6 +7,7 @@ from ._native import (
     Object,
     Quat,
     Scene,
+    Ui,
     Vec3,
     __version__,
     camera,
@@ -23,6 +24,7 @@ from ._native import (
 )
 
 scene = _native.get_scene()
+ui = _native.get_ui()
 
 __all__ = [
     "Camera",
@@ -32,6 +34,7 @@ __all__ = [
     "Object",
     "Quat",
     "Scene",
+    "Ui",
     "Vec3",
     "__version__",
     "camera",
@@ -45,5 +48,6 @@ __all__ = [
     "running",
     "scene",
     "spawnEntity",
+    "ui",
     "viewport",
 ]

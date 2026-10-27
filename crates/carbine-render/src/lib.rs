@@ -238,7 +238,6 @@ impl Windowed {
         let Some(session) = &mut self.session else {
             return Ok(());
         };
-        let aspect = session.size.0 as f32 / session.size.1 as f32;
 
         match session.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
@@ -246,7 +245,9 @@ impl Windowed {
                 let view = texture
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
-                session.gpu.draw(&view, session.format, aspect, scene)?;
+                session
+                    .gpu
+                    .draw(&view, session.format, session.size, scene)?;
                 session.gpu.present(texture);
                 Ok(())
             }
@@ -292,22 +293,19 @@ impl Offscreen {
     fn render(&mut self, scene: &Scene) -> Result<(), RenderError> {
         let (_texture, view) = self.gpu.create_target(self.width, self.height);
         self.gpu
-            .draw(&view, self.format(), self.aspect(), scene)
+            .draw(&view, self.format(), (self.width, self.height), scene)
             .map(|_| ())
     }
 
     fn read_pixels(&mut self, scene: &Scene) -> Result<Vec<u8>, RenderError> {
         let (texture, view) = self.gpu.create_target(self.width, self.height);
-        self.gpu.draw(&view, self.format(), self.aspect(), scene)?;
+        self.gpu
+            .draw(&view, self.format(), (self.width, self.height), scene)?;
         self.gpu.read_pixels(&texture, self.width, self.height)
     }
 
     fn format(&self) -> wgpu::TextureFormat {
         wgpu::TextureFormat::Rgba8Unorm
-    }
-
-    fn aspect(&self) -> f32 {
-        self.width as f32 / self.height as f32
     }
 }
 
@@ -380,5 +378,123 @@ mod tests {
     fn offscreen_rendering_reports_the_adapter_it_found() {
         let renderer = Renderer::offscreen(8, 8).unwrap();
         assert!(renderer.adapter().is_some_and(|name| !name.is_empty()));
+    }
+
+    /// A 40 by 40 pixel element centred on a 64 by 64 target, in Carbine orange.
+    fn button(scene: &mut Scene) -> carbine_core::NodeId {
+        let button = scene.create_ui("square", None, None).unwrap();
+        scene
+            .set_vec_field(button, VecField::Position, Vec3::new(32.0, 32.0, 0.0))
+            .unwrap();
+        scene
+            .set_vec_field(button, VecField::Size, Vec3::new(40.0, 40.0, 1.0))
+            .unwrap();
+        scene.set_color_hex(button, "#eb7a34").unwrap();
+        button
+    }
+
+    #[test]
+    fn a_square_element_fills_the_pixels_it_is_given() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        button(&mut scene);
+
+        let pixels = renderer.read_pixels(&scene).unwrap();
+        assert_eq!(pixel(&pixels, 64, 14, 14), [235, 122, 52]);
+        assert_eq!(pixel(&pixels, 64, 49, 49), [235, 122, 52]);
+        assert_eq!(pixel(&pixels, 64, 9, 9), [22, 21, 20]);
+    }
+
+    #[test]
+    fn a_corner_radius_cuts_the_corner_and_keeps_the_middle() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        let button = button(&mut scene);
+        scene.set_corner_radius(button, 20.0).unwrap();
+
+        let pixels = renderer.read_pixels(&scene).unwrap();
+        assert_eq!(pixel(&pixels, 64, 14, 14), [22, 21, 20], "corner");
+        assert_eq!(pixel(&pixels, 64, 32, 14), [235, 122, 52], "edge");
+        assert_eq!(pixel(&pixels, 64, 32, 32), [235, 122, 52], "middle");
+    }
+
+    #[test]
+    fn an_outline_is_stroked_even_when_the_element_is_transparent() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        let button = button(&mut scene);
+        scene.set_outline(button, 4.0).unwrap();
+        scene.set_alpha(button, 0.0).unwrap();
+
+        let pixels = renderer.read_pixels(&scene).unwrap();
+        assert_eq!(pixel(&pixels, 64, 14, 32), [235, 122, 52], "ring");
+        assert_eq!(pixel(&pixels, 64, 32, 32), [22, 21, 20], "hollow middle");
+        assert_eq!(pixel(&pixels, 64, 11, 32), [22, 21, 20], "outside");
+    }
+
+    #[test]
+    fn transparency_blends_the_element_into_the_frame() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        let button = button(&mut scene);
+        scene.set_alpha(button, 128.0).unwrap();
+
+        let pixels = renderer.read_pixels(&scene).unwrap();
+        let blended = pixel(&pixels, 64, 14, 14);
+        // Half opaque Carbine orange over Carbine black: every channel lands
+        // about halfway between its own value and the frame behind it.
+        assert!(
+            (126..=132).contains(&blended[0])
+                && (68..=75).contains(&blended[1])
+                && (33..=39).contains(&blended[2]),
+            "expected a blended orange, got {blended:?}"
+        );
+        assert_eq!(
+            pixel(&pixels, 64, 9, 9),
+            [22, 21, 20],
+            "outside stays clear"
+        );
+    }
+
+    #[test]
+    fn the_polygon_count_replaces_the_box_with_a_triangle() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        let button = button(&mut scene);
+        scene.set_polygon_sides(button, 3).unwrap();
+
+        let pixels = renderer.read_pixels(&scene).unwrap();
+        assert_eq!(
+            pixel(&pixels, 64, 20, 32),
+            [235, 122, 52],
+            "inside the point"
+        );
+        assert_eq!(pixel(&pixels, 64, 32, 14), [22, 21, 20], "above the flat");
+        assert_eq!(pixel(&pixels, 64, 49, 49), [22, 21, 20], "the old corner");
+    }
+
+    #[test]
+    fn ui_draws_over_the_world_it_shares_a_scene_with() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        let card = scene.create("rectangle", None, None).unwrap();
+        scene
+            .set_vec_field(card, VecField::Size, Vec3::new(1.0, 1.0, 1.0))
+            .unwrap();
+        scene
+            .set_vec_field(card, VecField::Color, Vec3::new(1.0, 0.0, 0.0))
+            .unwrap();
+        let button = scene.create_ui("square", None, None).unwrap();
+        scene
+            .set_vec_field(button, VecField::Position, Vec3::new(32.0, 32.0, 0.0))
+            .unwrap();
+        scene
+            .set_vec_field(button, VecField::Size, Vec3::new(16.0, 16.0, 1.0))
+            .unwrap();
+        scene.set_color_hex(button, "#0000ff").unwrap();
+
+        let pixels = renderer.read_pixels(&scene).unwrap();
+        assert_eq!(pixel(&pixels, 64, 32, 32), [0, 0, 255], "overlay on top");
+        assert_eq!(pixel(&pixels, 64, 20, 32), [255, 0, 0], "world behind");
     }
 }

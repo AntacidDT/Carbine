@@ -52,7 +52,7 @@ def test_gravity_is_a_multiplier_with_earth_at_ten():
         assert crate.gravityPull == pytest.approx(1.6, abs=1e-6)
 
         crate.gravityPull = -1.0
-        assert crate.gravityPull == 0.0
+        assert crate.gravityPull == -1.0
     finally:
         crate.destroy()
 

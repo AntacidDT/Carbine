@@ -5,6 +5,7 @@ mod mesh;
 mod motion;
 mod node;
 mod primitives;
+mod ui;
 
 pub use camera::Camera;
 pub use draw::DrawItem;
@@ -13,3 +14,4 @@ pub use mesh::{MeshData, MeshHandle};
 pub use motion::EARTH_GRAVITY_PULL;
 pub use node::{Axis, DEFAULT_COLOR, NodeId, Scene, SceneError, Transform, VecField};
 pub use primitives::KINDS as PRIMITIVE_KINDS;
+pub use ui::UiItem;

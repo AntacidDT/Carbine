@@ -161,9 +161,65 @@ impl Object {
         vec3_of(self.id, VecField::Color)
     }
 
+    /// Accepts a `Vec3`, a three tuple, or a hex string such as `"#eb7a34"`. A
+    /// trailing alpha in the hex, like `"#eb7a3480"`, only means anything on a UI
+    /// element.
     #[setter]
     fn set_color(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
+        if let Ok(hex) = value.extract::<String>() {
+            return with_scene(|scene| scene.set_color_hex(self.id, &hex));
+        }
         set_vec3(self.id, VecField::Color, &value)
+    }
+
+    /// The colour as `#rrggbb`, the way a design tool writes it.
+    #[getter(colorHex)]
+    fn color_hex(&self) -> PyResult<String> {
+        with_scene(|scene| scene.color_hex(self.id))
+    }
+
+    /// Corner radius in pixels. UI elements only.
+    #[getter(cornerRadius)]
+    fn corner_radius(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.corner_radius(self.id))
+    }
+
+    #[setter(cornerRadius)]
+    fn set_corner_radius(&self, radius: f32) -> PyResult<()> {
+        with_scene(|scene| scene.set_corner_radius(self.id, radius))
+    }
+
+    /// Polygon sides: 4 fills the box, 3 is a triangle, 64 reads as a circle.
+    #[getter]
+    fn polygon(&self) -> PyResult<u32> {
+        with_scene(|scene| scene.polygon_sides(self.id))
+    }
+
+    #[setter]
+    fn set_polygon(&self, sides: u32) -> PyResult<()> {
+        with_scene(|scene| scene.set_polygon_sides(self.id, sides))
+    }
+
+    /// Outline thickness in pixels; 0 leaves the element filled solid.
+    #[getter]
+    fn outline(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.outline(self.id))
+    }
+
+    #[setter]
+    fn set_outline(&self, thickness: f32) -> PyResult<()> {
+        with_scene(|scene| scene.set_outline(self.id, thickness))
+    }
+
+    /// Opacity from 0 (invisible) to 255 (opaque).
+    #[getter]
+    fn transparent(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.alpha(self.id))
+    }
+
+    #[setter]
+    fn set_transparent(&self, alpha: f32) -> PyResult<()> {
+        with_scene(|scene| scene.set_alpha(self.id, alpha))
     }
 
     #[getter]

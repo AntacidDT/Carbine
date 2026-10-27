@@ -9,7 +9,7 @@ def test_version():
 
 
 def test_kinds_are_advertised():
-    assert carbine.kinds() == ["rectangle", "square"]
+    assert carbine.kinds() == ["rectangle", "square", "triangle", "hexagon", "circle"]
 
 
 def test_new_rectangle_defaults():
@@ -112,8 +112,8 @@ def test_root_cannot_be_destroyed():
 
 
 def test_unknown_kind():
-    with pytest.raises(ValueError, match="rectangle"):
-        carbine.new("triangle")
+    with pytest.raises(ValueError, match="dodecahedron"):
+        carbine.new("dodecahedron")
 
 
 def test_node_count_and_identity():

@@ -49,9 +49,10 @@ impl Scene {
         Ok(self.component::<Motion>(id)?.gravity_pull)
     }
 
-    /// How hard gravity pulls this node, in metres per second squared.
+    /// How hard gravity pulls this node. 10 is Earth, 0 lets it hang, and a
+    /// negative value pulls the other way — up instead of down.
     pub fn set_gravity_pull(&mut self, id: NodeId, pull: f32) -> Result<(), SceneError> {
-        self.component_mut::<Motion>(id)?.gravity_pull = pull.max(0.0);
+        self.component_mut::<Motion>(id)?.gravity_pull = pull;
         Ok(())
     }
 
@@ -93,15 +94,21 @@ mod tests {
     }
 
     #[test]
-    fn gravity_pull_is_negative_free_and_never_below_zero() {
+    fn gravity_pull_is_stripped_of_clamping_in_both_directions() {
         let mut scene = Scene::new();
         let id = scene.create("rectangle", None, None).unwrap();
 
         scene.set_gravity_pull(id, 1.6).unwrap();
         assert_eq!(scene.gravity_pull(id).unwrap(), 1.6);
 
-        scene.set_gravity_pull(id, -5.0).unwrap();
+        scene.set_gravity_pull(id, 0.0).unwrap();
         assert_eq!(scene.gravity_pull(id).unwrap(), 0.0);
+
+        scene.set_gravity_pull(id, -5.0).unwrap();
+        assert_eq!(scene.gravity_pull(id).unwrap(), -5.0);
+
+        scene.set_gravity_pull(id, 250.0).unwrap();
+        assert_eq!(scene.gravity_pull(id).unwrap(), 250.0);
     }
 
     #[test]

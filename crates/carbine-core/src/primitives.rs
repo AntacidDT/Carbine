@@ -2,11 +2,14 @@ use glam::{Vec2, Vec3};
 
 use crate::mesh::MeshData;
 
-pub const KINDS: &[&str] = &["rectangle", "square"];
+/// The 2D shapes a node can be created from. Every one of them is the same
+/// quad: the UI pass decides how it is filled, so `polygon` and `cornerRadius`
+/// can turn a square into a circle without a second mesh.
+pub const KINDS: &[&str] = &["rectangle", "square", "triangle", "hexagon", "circle"];
 
 pub fn build(kind: &str) -> Option<MeshData> {
     match kind {
-        "rectangle" | "square" => Some(quad()),
+        "rectangle" | "square" | "triangle" | "hexagon" | "circle" => Some(quad()),
         _ => None,
     }
 }

@@ -2,6 +2,7 @@ use glam::{Mat4, Vec3};
 
 use crate::mesh::{MeshData, MeshHandle};
 use crate::node::{Children, NodeId, NodeMesh, ObjectColor, Scene, Transform};
+use crate::ui::Ui;
 
 /// One drawable object with its hierarchy-resolved transform in meters.
 pub struct DrawItem<'a> {
@@ -28,7 +29,11 @@ impl Scene {
             };
             let model = inherited * local_matrix(transform);
 
-            if let Some(mesh) = self.world.get::<NodeMesh>(entity) {
+            if let Some(mesh) = self.world.get::<NodeMesh>(entity)
+                // UI is measured in pixels and belongs to the overlay pass, not
+                // to the world.
+                && self.world.get::<Ui>(entity).is_none()
+            {
                 let color = self
                     .world
                     .get::<ObjectColor>(entity)
@@ -52,7 +57,7 @@ impl Scene {
     }
 }
 
-fn local_matrix(transform: Transform) -> Mat4 {
+pub(crate) fn local_matrix(transform: Transform) -> Mat4 {
     Mat4::from_translation(transform.position)
         * Mat4::from_quat(transform.rotation)
         * Mat4::from_scale(transform.scale)
