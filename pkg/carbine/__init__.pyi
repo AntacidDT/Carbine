@@ -50,6 +50,10 @@ class Mesh:
     def bounds(self) -> tuple[Vec3, Vec3] | None: ...
 
 class Object:
+    """A body in the world. Reads give the values back as `Vec3`; every vector
+    write below also takes an `(x, y, z)` tuple, in which `...` or None keeps the
+    axis as it already is. The world is z-up: `size` is (length, width, height)."""
+
     id: int
     name: str
     kind: str
@@ -59,13 +63,16 @@ class Object:
     position: Vec3
     size: Vec3
     scale: Vec3
+    # Read as a Quat, written as a Quat or as euler degrees (x, y, z).
     rotation: Quat
     rotationEuler: Vec3
     color: Vec3 | str
     @property
     def colorHex(self) -> str: ...
+    # The image painted over the object's colour, as a path. None paints it flat.
+    texture: str | None
     # UI overlay knobs; a world object raises on them. Sizes are pixels.
-    cornerRadius: float
+    corner: float
     polygon: int
     outline: float
     transparent: float
@@ -86,6 +93,7 @@ class Entity:
     rotation: Quat
     rotationEuler: Vec3
     color: Vec3
+    texture: str | None
     anchored: bool
     gravity: bool
     gravityPull: float
@@ -93,8 +101,31 @@ class Entity:
     def destroy(self) -> None: ...
 
 class Camera:
+    """Meters, z-up. `position` floats above the world and `target` is the point
+    the lens aims at, which is what gives the frame its depth."""
+
     position: Vec3
+    target: Vec3
+    # "perspective" (the default) or "orthographic".
+    mode: str
+    fov: float
+    near: float
+    far: float
+    # Orthographic only: the vertical size of the visible world in meters.
     viewHeight: float
+    def lookAt(self, target: Vec3 | tuple[float, float, float]) -> None: ...
+
+class Sky:
+    """The backdrop behind the world and the one light every object is shaded by.
+    Colours read back as `Vec3` and are written as a `Vec3`, a tuple, or hex."""
+
+    enabled: bool
+    zenith: Vec3 | str
+    horizon: Vec3 | str
+    noise: float
+    sun: Vec3
+    ambient: float
+    def colors(self, zenith: str, horizon: str) -> None: ...
 
 class Scene:
     @property
@@ -151,4 +182,5 @@ def spawnEntity(
 
 def killEntity(entity: Entity) -> None: ...
 def camera() -> Camera: ...
+def sky() -> Sky: ...
 def kinds() -> list[str]: ...

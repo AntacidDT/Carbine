@@ -20,7 +20,7 @@ def main() -> None:
     panel.position = (width * 0.5, height * 0.5, 0)
     panel.size = (440, 300, 1)
     panel.color = "#221e1b"
-    panel.cornerRadius = 24
+    panel.corner = 24
 
     button = carbine.ui.new("square", name="Button", parent=panel)
     button.position = (-120, 0, 0)
@@ -44,14 +44,14 @@ def main() -> None:
     triangle.position = (84, height - 84, 0)
     triangle.size = (96, 96, 1)
     triangle.color = "#ffffff"
-    triangle.cornerRadius = 14
+    triangle.corner = 14
 
     frame = 0
     try:
         while carbine.running():
-            # A corner radius that walks from soft to fully round and back.
+            # A corner that walks from soft to fully round and back.
             pulse = abs(1.0 - 2.0 * ((frame % 150) / 150.0))
-            button.cornerRadius = 16.0 + 58.0 * pulse
+            button.corner = 16.0 + 58.0 * pulse
             triangle.rotationEuler = (0.0, 0.0, (triangle.rotationEuler.z + 0.8) % 360.0)
             carbine.render()
             frame += 1

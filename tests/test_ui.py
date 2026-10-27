@@ -15,18 +15,6 @@ def pixel(data, x, y):
     return tuple(data[offset : offset + 3])
 
 
-@pytest.fixture
-def headless():
-    try:
-        carbine.init(WIDTH, HEIGHT, window=False)
-    except RuntimeError as error:
-        pytest.skip(f"no GPU renderer available: {error}")
-    try:
-        yield
-    finally:
-        carbine.close()
-
-
 def button(**kwargs):
     element = carbine.ui.new("square", **kwargs)
     element.position = (32, 32, 0)
@@ -35,12 +23,12 @@ def button(**kwargs):
     return element
 
 
-def test_a_ui_element_is_measured_in_pixels(headless):
+def test_a_ui_element_is_measured_in_pixels(flat):
     element = button(name="Button")
     try:
         assert element.name == "Button"
         assert element.polygon == 4
-        assert element.cornerRadius == 0
+        assert element.corner == 0
         assert element.outline == 0
         assert element.transparent == 255
         assert element.colorHex == "#eb7a34"
@@ -53,11 +41,11 @@ def test_a_ui_element_is_measured_in_pixels(headless):
         element.destroy()
 
 
-def test_corners_round_off_as_the_radius_grows(headless):
+def test_corners_round_off_as_the_radius_grows(flat):
     element = button()
     try:
-        element.cornerRadius = 49
-        assert element.cornerRadius == 49
+        element.corner = 49
+        assert element.corner == 49
 
         pixels = carbine.readPixels()
         assert pixel(pixels, 14, 14) == CLEAR, "the corner is cut away"
@@ -67,7 +55,7 @@ def test_corners_round_off_as_the_radius_grows(headless):
         element.destroy()
 
 
-def test_an_outline_strokes_the_edge(headless):
+def test_an_outline_strokes_the_edge(flat):
     element = button()
     try:
         element.outline = 4
@@ -81,7 +69,7 @@ def test_an_outline_strokes_the_edge(headless):
         element.destroy()
 
 
-def test_transparency_blends_the_element_into_the_frame(headless):
+def test_transparency_blends_the_element_into_the_frame(flat):
     element = button()
     try:
         element.transparent = 128
@@ -98,7 +86,7 @@ def test_transparency_blends_the_element_into_the_frame(headless):
         element.destroy()
 
 
-def test_the_polygon_count_trades_the_box_for_another_shape(headless):
+def test_the_polygon_count_trades_the_box_for_another_shape(flat):
     triangle = carbine.ui.new("triangle")
     # The chip is parked in a corner so that only the shape under test paints a pixel.
     chip = carbine.ui.new("square", name="Chip")
@@ -125,7 +113,7 @@ def test_the_polygon_count_trades_the_box_for_another_shape(headless):
         triangle.destroy()
 
 
-def test_a_polygon_must_be_a_whole_number_of_sides(headless):
+def test_a_polygon_must_be_a_whole_number_of_sides(flat):
     element = button()
     try:
         with pytest.raises(TypeError):
@@ -138,7 +126,7 @@ def test_a_polygon_must_be_a_whole_number_of_sides(headless):
         element.destroy()
 
 
-def test_colour_accepts_hex_and_rejects_other_text(headless):
+def test_colour_accepts_hex_and_rejects_other_text(flat):
     element = button()
     try:
         element.color = "#0000ff"
@@ -154,19 +142,32 @@ def test_colour_accepts_hex_and_rejects_other_text(headless):
         element.destroy()
 
 
-def test_world_objects_have_no_ui_to_configure(headless):
+def test_world_objects_have_no_ui_to_configure(flat):
     card = carbine.new("rectangle")
     try:
         assert card.kind == "rectangle"
         with pytest.raises(ValueError, match="not a UI element"):
-            card.cornerRadius = 8
+            card.corner = 8
         with pytest.raises(ValueError, match="not a UI element"):
-            card.transparent = 100
+            card.outline = 2
+        with pytest.raises(ValueError, match="not a UI element"):
+            card.polygon = 3
+
+        # Transparency is the one overlay knob a world object does share.
+        card.transparent = 100
+        assert card.transparent == 100
     finally:
         card.destroy()
 
 
-def test_ui_draws_over_the_world(headless):
+def test_the_two_layers_only_take_their_own_shapes(flat):
+    with pytest.raises(ValueError, match="triangle"):
+        carbine.new("triangle")
+    with pytest.raises(ValueError, match="cube"):
+        carbine.ui.new("cube")
+
+
+def test_ui_draws_over_the_world(flat):
     card = carbine.new("rectangle")
     element = carbine.ui.new("square")
     try:
@@ -184,7 +185,7 @@ def test_ui_draws_over_the_world(headless):
         card.destroy()
 
 
-def test_an_element_hangs_off_its_panel(headless):
+def test_an_element_hangs_off_its_panel(flat):
     panel = carbine.ui.new("rectangle", name="Panel")
     try:
         panel.position = (16, 16, 0)

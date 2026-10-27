@@ -4,6 +4,7 @@ mod math;
 mod mesh;
 mod object;
 mod scene;
+mod sky;
 mod ui;
 
 use std::cell::RefCell;
@@ -21,6 +22,7 @@ use crate::entity::Entity;
 use crate::math::extract_vec3;
 use crate::object::Object;
 use crate::scene::PyScene;
+use crate::sky::PySky;
 use crate::ui::PyUi;
 
 create_exception!(carbine, DestroyedError, PyRuntimeError);
@@ -184,6 +186,13 @@ fn get_camera() -> PyCamera {
     PyCamera::new()
 }
 
+/// The backdrop and the light: `carbine.sky().zenith = "#2f6cb3"`.
+#[pyfunction]
+#[pyo3(name = "sky")]
+fn get_sky() -> PySky {
+    PySky::new()
+}
+
 #[pyfunction]
 fn get_scene() -> PyScene {
     PyScene::new()
@@ -208,6 +217,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyScene>()?;
     module.add_class::<PyUi>()?;
     module.add_class::<PyCamera>()?;
+    module.add_class::<PySky>()?;
     module.add_class::<math::PyVec3>()?;
     module.add_class::<math::Vec3Iterator>()?;
     module.add_class::<math::PyQuat>()?;
@@ -222,6 +232,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(spawn_entity, module)?)?;
     module.add_function(wrap_pyfunction!(kill_entity, module)?)?;
     module.add_function(wrap_pyfunction!(get_camera, module)?)?;
+    module.add_function(wrap_pyfunction!(get_sky, module)?)?;
     module.add_function(wrap_pyfunction!(get_scene, module)?)?;
     module.add_function(wrap_pyfunction!(get_ui, module)?)?;
     module.add_function(wrap_pyfunction!(kinds, module)?)?;

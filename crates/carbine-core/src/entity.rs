@@ -4,8 +4,8 @@ use glam::Vec3;
 use crate::mesh::MeshData;
 use crate::motion::Motion;
 use crate::node::{
-    Children, DEFAULT_COLOR, NodeId, NodeKind, NodeMesh, NodeName, ObjectColor, Parent, Scene,
-    SceneError, Transform,
+    Children, DEFAULT_COLOR, NodeId, NodeKind, NodeMesh, NodeName, NodeTexture, ObjectColor,
+    Opacity, Parent, Scene, SceneError, Transform,
 };
 use crate::primitives;
 
@@ -50,6 +50,8 @@ impl Scene {
             NodeKind(label),
             Transform::default(),
             ObjectColor(DEFAULT_COLOR),
+            Opacity::default(),
+            NodeTexture::default(),
             EntityData { health, damage },
             Motion::default(),
             Parent(parent_id),
@@ -137,6 +139,25 @@ mod tests {
         assert_eq!(scene.damage(id).unwrap(), 7.0);
         assert_eq!(scene.kind(id).unwrap(), "rectangle");
         assert_eq!(scene.mesh(id).unwrap().vertex_count(), 4);
+    }
+
+    #[test]
+    fn an_entity_carries_the_same_look_state_as_an_object() {
+        let mut scene = Scene::new();
+        let id = scene
+            .spawn_entity(Some("cube"), None, None, None, 40.0, 7.0)
+            .unwrap();
+
+        assert_eq!(scene.alpha(id).unwrap(), crate::MAX_ALPHA);
+        assert_eq!(scene.texture(id).unwrap(), None);
+
+        scene
+            .set_texture(id, Some("assets/moss.png".to_owned()))
+            .unwrap();
+        assert_eq!(
+            scene.texture(id).unwrap().as_deref(),
+            Some("assets/moss.png")
+        );
     }
 
     #[test]

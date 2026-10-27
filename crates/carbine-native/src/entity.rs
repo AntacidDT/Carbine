@@ -3,7 +3,10 @@ use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
 use crate::math::{PyQuat, PyVec3};
-use crate::object::{Object, handle_id, kind_of, name_of, set_name_on, set_vec3, vec3_of};
+use crate::object::{
+    Object, handle_id, kind_of, name_of, set_name_on, set_rotation, set_texture_on, set_vec3,
+    texture_of, vec3_of,
+};
 use crate::with_scene;
 
 /// An actor in the world: it has hit points, it can be killed, and in
@@ -109,6 +112,17 @@ impl Entity {
         set_vec3(self.id, VecField::Color, &value)
     }
 
+    /// The image painted over the entity's body, as a path.
+    #[getter]
+    fn texture(&self) -> PyResult<Option<String>> {
+        texture_of(self.id)
+    }
+
+    #[setter]
+    fn set_texture(&self, value: Option<String>) -> PyResult<()> {
+        set_texture_on(self.id, value)
+    }
+
     #[getter]
     fn rotation(&self) -> PyResult<PyQuat> {
         let rotation = with_scene(|scene| scene.rotation(self.id))?;
@@ -116,8 +130,8 @@ impl Entity {
     }
 
     #[setter]
-    fn set_rotation(&self, value: PyRef<'_, PyQuat>) -> PyResult<()> {
-        with_scene(|scene| scene.set_rotation(self.id, value.value()))
+    fn set_rotation(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
+        set_rotation(self.id, &value)
     }
 
     /// Euler angles in degrees.

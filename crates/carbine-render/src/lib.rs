@@ -17,12 +17,11 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use winit::window::{Window, WindowId};
 
-/// What the renderer draws into: a real window or an offscreen image.
+/// What the renderer draws into: a real window or an offscreen image. Both halves
+/// are bulky, so each lives on the heap and the enum itself stays small.
 enum Target {
-    /// An event loop and a device are bulky, and the offscreen case is the one
-    /// every frame pays for, so the windowed half lives on the heap.
     Windowed(Box<Windowed>),
-    Offscreen(Offscreen),
+    Offscreen(Box<Offscreen>),
 }
 
 pub struct Renderer {
@@ -36,6 +35,9 @@ struct Session {
     surface: wgpu::Surface<'static>,
     format: wgpu::TextureFormat,
     size: (u32, u32),
+    /// The world pass needs somewhere to keep depth, and a resize throws the
+    /// buffer it had away.
+    depth: (wgpu::Texture, wgpu::TextureView),
 }
 
 struct Windowed {
@@ -93,11 +95,11 @@ impl Renderer {
     pub fn offscreen(width: u32, height: u32) -> Result<Self, RenderError> {
         let gpu = Gpu::new(create_instance(), None)?;
         Ok(Self {
-            target: Target::Offscreen(Offscreen {
+            target: Target::Offscreen(Box::new(Offscreen {
                 gpu,
                 width: width.max(1),
                 height: height.max(1),
-            }),
+            })),
         })
     }
 
@@ -186,12 +188,14 @@ impl ApplicationHandler for Handler {
             let format = gpu.pick_format(&surface)?;
             let size = window.inner_size();
             gpu.configure_surface(&surface, format, size.width, size.height);
+            let depth = gpu.create_depth(size.width, size.height);
             Ok(Session {
                 window,
                 gpu,
                 surface,
                 format,
                 size: (size.width.max(1), size.height.max(1)),
+                depth,
             })
         })();
 
@@ -219,6 +223,7 @@ impl ApplicationHandler for Handler {
                         size.width,
                         size.height,
                     );
+                    session.depth = session.gpu.create_depth(size.width, size.height);
                     session.size = self.size;
                 }
             }
@@ -247,7 +252,7 @@ impl Windowed {
                     .create_view(&wgpu::TextureViewDescriptor::default());
                 session
                     .gpu
-                    .draw(&view, session.format, session.size, scene)?;
+                    .draw(&view, &session.depth.1, session.format, session.size, scene)?;
                 session.gpu.present(texture);
                 Ok(())
             }
@@ -256,6 +261,7 @@ impl Windowed {
                 session
                     .gpu
                     .configure_surface(&session.surface, session.format, width, height);
+                session.depth = session.gpu.create_depth(width, height);
                 Ok(())
             }
             wgpu::CurrentSurfaceTexture::Timeout
@@ -292,15 +298,28 @@ impl Windowed {
 impl Offscreen {
     fn render(&mut self, scene: &Scene) -> Result<(), RenderError> {
         let (_texture, view) = self.gpu.create_target(self.width, self.height);
+        let (_depth, depth) = self.gpu.create_depth(self.width, self.height);
         self.gpu
-            .draw(&view, self.format(), (self.width, self.height), scene)
+            .draw(
+                &view,
+                &depth,
+                self.format(),
+                (self.width, self.height),
+                scene,
+            )
             .map(|_| ())
     }
 
     fn read_pixels(&mut self, scene: &Scene) -> Result<Vec<u8>, RenderError> {
         let (texture, view) = self.gpu.create_target(self.width, self.height);
-        self.gpu
-            .draw(&view, self.format(), (self.width, self.height), scene)?;
+        let (_depth, depth) = self.gpu.create_depth(self.width, self.height);
+        self.gpu.draw(
+            &view,
+            &depth,
+            self.format(),
+            (self.width, self.height),
+            scene,
+        )?;
         self.gpu.read_pixels(&texture, self.width, self.height)
     }
 
@@ -312,33 +331,54 @@ impl Offscreen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use carbine_core::{Scene, Vec3, VecField};
+    use carbine_core::{CameraMode, NodeId, Scene, Vec3, VecField};
 
     fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 3] {
         let offset = ((y * width + x) * 4) as usize;
         [pixels[offset], pixels[offset + 1], pixels[offset + 2]]
     }
 
+    /// The frame the pixel assertions are written against: a top down
+    /// orthographic camera with no backdrop and the light straight overhead, so
+    /// a floor facing surface keeps exactly the colour it was given.
+    fn flat(scene: &mut Scene) {
+        scene.set_sky_enabled(false);
+        scene.set_sky_sun(Vec3::Z);
+        scene.set_camera_mode(CameraMode::Orthographic);
+        scene.set_camera_position(Vec3::new(0.0, 0.0, 10.0));
+        scene.set_camera_target(Vec3::ZERO);
+        scene.set_camera_view_height(2.0);
+    }
+
+    fn card(scene: &mut Scene, kind: &str, size: Vec3, position: Vec3, color: [f32; 3]) -> NodeId {
+        let card = scene.create(kind, None, None).unwrap();
+        scene.set_vec_field(card, VecField::Size, size).unwrap();
+        scene
+            .set_vec_field(card, VecField::Position, position)
+            .unwrap();
+        scene
+            .set_vec_field(card, VecField::Color, Vec3::from(color))
+            .unwrap();
+        card
+    }
+
     #[test]
     fn an_offscreen_rectangle_rasterizes_in_its_colour() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
         let mut scene = Scene::new();
-        let card = scene.create("rectangle", None, None).unwrap();
-        scene
-            .set_vec_field(card, VecField::Size, Vec3::new(0.5, 0.5, 1.0))
-            .unwrap();
-        scene
-            .set_vec_field(card, VecField::Position, Vec3::new(0.5, 0.0, 0.0))
-            .unwrap();
-        scene
-            .set_vec_field(card, VecField::Color, Vec3::new(1.0, 0.0, 0.0))
-            .unwrap();
+        flat(&mut scene);
+        card(
+            &mut scene,
+            "rectangle",
+            Vec3::new(0.5, 0.5, 1.0),
+            Vec3::new(0.5, 0.0, 0.0),
+            [1.0, 0.0, 0.0],
+        );
 
         let pixels = renderer.read_pixels(&scene).unwrap();
 
-        // The camera shows two metres of height across the viewport, so a
-        // half-metre square at x=0.5 covers the right of centre and nothing
-        // else: the left edge stays the clear colour.
+        // Two metres of world span these 64 pixels, so a half metre card at
+        // x=0.5 covers the right of centre and nothing else.
         assert_eq!(pixel(&pixels, 64, 52, 32), [255, 0, 0]);
         assert_eq!(pixel(&pixels, 64, 4, 32), [22, 21, 20]);
         assert_eq!(renderer.viewport(), (64, 64));
@@ -347,7 +387,8 @@ mod tests {
     #[test]
     fn an_empty_scene_is_only_the_clear_colour() {
         let mut renderer = Renderer::offscreen(32, 32).unwrap();
-        let scene = Scene::new();
+        let mut scene = Scene::new();
+        scene.set_sky_enabled(false);
 
         let pixels = renderer.read_pixels(&scene).unwrap();
         assert_eq!(pixel(&pixels, 32, 16, 16), [22, 21, 20]);
@@ -358,6 +399,7 @@ mod tests {
     fn child_geometry_moves_with_its_parent() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
         let mut scene = Scene::new();
+        flat(&mut scene);
         let parent = scene.create("rectangle", None, None).unwrap();
         let child = scene.create("rectangle", None, Some(parent)).unwrap();
         scene
@@ -374,6 +416,202 @@ mod tests {
         assert_eq!(pixel(&pixels, 64, 52, 32), [0, 255, 0]);
     }
 
+    /// The nearer card is drawn first, so only a real depth buffer can keep the
+    /// second one from painting over it.
+    #[test]
+    fn depth_keeps_the_nearer_object_in_front() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        flat(&mut scene);
+        card(
+            &mut scene,
+            "cube",
+            Vec3::ONE,
+            Vec3::new(0.0, 0.0, 1.0),
+            [1.0, 0.0, 0.0],
+        );
+        card(
+            &mut scene,
+            "cube",
+            Vec3::ONE,
+            Vec3::new(0.0, 0.0, 0.0),
+            [0.0, 1.0, 0.0],
+        );
+
+        let pixels = renderer.read_pixels(&scene).unwrap();
+        assert_eq!(pixel(&pixels, 64, 32, 32), [255, 0, 0], "near wins");
+    }
+
+    #[test]
+    fn a_cube_is_lit_on_top_and_left_in_ambient_on_its_side() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        scene.set_sky_enabled(false);
+        scene.set_sky_sun(Vec3::Z);
+        scene.set_camera_position(Vec3::new(0.0, -3.0, 3.0));
+        scene.set_camera_target(Vec3::new(0.0, 0.0, 0.5));
+        card(&mut scene, "cube", Vec3::ONE, Vec3::ZERO, [1.0, 0.0, 0.0]);
+
+        let pixels = renderer.read_pixels(&scene).unwrap();
+        let faces: Vec<u8> = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|pixel| pixel[0] > pixel[1] + 20 && pixel[0] > pixel[2] + 20)
+            .map(|pixel| pixel[0])
+            .collect();
+        let brightest = faces.iter().max().copied().unwrap_or_default();
+        let darkest = faces.iter().min().copied().unwrap_or_default();
+
+        // The top face looks straight into the light; the walls do not, and fall
+        // to the scene's ambient level of 30%.
+        assert!(
+            brightest > 250,
+            "the lit face should be full colour: {brightest}"
+        );
+        assert!(
+            (70..=82).contains(&darkest),
+            "a wall away from the sun should sit at ambient: {darkest}"
+        );
+    }
+
+    #[test]
+    fn perspective_makes_a_farther_cube_smaller() {
+        let mut near = Scene::new();
+        near.set_sky_enabled(false);
+        near.set_camera_position(Vec3::new(0.0, -4.0, 0.5));
+        near.set_camera_target(Vec3::ZERO);
+        card(&mut near, "cube", Vec3::ONE, Vec3::ZERO, [1.0, 0.0, 0.0]);
+
+        let mut far = Scene::new();
+        far.set_sky_enabled(false);
+        far.set_camera_position(Vec3::new(0.0, -4.0, 0.5));
+        far.set_camera_target(Vec3::ZERO);
+        card(
+            &mut far,
+            "cube",
+            Vec3::ONE,
+            Vec3::new(0.0, 6.0, 0.0),
+            [1.0, 0.0, 0.0],
+        );
+
+        let mut renderer = Renderer::offscreen(128, 128).unwrap();
+        let mut covered = |scene: &Scene| {
+            renderer
+                .read_pixels(scene)
+                .unwrap()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| pixel[0] > 100)
+                .count()
+        };
+
+        assert!(
+            covered(&near) > covered(&far) * 2,
+            "the same cube should shrink with distance"
+        );
+    }
+
+    #[test]
+    fn a_skin_paints_the_face_that_asked_for_it() {
+        let directory =
+            std::env::temp_dir().join(format!("carbine-skin-test-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("two-rows.png");
+        let image = image::RgbaImage::from_fn(2, 2, |_x, y| {
+            if y == 0 {
+                image::Rgba([255, 0, 0, 255])
+            } else {
+                image::Rgba([0, 0, 255, 255])
+            }
+        });
+        image.save(&path).unwrap();
+
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        flat(&mut scene);
+        let tile = card(
+            &mut scene,
+            "plane",
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::ZERO,
+            [1.0, 1.0, 1.0],
+        );
+        scene
+            .set_texture(tile, Some(path.to_str().unwrap().to_owned()))
+            .unwrap();
+
+        let pixels = renderer.read_pixels(&scene).unwrap();
+        // The top of the picture is the top of the tile on screen.
+        assert_eq!(pixel(&pixels, 64, 32, 20), [255, 0, 0]);
+        assert_eq!(pixel(&pixels, 64, 32, 44), [0, 0, 255]);
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn transparency_blends_a_world_object_over_what_is_behind_it() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        flat(&mut scene);
+        card(
+            &mut scene,
+            "plane",
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::ZERO,
+            [1.0, 0.0, 0.0],
+        );
+        let veil = card(
+            &mut scene,
+            "plane",
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            [0.0, 1.0, 0.0],
+        );
+        scene.set_alpha(veil, 128.0).unwrap();
+
+        let pixels = renderer.read_pixels(&scene).unwrap();
+        let blended = pixel(&pixels, 64, 32, 32);
+        assert!(
+            (122..=132).contains(&blended[0])
+                && (122..=132).contains(&blended[1])
+                && blended[2] < 4,
+            "half green over red should land in between: {blended:?}"
+        );
+    }
+
+    #[test]
+    fn the_sky_graduates_from_horizon_to_zenith() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        scene.set_sky_noise(0.0);
+        scene.set_sky_zenith(Vec3::new(0.0, 0.0, 1.0));
+        scene.set_sky_horizon(Vec3::new(1.0, 1.0, 1.0));
+        scene.set_camera_position(Vec3::new(0.0, -4.0, 0.0));
+        scene.set_camera_target(Vec3::new(0.0, 4.0, 0.0));
+
+        let pixels = renderer.read_pixels(&scene).unwrap();
+        // Looking along the ground: the top of the frame is above the horizon,
+        // the bottom is under it.
+        assert!(
+            pixel(&pixels, 64, 32, 2)[0] < 120,
+            "the top of the frame should lean toward the zenith blue: {:?}",
+            pixel(&pixels, 64, 32, 2)
+        );
+        assert_eq!(pixel(&pixels, 64, 32, 62), [255, 255, 255]);
+    }
+
+    #[test]
+    fn switching_the_sky_off_leaves_the_clear_colour() {
+        let mut renderer = Renderer::offscreen(32, 32).unwrap();
+        let mut scene = Scene::new();
+        scene.set_sky_enabled(false);
+
+        let pixels = renderer.read_pixels(&scene).unwrap();
+        assert_eq!(pixel(&pixels, 32, 16, 16), [22, 21, 20]);
+    }
+
     #[test]
     fn offscreen_rendering_reports_the_adapter_it_found() {
         let renderer = Renderer::offscreen(8, 8).unwrap();
@@ -381,7 +619,8 @@ mod tests {
     }
 
     /// A 40 by 40 pixel element centred on a 64 by 64 target, in Carbine orange.
-    fn button(scene: &mut Scene) -> carbine_core::NodeId {
+    fn button(scene: &mut Scene) -> NodeId {
+        flat(scene);
         let button = scene.create_ui("square", None, None).unwrap();
         scene
             .set_vec_field(button, VecField::Position, Vec3::new(32.0, 32.0, 0.0))
@@ -406,11 +645,11 @@ mod tests {
     }
 
     #[test]
-    fn a_corner_radius_cuts_the_corner_and_keeps_the_middle() {
+    fn a_corner_value_cuts_the_corner_and_keeps_the_middle() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
         let mut scene = Scene::new();
         let button = button(&mut scene);
-        scene.set_corner_radius(button, 20.0).unwrap();
+        scene.set_corner(button, 20.0).unwrap();
 
         let pixels = renderer.read_pixels(&scene).unwrap();
         assert_eq!(pixel(&pixels, 64, 14, 14), [22, 21, 20], "corner");
@@ -477,13 +716,14 @@ mod tests {
     fn ui_draws_over_the_world_it_shares_a_scene_with() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
         let mut scene = Scene::new();
-        let card = scene.create("rectangle", None, None).unwrap();
-        scene
-            .set_vec_field(card, VecField::Size, Vec3::new(1.0, 1.0, 1.0))
-            .unwrap();
-        scene
-            .set_vec_field(card, VecField::Color, Vec3::new(1.0, 0.0, 0.0))
-            .unwrap();
+        flat(&mut scene);
+        card(
+            &mut scene,
+            "rectangle",
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::ZERO,
+            [1.0, 0.0, 0.0],
+        );
         let button = scene.create_ui("square", None, None).unwrap();
         scene
             .set_vec_field(button, VecField::Position, Vec3::new(32.0, 32.0, 0.0))

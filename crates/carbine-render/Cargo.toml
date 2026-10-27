@@ -9,6 +9,7 @@ repository.workspace = true
 bytemuck.workspace = true
 carbine-core = { path = "../carbine-core" }
 glam.workspace = true
+image.workspace = true
 pollster.workspace = true
 wgpu.workspace = true
 winit.workspace = true

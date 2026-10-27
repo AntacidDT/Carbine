@@ -1,38 +1,114 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use carbine_core::{MeshData, MeshHandle, Scene};
+use carbine_core::{DrawItem, MeshData, MeshHandle, Scene, Sky};
+use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-const SHADER: &str = r#"
+/// The world pass: one directional light over an optional skin. A face that
+/// points away from the sun keeps its colour at ambient brightness, which is
+/// what makes a cube read as a solid.
+const WORLD_SHADER: &str = r#"
 struct Uniforms {
     view_proj: mat4x4<f32>,
     model: mat4x4<f32>,
     color: vec4<f32>,
+    sun: vec4<f32>,
+    skinned: f32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var skin_sampler: sampler;
+@group(0) @binding(2) var skin: texture_2d<f32>;
+
+struct Pixel {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+};
 
 @vertex
-fn versus(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return uniforms.view_proj * uniforms.model * vec4<f32>(position, 1.0);
+fn versus(
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+) -> Pixel {
+    var pixel: Pixel;
+    pixel.clip = uniforms.view_proj * uniforms.model * vec4<f32>(position, 1.0);
+    pixel.normal = normalize((uniforms.model * vec4<f32>(normal, 0.0)).xyz);
+    pixel.uv = uv;
+    return pixel;
 }
 
 @fragment
-fn fragment() -> @location(0) vec4<f32> {
-    return uniforms.color;
+fn fragment(pixel: Pixel) -> @location(0) vec4<f32> {
+    // Images are stored top row first and mesh v grows upward, so v is flipped.
+    let skin = textureSample(skin, skin_sampler, vec2<f32>(pixel.uv.x, 1.0 - pixel.uv.y));
+    let base = mix(uniforms.color.rgb, skin.rgb * uniforms.color.rgb, uniforms.skinned);
+    let facing = max(dot(normalize(pixel.normal), uniforms.sun.xyz), 0.0);
+    let lit = uniforms.sun.w + (1.0 - uniforms.sun.w) * facing;
+    return vec4<f32>(base * lit, uniforms.color.a * mix(1.0, skin.a, uniforms.skinned));
 }
 "#;
 
-/// UI is drawn as a signed distance field over a quad, so a corner radius or a
-/// side count costs nothing to change and every edge is antialiased.
+/// The backdrop: one triangle over the whole frame, shaded by unprojecting the
+/// pixel back into a world direction, so the same maths serves both camera
+/// modes.
+const SKY_SHADER: &str = r#"
+struct SkyUniforms {
+    inverse_view_proj: mat4x4<f32>,
+    zenith: vec4<f32>,
+    horizon: vec4<f32>,
+    viewport: vec2<f32>,
+    noise: f32,
+    _pad: f32,
+};
+
+@group(0) @binding(0) var<uniform> uniforms: SkyUniforms;
+
+@vertex
+fn versus(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    // (-1, -1), (3, -1), (-1, 3) covers the frame with a single triangle.
+    let x = f32(index & 1u) * 4.0 - 1.0;
+    let y = f32((index >> 1u) & 1u) * 4.0 - 1.0;
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+fn grain(point: vec2<f32>) -> f32 {
+    let swept = sin(point.x * 12.9898 + point.y * 78.233) * 43758.5453;
+    return fract(swept) - 0.5;
+}
+
+@fragment
+fn fragment(@builtin(position) window: vec4<f32>) -> @location(0) vec4<f32> {
+    let ndc = vec2<f32>(
+        window.x / uniforms.viewport.x * 2.0 - 1.0,
+        1.0 - window.y / uniforms.viewport.y * 2.0,
+    );
+    let near = uniforms.inverse_view_proj * vec4<f32>(ndc, 0.0, 1.0);
+    let far = uniforms.inverse_view_proj * vec4<f32>(ndc, 1.0, 1.0);
+    let direction = normalize((far.xyz / far.w) - (near.xyz / near.w));
+
+    // The world is z-up, so the dome opens along +z and anything at or below the
+    // horizon keeps the horizon colour.
+    let height = clamp(direction.z, 0.0, 1.0);
+    let tint = mix(uniforms.horizon.rgb, uniforms.zenith.rgb, pow(height, 0.45));
+    let dust = grain(window.xy) * uniforms.noise;
+    return vec4<f32>(clamp(tint + vec3<f32>(dust), vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+"#;
+
+/// UI is drawn as a signed distance field over a quad, so a corner value or a
+/// side count costs nothing to change and every edge is antialiased. It is
+/// measured in pixels and never tested against the world's depth, which is why
+/// a widget is always on top.
 const UI_SHADER: &str = r#"
 struct Uniforms {
     view_proj: mat4x4<f32>,
     model: mat4x4<f32>,
     color: vec4<f32>,
     size: vec2<f32>,
-    corner_radius: f32,
+    corner: f32,
     sides: f32,
     outline: f32,
 };
@@ -82,7 +158,7 @@ fn sd_polygon(p: vec2<f32>, inradius: f32, sides: f32) -> f32 {
 @fragment
 fn fragment(pixel: Pixel) -> @location(0) vec4<f32> {
     let half = max(uniforms.size * 0.5, vec2<f32>(0.0));
-    let radius = max(uniforms.corner_radius, 0.0);
+    let radius = max(uniforms.corner, 0.0);
     let sides = max(uniforms.sides, 3.0);
 
     var distance: f32;
@@ -110,9 +186,16 @@ const CLEAR: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
-const UNIFORM_BYTES: usize = std::mem::size_of::<Uniforms>();
-const UI_UNIFORM_BYTES: usize = std::mem::size_of::<UiUniforms>();
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const COPY_ROW_ALIGNMENT: u32 = 256;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Vertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -120,6 +203,20 @@ struct Uniforms {
     view_proj: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
     color: [f32; 4],
+    sun: [f32; 4],
+    skinned: f32,
+    _pad: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SkyUniforms {
+    inverse_view_proj: [[f32; 4]; 4],
+    zenith: [f32; 4],
+    horizon: [f32; 4],
+    viewport: [f32; 2],
+    noise: f32,
+    _pad: f32,
 }
 
 #[repr(C)]
@@ -129,11 +226,67 @@ struct UiUniforms {
     model: [[f32; 4]; 4],
     color: [f32; 4],
     size: [f32; 2],
-    corner_radius: f32,
+    corner: f32,
     sides: f32,
     outline: f32,
     _pad: [f32; 3],
 }
+
+/// How a pipeline draws: which shader, whether it is tested against depth, and
+/// whether it binds a skin.
+struct Spec {
+    label: &'static str,
+    source: &'static str,
+    uniform_bytes: usize,
+    /// A pipeline with no vertex buffer at all, used by the backdrop.
+    fullscreen: bool,
+    skinned: bool,
+    /// Whether the pass it draws into carries a depth attachment.
+    depth: bool,
+    depth_write: bool,
+}
+
+const WORLD: Spec = Spec {
+    label: "carbine world",
+    source: WORLD_SHADER,
+    uniform_bytes: std::mem::size_of::<Uniforms>(),
+    fullscreen: false,
+    skinned: true,
+    depth: true,
+    depth_write: true,
+};
+
+/// Translucent objects blend over what is already in the frame, so they must not
+/// claim the depth they land on.
+const GLASS: Spec = Spec {
+    label: "carbine glass",
+    source: WORLD_SHADER,
+    uniform_bytes: std::mem::size_of::<Uniforms>(),
+    fullscreen: false,
+    skinned: true,
+    depth: true,
+    depth_write: false,
+};
+
+const SKY: Spec = Spec {
+    label: "carbine sky",
+    source: SKY_SHADER,
+    uniform_bytes: std::mem::size_of::<SkyUniforms>(),
+    fullscreen: true,
+    skinned: false,
+    depth: true,
+    depth_write: false,
+};
+
+const UI: Spec = Spec {
+    label: "carbine ui",
+    source: UI_SHADER,
+    uniform_bytes: std::mem::size_of::<UiUniforms>(),
+    fullscreen: false,
+    skinned: false,
+    depth: false,
+    depth_write: false,
+};
 
 #[derive(Debug, Clone)]
 pub enum RenderError {
@@ -170,19 +323,6 @@ pub fn create_instance() -> wgpu::Instance {
     })
 }
 
-/// A GPU device plus the caches that keep a frame cheap: one vertex and index
-/// buffer per mesh, one pipeline per surface format.
-pub struct Gpu {
-    pub instance: wgpu::Instance,
-    pub adapter: wgpu::Adapter,
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub adapter_name: String,
-    meshes: HashMap<MeshHandle, GpuMesh>,
-    pipelines: HashMap<wgpu::TextureFormat, Pipeline>,
-    ui_pipelines: HashMap<wgpu::TextureFormat, Pipeline>,
-}
-
 struct GpuMesh {
     vertex: wgpu::Buffer,
     index: wgpu::Buffer,
@@ -193,14 +333,32 @@ struct Pipeline {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     uniform_bytes: u64,
-    /// One uniform buffer and bind group per draw. Reusing a single buffer for a
-    /// whole frame would make every object read the last upload instead of its own.
-    slots: Vec<Slot>,
+    /// One uniform buffer per draw slot, grown as the scene needs more. Reusing a
+    /// single buffer for a whole frame would make every object read the last
+    /// upload instead of its own.
+    uniforms: Vec<wgpu::Buffer>,
+    skinned: bool,
 }
 
-struct Slot {
-    uniforms: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+/// A GPU device plus the caches that keep a frame cheap: one vertex and index
+/// buffer per mesh, one texture per image path, one pipeline per surface format.
+pub struct Gpu {
+    pub instance: wgpu::Instance,
+    pub adapter: wgpu::Adapter,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub adapter_name: String,
+    sampler: wgpu::Sampler,
+    meshes: HashMap<MeshHandle, GpuMesh>,
+    /// `None` records a path that could not be decoded, so a missing file is
+    /// opened once rather than once per frame.
+    skins: HashMap<String, Option<wgpu::TextureView>>,
+    /// The white pixel every untextured object is skinned with.
+    plain: wgpu::TextureView,
+    world: HashMap<wgpu::TextureFormat, Pipeline>,
+    glass: HashMap<wgpu::TextureFormat, Pipeline>,
+    sky: HashMap<wgpu::TextureFormat, Pipeline>,
+    ui: HashMap<wgpu::TextureFormat, Pipeline>,
 }
 
 impl Gpu {
@@ -224,15 +382,30 @@ impl Gpu {
         }))
         .map_err(|error| RenderError::Device(error.to_string()))?;
 
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("carbine skin sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let plain = upload_rgba(&device, &queue, "carbine plain skin", 1, 1, &[255; 4]);
+
         Ok(Self {
             instance,
             adapter,
             device,
             queue,
             adapter_name: name,
+            sampler,
             meshes: HashMap::new(),
-            pipelines: HashMap::new(),
-            ui_pipelines: HashMap::new(),
+            skins: HashMap::new(),
+            plain,
+            world: HashMap::new(),
+            glass: HashMap::new(),
+            sky: HashMap::new(),
+            ui: HashMap::new(),
         })
     }
 
@@ -240,7 +413,7 @@ impl Gpu {
         &self.adapter_name
     }
 
-    /// A surface format that passes our unlit sRGB colours straight through.
+    /// A surface format that passes our sRGB colours straight through.
     pub fn pick_format(
         &self,
         surface: &wgpu::Surface<'_>,
@@ -296,29 +469,95 @@ impl Gpu {
         (texture, view)
     }
 
+    /// The depth buffer that lets the world pass decide what is in front. The UI
+    /// overlay never reads or writes it, which is why widgets stay on top.
+    pub fn create_depth(&self, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("carbine depth"),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    }
+
     /// Records the scene and submits it, returning the submission index so the
     /// caller can present the texture it rendered into. `extent` is the target in
     /// pixels: the world is measured against its aspect ratio, UI against its size.
     pub fn draw(
         &mut self,
         view: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
         format: wgpu::TextureFormat,
         extent: (u32, u32),
         scene: &Scene,
     ) -> Result<wgpu::SubmissionIndex, RenderError> {
-        let items = scene.draw_items();
-        let ui_items = scene.ui_items();
+        let camera = scene.camera();
+        let sky = scene.sky();
         let aspect = extent.0 as f32 / extent.1.max(1) as f32;
-        let view_proj = scene.camera().view_projection(aspect);
-        let pipeline = ensure_pipeline(
-            &mut self.pipelines,
-            &self.device,
-            format,
-            items.len(),
-            SHADER,
-            UNIFORM_BYTES,
-            "carbine unlit",
-        );
+        let view_proj = camera.view_projection(aspect);
+
+        // Solid objects first, then the translucent ones back to front, so each
+        // blends over what the camera sees behind it.
+        let mut opaque: Vec<DrawItem<'_>> = Vec::new();
+        let mut glass: Vec<(f32, DrawItem<'_>)> = Vec::new();
+        for item in scene.draw_items() {
+            if item.alpha >= 1.0 {
+                opaque.push(item);
+            } else {
+                glass.push((
+                    (item.model.transform_point3(Vec3::ZERO) - camera.position).length(),
+                    item,
+                ));
+            }
+        }
+        glass.sort_by(|(this, _), (other, _)| other.total_cmp(this));
+
+        let skins: Vec<wgpu::TextureView> = opaque
+            .iter()
+            .map(|item| self.skin_for(item.texture))
+            .collect();
+        let glass_skins: Vec<wgpu::TextureView> = glass
+            .iter()
+            .map(|(_, item)| self.skin_for(item.texture))
+            .collect();
+        let ui_items = scene.ui_items();
+
+        let world = ensure_pipeline(&mut self.world, &self.device, format, &WORLD, opaque.len());
+        let glass_pipeline =
+            ensure_pipeline(&mut self.glass, &self.device, format, &GLASS, glass.len());
+        let sky_pipeline = if sky.enabled {
+            Some(ensure_pipeline(
+                &mut self.sky,
+                &self.device,
+                format,
+                &SKY,
+                1,
+            ))
+        } else {
+            None
+        };
+        let ui_pipeline = if ui_items.is_empty() {
+            None
+        } else {
+            Some(ensure_pipeline(
+                &mut self.ui,
+                &self.device,
+                format,
+                &UI,
+                ui_items.len(),
+            ))
+        };
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -337,41 +576,82 @@ impl Gpu {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&pipeline.pipeline);
 
-            for (index, item) in items.iter().enumerate() {
-                let mesh = ensure_mesh(&mut self.meshes, &self.device, item.handle, item.mesh);
-                let slot = &pipeline.slots[index];
-                let uniforms = Uniforms {
-                    view_proj: view_proj.to_cols_array_2d(),
-                    model: item.model.to_cols_array_2d(),
-                    color: [item.color[0], item.color[1], item.color[2], 1.0],
-                };
+            if let Some(pipeline) = sky_pipeline {
+                let uniforms = sky_uniforms(&view_proj, &sky, extent);
                 self.queue
-                    .write_buffer(&slot.uniforms, 0, bytemuck::bytes_of(&uniforms));
-                pass.set_bind_group(0, &slot.bind_group, &[]);
+                    .write_buffer(&pipeline.uniforms[0], 0, bytemuck::bytes_of(&uniforms));
+                let bind = bind_group(
+                    &self.device,
+                    &pipeline.layout,
+                    &pipeline.uniforms[0],
+                    &self.sampler,
+                    &self.plain,
+                    pipeline.skinned,
+                );
+                pass.set_pipeline(&pipeline.pipeline);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
+
+            for (index, item) in opaque.iter().enumerate() {
+                let mesh = ensure_mesh(&mut self.meshes, &self.device, item.handle, item.mesh);
+                let uniforms = world_uniforms(&view_proj, item, &sky);
+                self.queue
+                    .write_buffer(&world.uniforms[index], 0, bytemuck::bytes_of(&uniforms));
+                let bind = bind_group(
+                    &self.device,
+                    &world.layout,
+                    &world.uniforms[index],
+                    &self.sampler,
+                    &skins[index],
+                    world.skinned,
+                );
+                pass.set_pipeline(&world.pipeline);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.set_vertex_buffer(0, mesh.vertex.slice(..));
+                pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+
+            for (index, (_, item)) in glass.iter().enumerate() {
+                let mesh = ensure_mesh(&mut self.meshes, &self.device, item.handle, item.mesh);
+                let uniforms = world_uniforms(&view_proj, item, &sky);
+                self.queue.write_buffer(
+                    &glass_pipeline.uniforms[index],
+                    0,
+                    bytemuck::bytes_of(&uniforms),
+                );
+                let bind = bind_group(
+                    &self.device,
+                    &glass_pipeline.layout,
+                    &glass_pipeline.uniforms[index],
+                    &self.sampler,
+                    &glass_skins[index],
+                    glass_pipeline.skinned,
+                );
+                pass.set_pipeline(&glass_pipeline.pipeline);
+                pass.set_bind_group(0, &bind, &[]);
                 pass.set_vertex_buffer(0, mesh.vertex.slice(..));
                 pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
         }
 
-        if !ui_items.is_empty() {
+        if let Some(pipeline) = ui_pipeline {
             let ui_proj = scene.ui_projection(extent.0, extent.1);
-            let ui_pipeline = ensure_pipeline(
-                &mut self.ui_pipelines,
-                &self.device,
-                format,
-                ui_items.len(),
-                UI_SHADER,
-                UI_UNIFORM_BYTES,
-                "carbine ui",
-            );
 
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -390,24 +670,34 @@ impl Gpu {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(&ui_pipeline.pipeline);
+                pass.set_pipeline(&pipeline.pipeline);
 
                 for (index, item) in ui_items.iter().enumerate() {
                     let mesh = ensure_mesh(&mut self.meshes, &self.device, item.handle, item.mesh);
-                    let slot = &ui_pipeline.slots[index];
                     let uniforms = UiUniforms {
                         view_proj: ui_proj.to_cols_array_2d(),
                         model: item.model.to_cols_array_2d(),
                         color: item.color,
                         size: item.size,
-                        corner_radius: item.corner_radius,
+                        corner: item.corner,
                         sides: item.sides,
                         outline: item.outline,
                         _pad: [0.0; 3],
                     };
-                    self.queue
-                        .write_buffer(&slot.uniforms, 0, bytemuck::bytes_of(&uniforms));
-                    pass.set_bind_group(0, &slot.bind_group, &[]);
+                    self.queue.write_buffer(
+                        &pipeline.uniforms[index],
+                        0,
+                        bytemuck::bytes_of(&uniforms),
+                    );
+                    let bind = bind_group(
+                        &self.device,
+                        &pipeline.layout,
+                        &pipeline.uniforms[index],
+                        &self.sampler,
+                        &self.plain,
+                        pipeline.skinned,
+                    );
+                    pass.set_bind_group(0, &bind, &[]);
                     pass.set_vertex_buffer(0, mesh.vertex.slice(..));
                     pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
@@ -416,6 +706,35 @@ impl Gpu {
         }
 
         Ok(self.queue.submit([encoder.finish()]))
+    }
+
+    /// The skin for a path, decoding and uploading it the first time it is asked
+    /// for. An image that cannot be read leaves the object in its own colour.
+    fn skin_for(&mut self, path: Option<&str>) -> wgpu::TextureView {
+        let Some(path) = path else {
+            return self.plain.clone();
+        };
+        if !self.skins.contains_key(path) {
+            let skin = match image::open(path) {
+                Ok(image) => {
+                    let pixels = image.to_rgba8();
+                    Some(upload_rgba(
+                        &self.device,
+                        &self.queue,
+                        "carbine skin",
+                        pixels.width(),
+                        pixels.height(),
+                        pixels.as_raw(),
+                    ))
+                }
+                Err(_) => None,
+            };
+            self.skins.insert(path.to_owned(), skin);
+        }
+        match &self.skins[path] {
+            Some(view) => view.clone(),
+            None => self.plain.clone(),
+        }
     }
 
     pub fn present(&self, texture: wgpu::SurfaceTexture) {
@@ -497,52 +816,112 @@ impl Gpu {
 
         Ok(packed)
     }
+}
 
-    pub fn surface_texture_view(texture: &wgpu::SurfaceTexture) -> wgpu::TextureView {
-        texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default())
+fn sky_uniforms(view_proj: &Mat4, sky: &Sky, extent: (u32, u32)) -> SkyUniforms {
+    SkyUniforms {
+        inverse_view_proj: view_proj.inverse().to_cols_array_2d(),
+        zenith: [sky.zenith.x, sky.zenith.y, sky.zenith.z, 1.0],
+        horizon: [sky.horizon.x, sky.horizon.y, sky.horizon.z, 1.0],
+        viewport: [extent.0.max(1) as f32, extent.1.max(1) as f32],
+        noise: sky.noise,
+        _pad: 0.0,
     }
 }
 
-/// A render pass held open while objects are drawn into it.
+fn world_uniforms(view_proj: &Mat4, item: &DrawItem, sky: &Sky) -> Uniforms {
+    Uniforms {
+        view_proj: view_proj.to_cols_array_2d(),
+        model: item.model.to_cols_array_2d(),
+        color: [item.color[0], item.color[1], item.color[2], item.alpha],
+        sun: [sky.sun.x, sky.sun.y, sky.sun.z, sky.ambient],
+        skinned: f32::from(item.texture.is_some()),
+        _pad: [0.0; 3],
+    }
+}
+
+/// Pipelines whose shader reads a skin also need the sampler and texture bound
+/// beside the uniforms; a pipeline whose layout was deduced from a shader that
+/// reads neither must not be given them.
+fn bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniforms: &wgpu::Buffer,
+    sampler: &wgpu::Sampler,
+    skin: &wgpu::TextureView,
+    skinned: bool,
+) -> wgpu::BindGroup {
+    let mut entries = vec![wgpu::BindGroupEntry {
+        binding: 0,
+        resource: uniforms.as_entire_binding(),
+    }];
+    if skinned {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::Sampler(sampler),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 2,
+            resource: wgpu::BindingResource::TextureView(skin),
+        });
+    }
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("carbine object"),
+        layout,
+        entries: &entries,
+    })
+}
+
+/// A pipeline for one surface format, with enough uniform slots for the frame.
 fn ensure_pipeline<'a>(
     pipelines: &'a mut HashMap<wgpu::TextureFormat, Pipeline>,
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
+    spec: &Spec,
     draw_count: usize,
-    source: &str,
-    uniform_bytes: usize,
-    label: &str,
 ) -> &'a mut Pipeline {
     let pipeline = pipelines.entry(format).or_insert_with(|| {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(label),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
+            label: Some(spec.label),
+            source: wgpu::ShaderSource::Wgsl(spec.source.into()),
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
+            label: Some(spec.label),
             layout: None,
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("versus"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: 12,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &VERTEX_ATTRIBUTES,
-                })],
+                buffers: if spec.fullscreen {
+                    &[]
+                } else {
+                    &VERTEX_LAYOUTS
+                },
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
+                // Flat shapes such as a floor tile are authored to be seen from
+                // either side, so nothing is culled.
                 cull_mode: None,
                 unclipped_depth: false,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: spec.depth.then(|| wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(spec.depth_write),
+                // Only a solid object claims the depth it lands in; translucent
+                // objects and the backdrop are tested but never written.
+                depth_compare: Some(if spec.fullscreen {
+                    wgpu::CompareFunction::Always
+                } else {
+                    wgpu::CompareFunction::Less
+                }),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -561,30 +940,21 @@ fn ensure_pipeline<'a>(
         Pipeline {
             pipeline,
             layout,
-            uniform_bytes: uniform_bytes as u64,
-            slots: Vec::new(),
+            uniform_bytes: spec.uniform_bytes as u64,
+            uniforms: Vec::new(),
+            skinned: spec.skinned,
         }
     });
 
-    while pipeline.slots.len() < draw_count {
-        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("carbine uniforms"),
-            size: pipeline.uniform_bytes,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("carbine uniforms"),
-            layout: &pipeline.layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniforms.as_entire_binding(),
-            }],
-        });
-        pipeline.slots.push(Slot {
-            uniforms,
-            bind_group,
-        });
+    while pipeline.uniforms.len() < draw_count {
+        pipeline
+            .uniforms
+            .push(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("carbine uniforms"),
+                size: pipeline.uniform_bytes,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
     }
 
     pipeline
@@ -597,10 +967,15 @@ fn ensure_mesh<'a>(
     mesh: &MeshData,
 ) -> &'a GpuMesh {
     meshes.entry(handle).or_insert_with(|| {
-        let vertices: Vec<[f32; 3]> = mesh
+        let vertices: Vec<Vertex> = mesh
             .positions
             .iter()
-            .map(|position| position.to_array())
+            .enumerate()
+            .map(|(index, position)| Vertex {
+                position: position.to_array(),
+                normal: mesh.normals[index].to_array(),
+                uv: mesh.uvs[index].to_array(),
+            })
             .collect();
         let vertex = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("carbine vertices"),
@@ -620,4 +995,56 @@ fn ensure_mesh<'a>(
     })
 }
 
-const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
+fn upload_rgba(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    width: u32,
+    height: u32,
+    bytes: &[u8],
+) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width.max(1) * 4),
+            rows_per_image: Some(height.max(1)),
+        },
+        wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
+
+static VERTEX_LAYOUTS: [Option<wgpu::VertexBufferLayout<'static>>; 1] =
+    [Some(wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<Vertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &VERTEX_ATTRIBUTES,
+    })];

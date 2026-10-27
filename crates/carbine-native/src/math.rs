@@ -2,7 +2,7 @@ use carbine_core::{Axis, NodeId, VecField};
 use glam::{EulerRot, Quat, Vec3};
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyEllipsis};
 
 use crate::with_scene;
 
@@ -66,6 +66,40 @@ pub(crate) fn extract_vec3(value: &Bound<'_, PyAny>) -> PyResult<Vec3> {
     Err(PyTypeError::new_err(
         "expected a Vec3 or an (x, y, z) tuple",
     ))
+}
+
+/// One axis of an `(x, y, z)` argument. `...` and `None` both mean "leave this
+/// axis the way the object already has it", which is how `size = (..., ..., 5)`
+/// raises a height without touching the length or the width.
+fn extract_axis(value: &Bound<'_, PyAny>) -> PyResult<Option<f32>> {
+    if value.is_none() || value.is_instance_of::<PyEllipsis>() {
+        return Ok(None);
+    }
+    value
+        .extract::<f64>()
+        .map(|value| Some(value as f32))
+        .map_err(|_| PyTypeError::new_err("an axis is a number, ... or None"))
+}
+
+/// The three axes of a vector argument, in order. A `Vec3` works here as well as
+/// a tuple, because it iterates as three numbers.
+pub(crate) fn extract_axes(value: &Bound<'_, PyAny>) -> PyResult<[Option<f32>; 3]> {
+    let given = value.extract::<Vec<Bound<'_, PyAny>>>().map_err(|_| {
+        PyTypeError::new_err("expected a Vec3 or an (x, y, z) tuple; use ... to skip an axis")
+    })?;
+    let Ok([x, y, z]) = <[Bound<'_, PyAny>; 3]>::try_from(given) else {
+        return Err(PyTypeError::new_err("expected exactly three values"));
+    };
+    Ok([extract_axis(&x)?, extract_axis(&y)?, extract_axis(&z)?])
+}
+
+/// The axis an (x, y, z) argument names by position.
+pub(crate) fn axis_at(index: usize) -> Axis {
+    match index {
+        1 => Axis::Y,
+        2 => Axis::Z,
+        _ => Axis::X,
+    }
 }
 
 #[pymethods]

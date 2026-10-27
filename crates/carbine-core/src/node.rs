@@ -13,6 +13,9 @@ use crate::primitives;
 /// Carbine orange (sRGB #eb7a34), the default colour of a new object.
 pub const DEFAULT_COLOR: Vec3 = Vec3::new(0.921, 0.478, 0.204);
 
+/// Alpha is an eight bit count: 255 is opaque and 0 is invisible.
+pub const MAX_ALPHA: f32 = 255.0;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NodeId(pub u64);
 
@@ -64,6 +67,23 @@ pub(crate) struct NodeMesh {
 #[derive(Component)]
 pub(crate) struct ObjectColor(pub(crate) Vec3);
 
+/// How transparent the node is, in bytes: 255 opaque down to 0 invisible. The
+/// world and the UI overlay both read it, so `transparent` means the same thing
+/// on a cube as it does on a button.
+#[derive(Component)]
+pub(crate) struct Opacity(pub(crate) f32);
+
+impl Default for Opacity {
+    fn default() -> Self {
+        Self(MAX_ALPHA)
+    }
+}
+
+/// The image a node is skinned with, kept as a path. Decoding the file is the
+/// renderer's job; the scene only remembers which image was asked for.
+#[derive(Component, Default)]
+pub(crate) struct NodeTexture(pub(crate) Option<String>);
+
 #[derive(Component)]
 pub(crate) struct Parent(pub(crate) NodeId);
 
@@ -114,6 +134,7 @@ pub struct Scene {
     pub(crate) next_id: u64,
     pub(crate) next_mesh: u64,
     pub(crate) camera: Camera,
+    pub(crate) sky: crate::sky::Sky,
     root: NodeId,
 }
 
@@ -145,6 +166,7 @@ impl Scene {
             next_id: 1,
             next_mesh: 1,
             camera: Camera::default(),
+            sky: crate::sky::Sky::default(),
             root,
         }
     }
@@ -165,9 +187,23 @@ impl Scene {
     ) -> Result<NodeId, SceneError> {
         let data =
             primitives::build(kind).ok_or_else(|| SceneError::UnknownKind(kind.to_owned()))?;
-        let parent_id = parent.unwrap_or(self.root);
-        self.entity(parent_id)?;
+        if let Some(parent) = parent {
+            self.entity(parent)?;
+        }
 
+        Ok(self.spawn(kind, name, parent, data))
+    }
+
+    /// Attaches a node holding `data` to the tree. Shared by world objects and UI
+    /// elements, which differ in the mesh they get rather than in anything else.
+    pub(crate) fn spawn(
+        &mut self,
+        kind: &str,
+        name: Option<String>,
+        parent: Option<NodeId>,
+        data: MeshData,
+    ) -> NodeId {
+        let parent_id = parent.unwrap_or(self.root);
         let id = self.reserve();
         let handle = self.next_mesh_handle();
         let entity = self
@@ -178,6 +214,8 @@ impl Scene {
                 Transform::default(),
                 NodeMesh { handle, data },
                 ObjectColor(DEFAULT_COLOR),
+                Opacity::default(),
+                NodeTexture::default(),
                 Motion::default(),
                 Parent(parent_id),
                 Children::default(),
@@ -186,7 +224,7 @@ impl Scene {
         self.ids.insert(id, entity);
         self.attach(id, parent_id);
 
-        Ok(id)
+        id
     }
 
     pub fn destroy(&mut self, id: NodeId) -> Result<(), SceneError> {
@@ -378,17 +416,35 @@ impl Scene {
         ))
     }
 
-    /// Accepts `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa`. A trailing alpha only
-    /// means anything on a UI element, and is dropped elsewhere.
+    /// Accepts `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa`. A trailing alpha sets
+    /// the node's transparency, which both the world and the UI overlay honour.
     pub fn set_color_hex(&mut self, id: NodeId, hex: &str) -> Result<(), SceneError> {
         let (color, alpha) =
             parse_hex_color(hex).ok_or_else(|| SceneError::BadColor(hex.to_owned()))?;
         self.component_mut::<ObjectColor>(id)?.0 = color;
-        if let Some(alpha) = alpha
-            && self.is_ui(id)?
-        {
-            self.set_alpha(id, alpha)?;
+        if let Some(alpha) = alpha {
+            self.set_opacity(id, alpha)?;
         }
+        Ok(())
+    }
+
+    /// Transparency in bytes: 255 is opaque, 0 is invisible.
+    pub fn opacity(&self, id: NodeId) -> Result<f32, SceneError> {
+        Ok(self.component::<Opacity>(id)?.0)
+    }
+
+    pub fn set_opacity(&mut self, id: NodeId, alpha: f32) -> Result<(), SceneError> {
+        self.component_mut::<Opacity>(id)?.0 = alpha.clamp(0.0, MAX_ALPHA);
+        Ok(())
+    }
+
+    /// The image path a node is skinned with, or `None` for a flat colour.
+    pub fn texture(&self, id: NodeId) -> Result<Option<String>, SceneError> {
+        Ok(self.component::<NodeTexture>(id)?.0.clone())
+    }
+
+    pub fn set_texture(&mut self, id: NodeId, path: Option<String>) -> Result<(), SceneError> {
+        self.component_mut::<NodeTexture>(id)?.0 = path;
         Ok(())
     }
 
@@ -469,7 +525,7 @@ fn channel(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-fn parse_hex_color(hex: &str) -> Option<(Vec3, Option<f32>)> {
+pub(crate) fn parse_hex_color(hex: &str) -> Option<(Vec3, Option<f32>)> {
     let digits = hex.strip_prefix('#').unwrap_or(hex);
     let pairs: Vec<Option<u32>> = match digits.len() {
         3 | 4 => digits
@@ -675,6 +731,52 @@ mod tests {
 
         scene.set_color_hex(card, "#0f0f0fff").unwrap();
         assert_eq!(scene.color_hex(card).unwrap(), "#0f0f0f");
+        assert_eq!(scene.opacity(card).unwrap(), MAX_ALPHA);
+
+        scene.set_color_hex(card, "#0f0f0f40").unwrap();
+        assert_eq!(scene.opacity(card).unwrap(), 64.0);
+        assert_eq!(scene.color_hex(card).unwrap(), "#0f0f0f");
+    }
+
+    #[test]
+    fn a_new_node_is_opaque_and_untextured() {
+        let mut scene = Scene::new();
+        let crate_ = scene.create("cube", None, None).unwrap();
+
+        assert_eq!(scene.opacity(crate_).unwrap(), MAX_ALPHA);
+        assert_eq!(scene.texture(crate_).unwrap(), None);
+    }
+
+    #[test]
+    fn a_texture_is_remembered_as_a_path() {
+        let mut scene = Scene::new();
+        let crate_ = scene.create("cube", None, None).unwrap();
+
+        scene
+            .set_texture(crate_, Some("assets/wood.png".to_owned()))
+            .unwrap();
+        assert_eq!(
+            scene.texture(crate_).unwrap().as_deref(),
+            Some("assets/wood.png")
+        );
+
+        scene.set_texture(crate_, None).unwrap();
+        assert_eq!(scene.texture(crate_).unwrap(), None);
+    }
+
+    #[test]
+    fn transparency_is_an_eight_bit_count_on_world_objects_too() {
+        let mut scene = Scene::new();
+        let crate_ = scene.create("cube", None, None).unwrap();
+
+        scene.set_opacity(crate_, 300.0).unwrap();
+        assert_eq!(scene.opacity(crate_).unwrap(), MAX_ALPHA);
+
+        scene.set_opacity(crate_, -5.0).unwrap();
+        assert_eq!(scene.opacity(crate_).unwrap(), 0.0);
+
+        scene.set_opacity(crate_, 120.0).unwrap();
+        assert_eq!(scene.opacity(crate_).unwrap(), 120.0);
     }
 
     #[test]

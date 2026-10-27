@@ -2,7 +2,7 @@ use carbine_core::{NodeId, VecField};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
-use crate::math::{PyQuat, PyVec3, extract_vec3, vec3_field};
+use crate::math::{PyQuat, PyVec3, axis_at, extract_axes, vec3_field};
 use crate::mesh::PyMesh;
 use crate::with_scene;
 
@@ -24,8 +24,31 @@ pub(crate) fn vec3_of(id: NodeId, field: VecField) -> PyResult<PyVec3> {
 }
 
 pub(crate) fn set_vec3(id: NodeId, field: VecField, value: &Bound<'_, PyAny>) -> PyResult<()> {
-    let value = extract_vec3(value)?;
-    with_scene(|scene| scene.set_vec_field(id, field, value))
+    let axes = extract_axes(value)?;
+    for (index, given) in axes.into_iter().enumerate() {
+        let Some(value) = given else { continue };
+        with_scene(|scene| scene.set_vec_field_axis(id, field, axis_at(index), value))?;
+    }
+    Ok(())
+}
+
+/// Reading the axes one at a time keeps an axis the object already has, so an
+/// assignment can name only what it wants to change.
+pub(crate) fn set_rotation(id: NodeId, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    if let Ok(rotation) = value.extract::<PyRef<'_, PyQuat>>() {
+        return with_scene(|scene| scene.set_rotation(id, rotation.value()));
+    }
+    set_vec3(id, VecField::RotationEuler, value)
+}
+
+/// The image a node is skinned with, as a path. `None` paints it in its own
+/// colour again.
+pub(crate) fn texture_of(id: NodeId) -> PyResult<Option<String>> {
+    with_scene(|scene| scene.texture(id))
+}
+
+pub(crate) fn set_texture_on(id: NodeId, value: Option<String>) -> PyResult<()> {
+    with_scene(|scene| scene.set_texture(id, value))
 }
 
 /// The node behind either handle class: an object and the entity wearing it are
@@ -112,7 +135,9 @@ impl Object {
         set_vec3(self.id, VecField::Position, &value)
     }
 
-    /// The object's dimensions in meters at rotation identity.
+    /// The object's dimensions in meters at rotation identity, as
+    /// `(length, width, height)`; `z` is the vertical size. Any axis may be
+    /// `...` to leave it as it is.
     #[getter]
     fn size(&self) -> PyResult<PyVec3> {
         vec3_of(self.id, VecField::Size)
@@ -139,9 +164,11 @@ impl Object {
         Ok(PyQuat::from_value(rotation))
     }
 
+    /// Accepts a `Quat`, or euler degrees as `(x, y, z)` where any axis may be
+    /// `...` to keep the angle it already has.
     #[setter]
-    fn set_rotation(&self, value: PyRef<'_, PyQuat>) -> PyResult<()> {
-        with_scene(|scene| scene.set_rotation(self.id, value.value()))
+    fn set_rotation(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
+        set_rotation(self.id, &value)
     }
 
     /// Euler angles in degrees.
@@ -178,15 +205,15 @@ impl Object {
         with_scene(|scene| scene.color_hex(self.id))
     }
 
-    /// Corner radius in pixels. UI elements only.
-    #[getter(cornerRadius)]
-    fn corner_radius(&self) -> PyResult<f32> {
-        with_scene(|scene| scene.corner_radius(self.id))
+    /// How round the corners are, in pixels. UI elements only.
+    #[getter]
+    fn corner(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.corner(self.id))
     }
 
-    #[setter(cornerRadius)]
-    fn set_corner_radius(&self, radius: f32) -> PyResult<()> {
-        with_scene(|scene| scene.set_corner_radius(self.id, radius))
+    #[setter]
+    fn set_corner(&self, corner: f32) -> PyResult<()> {
+        with_scene(|scene| scene.set_corner(self.id, corner))
     }
 
     /// Polygon sides: 4 fills the box, 3 is a triangle, 64 reads as a circle.
@@ -220,6 +247,18 @@ impl Object {
     #[setter]
     fn set_transparent(&self, alpha: f32) -> PyResult<()> {
         with_scene(|scene| scene.set_alpha(self.id, alpha))
+    }
+
+    /// The image painted over the object's own colour, as a path. Assign a
+    /// string to skin it, `None` to paint it flat again.
+    #[getter]
+    fn texture(&self) -> PyResult<Option<String>> {
+        texture_of(self.id)
+    }
+
+    #[setter]
+    fn set_texture(&self, value: Option<String>) -> PyResult<()> {
+        set_texture_on(self.id, value)
     }
 
     #[getter]

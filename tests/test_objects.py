@@ -9,7 +9,7 @@ def test_version():
 
 
 def test_kinds_are_advertised():
-    assert carbine.kinds() == ["rectangle", "square", "triangle", "hexagon", "circle"]
+    assert carbine.kinds() == ["cube", "plane", "sphere", "rectangle", "square"]
 
 
 def test_new_rectangle_defaults():
@@ -60,6 +60,59 @@ def test_size_is_meters_and_scale_is_the_factor():
 
         card.size.x = 5.0
         assert card.size.toTuple() == (5.0, 1.0, 1.0)
+    finally:
+        card.destroy()
+
+
+def test_an_axis_left_out_keeps_the_value_it_had():
+    card = carbine.new("cube", name="Card")
+    try:
+        card.size = (2.0, 3.0, 4.0)
+
+        card.size = (..., ..., 8.0)
+        assert card.size.toTuple() == (2.0, 3.0, 8.0)
+
+        card.size = (None, 5.0, None)
+        assert card.size.toTuple() == (2.0, 5.0, 8.0)
+
+        card.position = (1.0, 1.0, ...)
+        assert card.position.toTuple() == (1.0, 1.0, 0.0)
+
+        with pytest.raises(TypeError, match="three values"):
+            card.size = (1.0, 2.0)
+        with pytest.raises(TypeError, match="number"):
+            card.size = (1.0, "wide", 3.0)
+    finally:
+        card.destroy()
+
+
+def test_rotation_takes_a_quat_or_euler_degrees():
+    card = carbine.new("cube")
+    try:
+        card.rotation = (0.0, 0.0, 90.0)
+        assert math.isclose(card.rotationEuler.z, 90.0, abs_tol=1e-4)
+        assert math.isclose(card.rotation.toEuler()[2], 90.0, abs_tol=1e-4)
+
+        card.rotation = (10.0, ..., ...)
+        assert math.isclose(card.rotationEuler.x, 10.0, abs_tol=1e-4)
+        assert math.isclose(card.rotationEuler.z, 90.0, abs_tol=1e-4)
+
+        card.rotation = carbine.Quat.fromEuler(0.0, 0.0, 45.0)
+        assert math.isclose(card.rotationEuler.z, 45.0, abs_tol=1e-4)
+    finally:
+        card.destroy()
+
+
+def test_a_skin_is_remembered_as_a_path():
+    card = carbine.new("cube")
+    try:
+        assert card.texture is None
+
+        card.texture = "assets/wood.png"
+        assert card.texture == "assets/wood.png"
+
+        card.texture = None
+        assert card.texture is None
     finally:
         card.destroy()
 

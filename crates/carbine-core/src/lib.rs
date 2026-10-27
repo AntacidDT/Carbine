@@ -5,13 +5,16 @@ mod mesh;
 mod motion;
 mod node;
 mod primitives;
+mod sky;
 mod ui;
 
-pub use camera::Camera;
+pub use camera::{Camera, CameraMode, UP};
 pub use draw::DrawItem;
 pub use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 pub use mesh::{MeshData, MeshHandle};
 pub use motion::EARTH_GRAVITY_PULL;
-pub use node::{Axis, DEFAULT_COLOR, NodeId, Scene, SceneError, Transform, VecField};
+pub use node::{Axis, DEFAULT_COLOR, MAX_ALPHA, NodeId, Scene, SceneError, Transform, VecField};
 pub use primitives::KINDS as PRIMITIVE_KINDS;
+pub use primitives::UI_KINDS as UI_SHAPE_KINDS;
+pub use sky::Sky;
 pub use ui::UiItem;

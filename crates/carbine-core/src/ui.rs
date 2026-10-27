@@ -2,20 +2,17 @@ use bevy_ecs::prelude::*;
 use glam::{Mat4, Vec3};
 
 use crate::mesh::{MeshData, MeshHandle};
-use crate::node::{Children, NodeId, NodeMesh, ObjectColor, Scene, SceneError};
-
-/// Alpha is an eight bit count: 255 is opaque and 0 is invisible.
-pub const MAX_ALPHA: f32 = 255.0;
+use crate::node::{Children, MAX_ALPHA, NodeId, NodeMesh, ObjectColor, Opacity, Scene, SceneError};
+use crate::primitives;
 
 /// A screen space overlay node. UI is laid out in pixels from the viewport's
 /// top left corner and drawn over the world, so its `position` and `size` are
 /// pixels rather than meters.
 #[derive(Component)]
 pub(crate) struct Ui {
-    pub(crate) corner_radius: f32,
+    pub(crate) corner: f32,
     pub(crate) sides: u32,
     pub(crate) outline: f32,
-    pub(crate) alpha: f32,
 }
 
 impl Scene {
@@ -27,13 +24,18 @@ impl Scene {
         name: Option<String>,
         parent: Option<NodeId>,
     ) -> Result<NodeId, SceneError> {
-        let id = self.create(kind, name, parent)?;
+        let data =
+            primitives::ui_mesh(kind).ok_or_else(|| SceneError::UnknownKind(kind.to_owned()))?;
+        if let Some(parent) = parent {
+            self.entity(parent)?;
+        }
+
+        let id = self.spawn(kind, name, parent, data);
         let entity = self.entity(id)?;
         self.world.entity_mut(entity).insert(Ui {
-            corner_radius: 0.0,
+            corner: 0.0,
             sides: default_sides(kind),
             outline: 0.0,
-            alpha: MAX_ALPHA,
         });
         // A UI element is pinned to the screen; gravity has nothing to do with it.
         self.set_anchored(id, true)?;
@@ -45,14 +47,15 @@ impl Scene {
         Ok(self.world.get::<Ui>(entity).is_some())
     }
 
-    /// Corner radius in pixels. Kept exactly as given: a shape too round for its
-    /// own size is rounded down by the renderer, not by the stored value.
-    pub fn corner_radius(&self, id: NodeId) -> Result<f32, SceneError> {
-        Ok(self.ui(id)?.corner_radius)
+    /// How round the corners are, in pixels. Kept exactly as given: a shape too
+    /// round for its own size is rounded down by the renderer, not by the stored
+    /// value.
+    pub fn corner(&self, id: NodeId) -> Result<f32, SceneError> {
+        Ok(self.ui(id)?.corner)
     }
 
-    pub fn set_corner_radius(&mut self, id: NodeId, radius: f32) -> Result<(), SceneError> {
-        self.ui_mut(id)?.corner_radius = radius;
+    pub fn set_corner(&mut self, id: NodeId, corner: f32) -> Result<(), SceneError> {
+        self.ui_mut(id)?.corner = corner;
         Ok(())
     }
 
@@ -78,14 +81,14 @@ impl Scene {
         Ok(())
     }
 
-    /// Opacity from 0 (invisible) to 255 (opaque).
+    /// Opacity from 0 (invisible) to 255 (opaque). This is the node's
+    /// `transparent` value, which a world object shares.
     pub fn alpha(&self, id: NodeId) -> Result<f32, SceneError> {
-        Ok(self.ui(id)?.alpha)
+        self.opacity(id)
     }
 
     pub fn set_alpha(&mut self, id: NodeId, alpha: f32) -> Result<(), SceneError> {
-        self.ui_mut(id)?.alpha = alpha.clamp(0.0, MAX_ALPHA);
-        Ok(())
+        self.set_opacity(id, alpha)
     }
 
     pub(crate) fn ui(&self, id: NodeId) -> Result<&Ui, SceneError> {
@@ -126,15 +129,20 @@ impl Scene {
                     .get::<ObjectColor>(entity)
                     .map(|color| color.0)
                     .unwrap_or(Vec3::ONE);
+                let alpha = self
+                    .world
+                    .get::<Opacity>(entity)
+                    .map(|opacity| opacity.0)
+                    .unwrap_or(MAX_ALPHA);
                 let size = transform.scale * mesh.data.natural_extent();
                 items.push(UiItem {
                     node: id,
                     handle: mesh.handle,
                     mesh: &mesh.data,
                     model,
-                    color: [color.x, color.y, color.z, ui.alpha / MAX_ALPHA],
+                    color: [color.x, color.y, color.z, alpha / MAX_ALPHA],
                     size: [size.x, size.y],
-                    corner_radius: ui.corner_radius,
+                    corner: ui.corner,
                     sides: ui.sides.max(3) as f32,
                     outline: ui.outline,
                 });
@@ -166,7 +174,7 @@ pub struct UiItem<'a> {
     pub color: [f32; 4],
     /// Width and height in pixels.
     pub size: [f32; 2],
-    pub corner_radius: f32,
+    pub corner: f32,
     pub sides: f32,
     pub outline: f32,
 }
@@ -194,7 +202,7 @@ mod tests {
         assert!(scene.is_ui(button).unwrap());
         assert_eq!(scene.name(button).unwrap(), "Square");
         assert_eq!(scene.parent(button).unwrap(), Some(scene.root()));
-        assert_eq!(scene.corner_radius(button).unwrap(), 0.0);
+        assert_eq!(scene.corner(button).unwrap(), 0.0);
         assert_eq!(scene.polygon_sides(button).unwrap(), 4);
         assert_eq!(scene.outline(button).unwrap(), 0.0);
         assert_eq!(scene.alpha(button).unwrap(), MAX_ALPHA);
@@ -215,18 +223,23 @@ mod tests {
     }
 
     #[test]
-    fn a_world_object_cannot_take_ui_properties() {
+    fn a_world_object_has_shape_free_ui_state() {
         let mut scene = Scene::new();
-        let card = scene.create("rectangle", None, None).unwrap();
+        let card = scene.create("cube", None, None).unwrap();
 
+        // Shape knobs belong to the overlay, but transparency belongs to any node.
         assert!(matches!(
-            scene.set_corner_radius(card, 8.0),
+            scene.set_corner(card, 8.0),
             Err(SceneError::NotAUi)
         ));
         assert!(matches!(
-            scene.set_alpha(scene.root(), 10.0),
+            scene.set_polygon_sides(card, 5),
             Err(SceneError::NotAUi)
         ));
+        assert!(matches!(scene.corner(card), Err(SceneError::NotAUi)));
+
+        scene.set_alpha(card, 100.0).unwrap();
+        assert_eq!(scene.alpha(card).unwrap(), 100.0);
     }
 
     #[test]
@@ -234,19 +247,19 @@ mod tests {
         let mut scene = Scene::new();
         let button = scene.create_ui("square", None, None).unwrap();
 
-        scene.set_corner_radius(button, 49.0).unwrap();
+        scene.set_corner(button, 49.0).unwrap();
         scene.set_polygon_sides(button, 7).unwrap();
         scene.set_outline(button, 3.5).unwrap();
-        assert_eq!(scene.corner_radius(button).unwrap(), 49.0);
+        assert_eq!(scene.corner(button).unwrap(), 49.0);
         assert_eq!(scene.polygon_sides(button).unwrap(), 7);
         assert_eq!(scene.outline(button).unwrap(), 3.5);
 
         // A radius bigger than the shape is legal to store; the renderer clamps.
-        scene.set_corner_radius(button, 4000.0).unwrap();
-        assert_eq!(scene.corner_radius(button).unwrap(), 4000.0);
+        scene.set_corner(button, 4000.0).unwrap();
+        assert_eq!(scene.corner(button).unwrap(), 4000.0);
 
-        scene.set_corner_radius(button, -6.0).unwrap();
-        assert_eq!(scene.corner_radius(button).unwrap(), -6.0);
+        scene.set_corner(button, -6.0).unwrap();
+        assert_eq!(scene.corner(button).unwrap(), -6.0);
     }
 
     #[test]
@@ -278,14 +291,14 @@ mod tests {
         scene
             .set_vec_field(button, VecField::Size, Vec3::new(40.0, 40.0, 1.0))
             .unwrap();
-        scene.set_corner_radius(button, 9.0).unwrap();
+        scene.set_corner(button, 9.0).unwrap();
         scene.set_alpha(button, 64.0).unwrap();
 
         let items = scene.ui_items();
         assert_eq!(items.len(), 1, "world objects stay out of the UI pass");
         assert_eq!(items[0].node, button);
         assert_eq!(items[0].size, [40.0, 40.0]);
-        assert_eq!(items[0].corner_radius, 9.0);
+        assert_eq!(items[0].corner, 9.0);
         assert_eq!(items[0].sides, 4.0);
         assert_eq!(items[0].color[3], 64.0 / MAX_ALPHA);
         assert_eq!(

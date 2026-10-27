@@ -1,7 +1,9 @@
 use glam::{Mat4, Vec3};
 
 use crate::mesh::{MeshData, MeshHandle};
-use crate::node::{Children, NodeId, NodeMesh, ObjectColor, Scene, Transform};
+use crate::node::{
+    Children, MAX_ALPHA, NodeId, NodeMesh, NodeTexture, ObjectColor, Opacity, Scene, Transform,
+};
 use crate::ui::Ui;
 
 /// One drawable object with its hierarchy-resolved transform in meters.
@@ -11,6 +13,10 @@ pub struct DrawItem<'a> {
     pub mesh: &'a MeshData,
     pub model: Mat4,
     pub color: [f32; 3],
+    /// Alpha in 0..1, ready for blending.
+    pub alpha: f32,
+    /// The image the renderer should skin this object with, by path.
+    pub texture: Option<&'a str>,
 }
 
 impl Scene {
@@ -39,12 +45,23 @@ impl Scene {
                     .get::<ObjectColor>(entity)
                     .map(|color| color.0)
                     .unwrap_or(Vec3::ONE);
+                let alpha = self
+                    .world
+                    .get::<Opacity>(entity)
+                    .map(|opacity| opacity.0)
+                    .unwrap_or(MAX_ALPHA);
+                let texture = self
+                    .world
+                    .get::<NodeTexture>(entity)
+                    .and_then(|texture| texture.0.as_deref());
                 items.push(DrawItem {
                     node: id,
                     handle: mesh.handle,
                     mesh: &mesh.data,
                     model,
                     color: color.to_array(),
+                    alpha: alpha / MAX_ALPHA,
+                    texture,
                 });
             }
 
@@ -122,10 +139,20 @@ mod tests {
         scene
             .set_vec_field(first, VecField::Color, Vec3::new(1.0, 0.0, 0.0))
             .unwrap();
+        scene.set_opacity(first, 128.0).unwrap();
+        scene
+            .set_texture(first, Some("assets/wood.png".to_owned()))
+            .unwrap();
 
         let items = scene.draw_items();
         assert_ne!(items[0].handle, items[1].handle);
         assert_eq!(items[0].color, [1.0, 0.0, 0.0]);
+        assert_eq!(items[0].texture, Some("assets/wood.png"));
         assert_eq!(second, items[1].node);
+
+        let alpha = 128.0 / crate::node::MAX_ALPHA;
+        assert!((items[0].alpha - alpha).abs() < 1e-6, "{}", items[0].alpha);
+        assert_eq!(items[1].alpha, 1.0, "an untouched node stays opaque");
+        assert_eq!(items[1].texture, None);
     }
 }
