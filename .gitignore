@@ -13,5 +13,9 @@ __pycache__/
 /build/
 /dist/
 
+*.so
+*.dylib
+*.dll
+
 # OS
 .DS_Store

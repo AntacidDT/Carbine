@@ -1,0 +1,10 @@
+[package]
+name = "carbine-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bevy_ecs.workspace = true
+glam.workspace = true

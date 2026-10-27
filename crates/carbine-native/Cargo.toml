@@ -1,0 +1,20 @@
+[package]
+name = "carbine-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+carbine-core = { path = "../carbine-core" }
+carbine-render = { path = "../carbine-render" }
+glam.workspace = true
+pyo3.workspace = true

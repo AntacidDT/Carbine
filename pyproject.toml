@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[project]
+name = "carbine"
+description = "Carbine Engine: a Rust core with Python scripting"
+requires-python = ">=3.14"
+dynamic = ["version"]
+
+[tool.maturin]
+manifest-path = "crates/carbine-native/Cargo.toml"
+module-name = "carbine._native"
+python-source = "pkg"
+features = ["extension-module"]

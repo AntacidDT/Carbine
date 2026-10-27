@@ -1,0 +1,352 @@
+               CARBINE GAME RUNTIME EXCEPTION
+                    Version 1.0, 2026
+
+                Exception to the GNU General
+          Public License version 3 ("GPL-3.0-only")
+
+Copyright (C) 2026 <fill in: legal name of the Carbine copyright holder(s)>
+
+Everyone is permitted to copy and distribute verbatim copies of this
+exception document, but changing it is not allowed. Copying this exception
+into your own project does not grant any permission; the permission below is
+granted only by the copyright holders of the Carbine Runtime, as defined in
+Section 1, on the terms stated here.
+
+
+------------------------------------------------------------------------------
+ BEFORE THE LEGAL TEXT: WHAT THIS MEANS
+------------------------------------------------------------------------------
+
+Your game is not the engine.
+
+  - The code you write for your game, its Python scripts, art, music, levels,
+    scene files, and data are yours. You may distribute them under any terms
+    you choose, including closed and commercial. You are not required to
+    release them as free software merely because they use Carbine.
+
+  - Bundling Carbine in binary form alongside your proprietary game — as a
+    wheel, a frozen build, or an exported runtime — is permitted.
+
+  - Carbine itself stays free. If you modify the engine, the renderer, the
+    native bindings, or the editor, those modifications are covered by
+    GPLv3, and you must convey them as free software. This exception grants
+    you nothing at all in that direction.
+
+  - A proprietary fork of the engine, wearing a different name, is not what
+    this exception is for. It cannot be used to close Carbine.
+
+The legal text follows, and the legal text controls.
+
+
+------------------------------------------------------------------------------
+ 1. DEFINITIONS
+------------------------------------------------------------------------------
+
+"GPL" means the GNU General Public License version 3, as published by the Free
+Software Foundation. This exception applies only to a Work licensed under
+GPL-3.0-only, and to no later version of the GPL.
+
+"The Runtime" means the portions of Carbine that exist to be executed as part
+of a running program: the `carbine-core`, `carbine-render`, and
+`carbine-native` library crates and the Python package `carbine` that binds
+them, together with the compiled artifacts of those sources, whether linked
+statically, dynamically, or embedded in a larger executable.
+
+"The Editor" means any authoring tool, editor, plugin host, or command-line
+build tool distributed as part of Carbine, including the
+`Carbine-x86_64.AppImage` application bundle and everything within it. The
+Editor is not part of the Runtime. The runtime portion packaged inside the
+Editor is Runtime; the Editor around it is not.
+
+"The Work" means the Runtime, the Editor, or both, as conveyed under the GPL
+together with this exception.
+
+"Independent Module" means an "Independent Module" as that term is defined in
+section 1 of the GCC Runtime Library Exception version 3.1; that definition is
+incorporated here by reference and read as follows: a work that (a) is composed
+by a person other than the copyright holders of the Runtime, (b) contains no
+source code or other material available from the Runtime, and (c) is not based
+on the Runtime in whole or in part.
+
+"Game Code" means an Independent Module written to be executed by the Runtime,
+including program source, compiled or byte-compiled code, and scripts written
+against the Runtime's published interface.
+
+"Content" means data consumed by the Runtime at run time that is not
+instructions to a computer: scenes, models, textures, audio, animation, fonts,
+level data, save data, and configuration.
+
+"Published Interface" means the documented functions, classes, properties,
+methods, signals, hooks, and file formats of the Work that are intended for use
+by programs or data written against them, together with their documented
+behaviour, semantics, and constraints.
+
+
+------------------------------------------------------------------------------
+ 2. SCOPE: WHAT THIS EXCEPTION DOES NOT REACH
+------------------------------------------------------------------------------
+
+This exception grants permission only as stated in Section 3. It grants
+nothing else, and in particular:
+
+  (a) It does not apply to the Editor, which remains subject to the GPL
+      without exception. A work that links against, extends, or is derived
+      from the Editor — including an Editor plugin — is not an Independent
+      Module for the purpose of this exception.
+
+  (b) It does not permit conveying a modified Runtime, or any portion of the
+      Runtime's source, as anything other than free software under the GPL.
+
+  (c) It does not release you from any obligation the GPL imposes on the
+      Runtime itself. Source corresponding to the Runtime you convey, the
+      notices in Section 7, and the other requirements of the GPL continue to
+      apply to the Runtime however it is combined, packaged, or embedded.
+
+  (d) It does not license any trademark. See Section 11.
+
+  (e) It is not a grant to relicense anyone else's contribution. Each
+      copyright holder grants this exception only for the portion of the
+      Work they hold copyright in, as provided in Section 10.
+
+
+------------------------------------------------------------------------------
+ 3. THE PERMISSION
+------------------------------------------------------------------------------
+
+You may make, propagate, and convey a work produced by the combination of an
+Independent Module and the Runtime — including by compiling, assembling,
+statically or dynamically linking, bundling, freezing, embedding, or packaging
+the Runtime with the Independent Module into a single distributable artifact —
+and you may propagate and convey that combined work, and its source code,
+under terms of your choice, provided that:
+
+  (a) each Independent Module in the combined work interacts with the Runtime
+      only through the Runtime's Published Interface;
+
+  (b) the Runtime, in the combined work, serves either as a facility for
+      enabling communication among the Independent Modules or as a mechanical
+      facilitator for the functionality of an Independent Module, or both;
+
+  (c) each Independent Module complies with any applicable terms conveyed with
+      the Runtime, including the notices in Section 7; and
+
+  (d) you comply with the GPL in respect of the Runtime.
+
+For clarity, terms of your choice may be proprietary. This exception exists to
+make that permission effective in the presence of static linking, which is how
+Rust builds are produced, and it is not intended to be defeated by the
+Runtime's form of linkage.
+
+
+------------------------------------------------------------------------------
+ 4. USING THE ENGINE IS NOT COPYING THE ENGINE
+------------------------------------------------------------------------------
+
+Merely using the Published Interface — calling it, importing it, instantiating
+its types, subclassing or composing its classes, reading or writing its
+properties, responding to its events, or arranging for the Runtime to execute
+your instructions — does not by itself cause the resulting work to be covered
+by the copyright in the Work. The same holds for the Runtime interacting by
+ordinary communication with an Independent Module it executes.
+
+Accordingly, a Python script that says `import carbine` and builds a scene is
+an Independent Module, not a work based on the Work, so long as it does not
+otherwise incorporate protected expression from the Work.
+
+
+------------------------------------------------------------------------------
+ 5. CONTENT AND DATA FORMATS
+------------------------------------------------------------------------------
+
+Content is not a work based on the Work. Reproducing, distributing, and
+conveying Content under terms of your choice is permitted, and the GPL imposes
+no obligation on it.
+
+Consuming or producing a documented file format of the Work — including a
+scene serialised in the Work's documented data format — does not by itself
+cause Content or a tool to be covered by the copyright in the Work, whether or
+not the file is machine-generated by the Editor.
+
+Nothing in this Section licenses any asset, sample project, template, or
+example Content that is distributed as part of the Work; such material carries
+its own notice, and where it carries none, it is conveyed to you under the GPL
+as part of the Work.
+
+
+------------------------------------------------------------------------------
+ 6. INTERPRETERS, PACKAGING, AND EXPORTS
+------------------------------------------------------------------------------
+
+The permission in Section 3 extends to the ordinary forms in which a build of
+Carbine is distributed, and in particular:
+
+  (a) embedding a Python interpreter, the Runtime, and Game Code in one
+      distributable artifact, whether the Runtime appears as a compiled
+      extension module, a wheel, a vendored library, or linked object code;
+
+  (b) exporting a runnable build of a game, including a self-contained bundle,
+      archive, container, or AppImage, produced with or without the Editor;
+
+  (c) distributing the Runtime in object code form only, for use with Game
+      Code, provided you also comply with the GPL's requirements for conveying
+      the corresponding source of the Runtime; and
+
+  (d) distributing a build that includes third-party components under their own
+      licenses, whose terms are unaffected by this exception.
+
+The Editor, and any artifact whose principal purpose is authoring rather than
+execution, is not within (b) even when it bundles the Runtime; the Runtime
+inside it remains subject to the GPL, and the Editor as a whole is conveyed
+under the GPL.
+
+Where the terms of a distribution platform forbid you from conveying the
+source of the Runtime, you may convey the Runtime in object code form under
+this exception, provided that you comply with section 6 of the GPL to the
+extent the platform allows and you do not use this exception to withhold the
+source of the Runtime from anyone the platform permits you to reach. This
+paragraph exists to keep a closed platform from becoming a reason to
+proprietarise the engine, and it is the narrowest permission in this document;
+it is the clause most deserving of review by a lawyer before you rely on it.
+
+
+------------------------------------------------------------------------------
+ 7. NOTICES
+------------------------------------------------------------------------------
+
+When you convey a work that includes the Runtime, you must keep intact, and
+convey together with the work:
+
+  (a) a notice that the Runtime is licensed under GPL-3.0-only together with
+      the Carbine Game Runtime Exception version 1.0, and where the complete
+      text of both may be obtained;
+
+  (b) all notices of warranty disclaimers and liability limitations; and
+
+  (c) any notice that accompanies the Runtime and identifies material whose
+      license terms differ, which those terms continue to govern.
+
+You may satisfy (a) in an about screen, a licenses file, a package manifest, or
+an equivalent place appropriate to the medium, so long as it is reasonably
+prominent and travels with the artifact.
+
+A work that includes the Runtime must not be conveyed under a license
+expression that states or implies that the Runtime is proprietary, that the
+Runtime is dual-licensed, or that the GPL does not apply to it.
+
+
+------------------------------------------------------------------------------
+ 8. EFFECT AND SEVERABILITY
+------------------------------------------------------------------------------
+
+This exception is an additional permission that supplements the GPL as
+contemplated by section 7 of the GPL. It restricts the GPL in no way and
+imposes on you no obligation that the GPL does not already impose on the
+Runtime.
+
+If any provision of this exception is held invalid or unenforceable, the
+remaining provisions continue in full effect, and the Work remains licensed
+under the GPL alone, without the permission that was held invalid. In no case
+does an invalid provision enlarge anyone's rights in the Work.
+
+
+------------------------------------------------------------------------------
+ 9. VERSIONS OF THIS EXCEPTION
+------------------------------------------------------------------------------
+
+The copyright holders of the Work may publish revised and/or new versions of
+the Carbine Game Runtime Exception. Each version is given a distinguishing
+version number.
+
+You may convey the Work using any version of this exception that was published
+by a copyright holder of the portion of the Work you are conveying. A version
+published later than the one you received may be applied retroactively at your
+option, except that no later version may narrow the permissions you had already
+relied on in a work you previously conveyed, and no later version may impose
+new conditions on an Independent Module already distributed.
+
+If the Work does not identify a version of this exception, you may use any
+version ever published for the Work.
+
+Revised versions are written to keep this exception a permission granted to
+users of the Work, never as an instrument for closing the Work. A later version
+may not remove the requirement that modifications of the Runtime be conveyed
+under the GPL.
+
+
+------------------------------------------------------------------------------
+ 10. RELATIONSHIP TO CONTRIBUTOR LICENSES
+------------------------------------------------------------------------------
+
+Contributions to the Work are licensed under GPL-3.0-only, and the project
+uses a Developer Certificate of Origin rather than a contributor license
+agreement. It follows that:
+
+  (a) no contributor's code may be relicensed under a proprietary license, and
+      this exception is not a mechanism by which that could occur;
+
+  (b) each copyright holder may grant this exception for the material they
+      hold copyright in, and grants it only as far as they hold that right;
+
+  (c) no maintainer, organisation, or assignee may substitute a proprietary
+      license for the GPL, and any purported substitution is void; and
+
+  (d) the project may be relicensed to another copyleft license only with the
+      authorization of every copyright holder whose work remains in it.
+
+
+------------------------------------------------------------------------------
+ 11. TRADEMARKS
+------------------------------------------------------------------------------
+
+This exception grants no right to use the name "Carbine", its marks, or its
+logo, except to identify the origin of the Work and to describe accurately that
+a work runs on, is built with, or is a fork of Carbine.
+
+Free builds of the Work, and forks of the Work whose modifications to the
+Runtime are conveyed under the GPL, may continue to use the name. No use of
+the name may be asserted in a way that would prevent a fork from being
+recognisable as Carbine, because a fork that must hide its name is a fork that
+cannot compete. Any trademark policy for the Work is written to that constraint.
+
+
+------------------------------------------------------------------------------
+ HOW TO APPLY THIS EXCEPTION TO A BUILD OF CARBINE
+------------------------------------------------------------------------------
+
+  - Convey the file `LICENSE` (GPL-3.0-only) and this file
+    `LICENSE-EXCEPTION` together, verbatim, in every artifact.
+
+  - Declare the combined license in `Cargo.toml` and `pyproject.toml`:
+
+        license = "GPL-3.0-only WITH LicenseRef-Carbine-Game-Exception"
+
+    and point the package metadata at both files. `LicenseRef-` identifiers
+    are permitted in SPDX expressions, but crate registries validate them;
+    confirm the exact spelling your chosen registry accepts before publishing.
+
+  - Add SPDX headers to every source file:
+
+        // SPDX-FileCopyrightText: 2026 <copyright holder>
+        // SPDX-License-Identifier: GPL-3.0-only
+
+    and to files that carry the exception notice:
+
+        // SPDX-License-Identifier: GPL-3.0-only
+        // WITH-Carbine-Game-Runtime-Exception-1.0
+
+  - Never use `GPL-3.0-or-later`. Section 1 is written for -only, and a
+    later GPL version would change what the exception is an exception to.
+
+  - Keep the one-page plain-language statement at the head of this file within
+    sight of the legal text, in README and in the Editor's about screen.
+
+
+------------------------------------------------------------------------------
+ END
+------------------------------------------------------------------------------
+
+This is a draft prepared without the advice of a lawyer and it is not legal
+advice. Sections 6 (closed-platform conveyance), 10 (the DCO consequence that
+the engine can never be relicensed proprietarily, by you included), and 11
+(trademark) carry the weight of the design and should each be reviewed before
+first release.
