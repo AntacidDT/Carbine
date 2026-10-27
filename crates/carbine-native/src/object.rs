@@ -51,6 +51,41 @@ pub(crate) fn set_texture_on(id: NodeId, value: Option<String>) -> PyResult<()> 
     with_scene(|scene| scene.set_texture(id, value))
 }
 
+/// Whether a node is drawn. Hiding a node hides everything under it.
+pub(crate) fn visible_of(id: NodeId) -> PyResult<bool> {
+    with_scene(|scene| scene.is_visible(id))
+}
+
+pub(crate) fn set_visible_on(id: NodeId, value: bool) -> PyResult<()> {
+    with_scene(|scene| scene.set_visible(id, value))
+}
+
+/// How a node takes part in the physics step. An object and an entity wearing it
+/// are the same node, so both handle classes show the same three knobs.
+pub(crate) fn anchored_of(id: NodeId) -> PyResult<bool> {
+    with_scene(|scene| scene.is_anchored(id))
+}
+
+pub(crate) fn set_anchored_on(id: NodeId, value: bool) -> PyResult<()> {
+    with_scene(|scene| scene.set_anchored(id, value))
+}
+
+pub(crate) fn gravity_of(id: NodeId) -> PyResult<bool> {
+    with_scene(|scene| scene.uses_gravity(id))
+}
+
+pub(crate) fn set_gravity_on(id: NodeId, value: bool) -> PyResult<()> {
+    with_scene(|scene| scene.set_uses_gravity(id, value))
+}
+
+pub(crate) fn gravity_pull_of(id: NodeId) -> PyResult<f32> {
+    with_scene(|scene| scene.gravity_pull(id))
+}
+
+pub(crate) fn set_gravity_pull_on(id: NodeId, value: f32) -> PyResult<()> {
+    with_scene(|scene| scene.set_gravity_pull(id, value))
+}
+
 /// The node behind either handle class: an object and the entity wearing it are
 /// the same node, so they compare equal.
 pub(crate) fn handle_id(value: &Bound<'_, PyAny>) -> Option<NodeId> {
@@ -259,6 +294,51 @@ impl Object {
     #[setter]
     fn set_texture(&self, value: Option<String>) -> PyResult<()> {
         set_texture_on(self.id, value)
+    }
+
+    /// Whether the object is drawn at all. False hides it and everything pinned
+    /// under it, which is how a first person player wears a body it cannot see.
+    #[getter]
+    fn visible(&self) -> PyResult<bool> {
+        visible_of(self.id)
+    }
+
+    #[setter]
+    fn set_visible(&self, value: bool) -> PyResult<()> {
+        set_visible_on(self.id, value)
+    }
+
+    /// Pinned: gravity and the solver leave the object exactly where it is.
+    #[getter]
+    fn anchored(&self) -> PyResult<bool> {
+        anchored_of(self.id)
+    }
+
+    #[setter]
+    fn set_anchored(&self, value: bool) -> PyResult<()> {
+        set_anchored_on(self.id, value)
+    }
+
+    /// Whether `Scene::step` pulls this object down. False by default.
+    #[getter]
+    fn gravity(&self) -> PyResult<bool> {
+        gravity_of(self.id)
+    }
+
+    #[setter]
+    fn set_gravity(&self, value: bool) -> PyResult<()> {
+        set_gravity_on(self.id, value)
+    }
+
+    /// Metres per second squared. 10 is Earth, 1.6 the Moon, 0 lets it hang.
+    #[getter(gravityPull)]
+    fn gravity_pull(&self) -> PyResult<f32> {
+        gravity_pull_of(self.id)
+    }
+
+    #[setter(gravityPull)]
+    fn set_gravity_pull(&self, value: f64) -> PyResult<()> {
+        set_gravity_pull_on(self.id, value as f32)
     }
 
     #[getter]

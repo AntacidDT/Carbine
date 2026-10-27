@@ -54,6 +54,36 @@ def test_a_card_lands_where_the_camera_points(flat):
         card.destroy()
 
 
+def test_an_invisible_object_leaves_the_frame(flat):
+    card = carbine.new("rectangle", name="Card")
+    rider = carbine.new("rectangle", name="Rider", parent=card)
+    try:
+        card.size = (0.5, 0.5, 1.0)
+        card.position = (0.5, 0.0, 0.0)
+        card.color = (1.0, 0.0, 0.0)
+        # A child is measured in the parent's size, so this one stands two of the
+        # card's heights above its middle.
+        rider.size = (0.2, 0.2, 1.0)
+        rider.position = (0.0, 0.0, 2.0)
+        rider.color = (0.0, 1.0, 0.0)
+
+        assert pixel(carbine.readPixels(), 52, 32) == (255, 0, 0)
+        assert pixel(carbine.readPixels(), 48, 32) == (0, 255, 0)
+
+        card.visible = False
+        pixels = carbine.readPixels()
+        assert pixel(pixels, 52, 32) == CLEAR
+        assert pixel(pixels, 48, 32) == CLEAR, "hiding a parent hides its children"
+
+        card.visible = True
+        pixels = carbine.readPixels()
+        assert pixel(pixels, 52, 32) == (255, 0, 0)
+        assert pixel(pixels, 48, 32) == (0, 255, 0)
+    finally:
+        rider.destroy()
+        card.destroy()
+
+
 def test_an_empty_scene_is_only_the_clear_colour(flat):
     pixels = carbine.readPixels()
     assert pixel(pixels, 32, 32) == CLEAR

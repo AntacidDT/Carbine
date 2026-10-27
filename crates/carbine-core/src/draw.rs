@@ -21,21 +21,24 @@ pub struct DrawItem<'a> {
 
 impl Scene {
     /// Walks the scene from the root, composing global transforms on the way
-    /// down. Nodes without geometry (the root, bodiless entities) are skipped.
+    /// down. Nodes without geometry (the root, bodiless entities) are skipped, and
+    /// a hidden node takes its children out of the frame with it.
     pub fn draw_items(&self) -> Vec<DrawItem<'_>> {
         let mut items = Vec::new();
-        let mut stack = vec![(self.root(), Mat4::IDENTITY)];
+        let mut stack = vec![(self.root(), Mat4::IDENTITY, false)];
 
-        while let Some((id, inherited)) = stack.pop() {
+        while let Some((id, inherited, hidden)) = stack.pop() {
             let Ok(entity) = self.entity(id) else {
                 continue;
             };
             let Ok(transform) = self.transform(id) else {
                 continue;
             };
+            let hidden = hidden || !self.is_visible(id).unwrap_or(true);
             let model = inherited * local_matrix(transform);
 
-            if let Some(mesh) = self.world.get::<NodeMesh>(entity)
+            if !hidden
+                && let Some(mesh) = self.world.get::<NodeMesh>(entity)
                 // UI is measured in pixels and belongs to the overlay pass, not
                 // to the world.
                 && self.world.get::<Ui>(entity).is_none()
@@ -66,7 +69,7 @@ impl Scene {
             }
 
             if let Some(children) = self.world.get::<Children>(entity) {
-                stack.extend(children.0.iter().rev().map(|child| (*child, model)));
+                stack.extend(children.0.iter().rev().map(|child| (*child, model, hidden)));
             }
         }
 
@@ -98,6 +101,28 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].node, card);
         assert_ne!(items[0].node, controller);
+    }
+
+    #[test]
+    fn a_hidden_node_and_everything_under_it_leave_the_frame() {
+        let mut scene = Scene::new();
+        let parent = scene.create("cube", None, None).unwrap();
+        let child = scene.create("cube", None, Some(parent)).unwrap();
+        let other = scene.create("cube", None, None).unwrap();
+
+        assert!(scene.is_visible(parent).unwrap());
+        assert_eq!(scene.draw_items().len(), 3);
+
+        scene.set_visible(parent, false).unwrap();
+        let nodes: Vec<_> = scene.draw_items().iter().map(|item| item.node).collect();
+        assert_eq!(nodes, vec![other]);
+        assert!(
+            !nodes.contains(&child),
+            "a hidden panel hides its children too"
+        );
+
+        scene.set_visible(parent, true).unwrap();
+        assert_eq!(scene.draw_items().len(), 3);
     }
 
     #[test]

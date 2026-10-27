@@ -5,7 +5,7 @@ use crate::mesh::MeshData;
 use crate::motion::Motion;
 use crate::node::{
     Children, DEFAULT_COLOR, NodeId, NodeKind, NodeMesh, NodeName, NodeTexture, ObjectColor,
-    Opacity, Parent, Scene, SceneError, Transform,
+    Opacity, Parent, Scene, SceneError, Transform, Visible,
 };
 use crate::primitives;
 
@@ -52,6 +52,7 @@ impl Scene {
             ObjectColor(DEFAULT_COLOR),
             Opacity::default(),
             NodeTexture::default(),
+            Visible::default(),
             EntityData { health, damage },
             Motion::default(),
             Parent(parent_id),

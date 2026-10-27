@@ -84,6 +84,17 @@ impl Default for Opacity {
 #[derive(Component, Default)]
 pub(crate) struct NodeTexture(pub(crate) Option<String>);
 
+/// Whether the node is drawn at all. A first person player hides its own body
+/// with this, and a script uses it for anything it wants out of the frame.
+#[derive(Component)]
+pub(crate) struct Visible(pub(crate) bool);
+
+impl Default for Visible {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 #[derive(Component)]
 pub(crate) struct Parent(pub(crate) NodeId);
 
@@ -135,6 +146,8 @@ pub struct Scene {
     pub(crate) next_mesh: u64,
     pub(crate) camera: Camera,
     pub(crate) sky: crate::sky::Sky,
+    pub(crate) input: crate::input::Input,
+    pub(crate) player: crate::player::PlayerController,
     root: NodeId,
 }
 
@@ -167,6 +180,8 @@ impl Scene {
             next_mesh: 1,
             camera: Camera::default(),
             sky: crate::sky::Sky::default(),
+            input: crate::input::Input::default(),
+            player: crate::player::PlayerController::default(),
             root,
         }
     }
@@ -216,6 +231,7 @@ impl Scene {
                 ObjectColor(DEFAULT_COLOR),
                 Opacity::default(),
                 NodeTexture::default(),
+                Visible::default(),
                 Motion::default(),
                 Parent(parent_id),
                 Children::default(),
@@ -445,6 +461,15 @@ impl Scene {
 
     pub fn set_texture(&mut self, id: NodeId, path: Option<String>) -> Result<(), SceneError> {
         self.component_mut::<NodeTexture>(id)?.0 = path;
+        Ok(())
+    }
+
+    pub fn is_visible(&self, id: NodeId) -> Result<bool, SceneError> {
+        Ok(self.component::<Visible>(id)?.0)
+    }
+
+    pub fn set_visible(&mut self, id: NodeId, visible: bool) -> Result<(), SceneError> {
+        self.component_mut::<Visible>(id)?.0 = visible;
         Ok(())
     }
 

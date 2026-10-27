@@ -101,18 +101,19 @@ impl Scene {
     }
 
     /// Walks the tree collecting UI elements in document order, the order they
-    /// should be painted in.
+    /// should be painted in. A hidden element hides everything below it too.
     pub fn ui_items(&self) -> Vec<UiItem<'_>> {
         let mut items = Vec::new();
-        let mut stack = vec![(self.root(), Mat4::IDENTITY)];
+        let mut stack = vec![(self.root(), Mat4::IDENTITY, false)];
 
-        while let Some((id, inherited)) = stack.pop() {
+        while let Some((id, inherited, hidden)) = stack.pop() {
             let Ok(entity) = self.entity(id) else {
                 continue;
             };
             let Ok(transform) = self.transform(id) else {
                 continue;
             };
+            let hidden = hidden || !self.is_visible(id).unwrap_or(true);
             // A panel's size never scales its children the way it would in the
             // world: an element's position is its offset from its parent in
             // pixels, and its size is always its own.
@@ -120,10 +121,12 @@ impl Scene {
                 Mat4::from_translation(transform.position) * Mat4::from_quat(transform.rotation);
             let model = inherited * layout * Mat4::from_scale(transform.scale);
 
-            if let (Some(mesh), Some(ui)) = (
-                self.world.get::<NodeMesh>(entity),
-                self.world.get::<Ui>(entity),
-            ) {
+            if !hidden
+                && let (Some(mesh), Some(ui)) = (
+                    self.world.get::<NodeMesh>(entity),
+                    self.world.get::<Ui>(entity),
+                )
+            {
                 let color = self
                     .world
                     .get::<ObjectColor>(entity)
@@ -155,7 +158,7 @@ impl Scene {
                         .0
                         .iter()
                         .rev()
-                        .map(|child| (*child, children_inherit)),
+                        .map(|child| (*child, children_inherit, hidden)),
                 );
             }
         }

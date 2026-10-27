@@ -4,8 +4,9 @@ use pyo3::types::PyAny;
 
 use crate::math::{PyQuat, PyVec3};
 use crate::object::{
-    Object, handle_id, kind_of, name_of, set_name_on, set_rotation, set_texture_on, set_vec3,
-    texture_of, vec3_of,
+    Object, anchored_of, gravity_of, gravity_pull_of, handle_id, kind_of, name_of, set_anchored_on,
+    set_gravity_on, set_gravity_pull_on, set_name_on, set_rotation, set_texture_on, set_vec3,
+    set_visible_on, texture_of, vec3_of, visible_of,
 };
 use crate::with_scene;
 
@@ -123,6 +124,17 @@ impl Entity {
         set_texture_on(self.id, value)
     }
 
+    /// Whether the entity's body is drawn. The actor keeps existing either way.
+    #[getter]
+    fn visible(&self) -> PyResult<bool> {
+        visible_of(self.id)
+    }
+
+    #[setter]
+    fn set_visible(&self, value: bool) -> PyResult<()> {
+        set_visible_on(self.id, value)
+    }
+
     #[getter]
     fn rotation(&self) -> PyResult<PyQuat> {
         let rotation = with_scene(|scene| scene.rotation(self.id))?;
@@ -147,32 +159,32 @@ impl Entity {
 
     #[getter]
     fn anchored(&self) -> PyResult<bool> {
-        with_scene(|scene| scene.is_anchored(self.id))
+        anchored_of(self.id)
     }
 
     #[setter]
     fn set_anchored(&self, value: bool) -> PyResult<()> {
-        with_scene(|scene| scene.set_anchored(self.id, value))
+        set_anchored_on(self.id, value)
     }
 
     #[getter]
     fn gravity(&self) -> PyResult<bool> {
-        with_scene(|scene| scene.uses_gravity(self.id))
+        gravity_of(self.id)
     }
 
     #[setter]
     fn set_gravity(&self, value: bool) -> PyResult<()> {
-        with_scene(|scene| scene.set_uses_gravity(self.id, value))
+        set_gravity_on(self.id, value)
     }
 
     #[getter(gravityPull)]
     fn gravity_pull(&self) -> PyResult<f32> {
-        with_scene(|scene| scene.gravity_pull(self.id))
+        gravity_pull_of(self.id)
     }
 
     #[setter(gravityPull)]
     fn set_gravity_pull(&self, value: f64) -> PyResult<()> {
-        with_scene(|scene| scene.set_gravity_pull(self.id, value as f32))
+        set_gravity_pull_on(self.id, value as f32)
     }
 
     /// Removes the actor and leaves its body in the world.

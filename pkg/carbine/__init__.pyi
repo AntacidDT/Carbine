@@ -71,6 +71,13 @@ class Object:
     def colorHex(self) -> str: ...
     # The image painted over the object's colour, as a path. None paints it flat.
     texture: str | None
+    # False leaves the object, and everything pinned under it, out of the frame.
+    visible: bool
+    # How the object takes part in `step`. Gravity is off by default.
+    anchored: bool
+    gravity: bool
+    # Metres per second squared: 10 is Earth, 1.6 the Moon, 0 lets it hang.
+    gravityPull: float
     # UI overlay knobs; a world object raises on them. Sizes are pixels.
     corner: float
     polygon: int
@@ -94,6 +101,7 @@ class Entity:
     rotationEuler: Vec3
     color: Vec3
     texture: str | None
+    visible: bool
     anchored: bool
     gravity: bool
     gravityPull: float
@@ -126,6 +134,64 @@ class Sky:
     sun: Vec3
     ambient: float
     def colors(self, zenith: str, horizon: str) -> None: ...
+
+class Mouse:
+    """The pointer as the last frame saw it. `dx` and `dy` are the pixels moved
+    since the frame before, which is only useful while the pointer is grabbed."""
+
+    @property
+    def dx(self) -> float: ...
+    @property
+    def dy(self) -> float: ...
+    @property
+    def x(self) -> float: ...
+    @property
+    def y(self) -> float: ...
+    @property
+    def left(self) -> bool: ...
+    @property
+    def right(self) -> bool: ...
+    @property
+    def middle(self) -> bool: ...
+    @property
+    def wheel(self) -> float: ...
+    @property
+    def grabbed(self) -> bool: ...
+
+class Player:
+    """The controller `carbine.player()` returns. Turn it on and the engine drives
+    the camera: WASD walks, the mouse looks, gravity pulls, and the camera rides
+    the player. Meters and seconds throughout."""
+
+    enabled: bool
+    # "first" puts the camera in the eyes; "third" parks it behind the body.
+    mode: str
+    # The feet, in meters. z is height above the ground plane. A write arrives at
+    # rest, so putting the player somewhere does not throw it.
+    position: Vec3
+    # Degrees. Yaw turns about the vertical; pitch never passes the vertical.
+    yaw: float
+    pitch: float
+    # Meters per second at full tilt.
+    speed: float
+    # Degrees turned per pixel the mouse moves.
+    sensitivity: float
+    eyeHeight: float
+    # Third person only: how far behind the body the camera sits, in meters.
+    distance: float
+    # Meters per second squared. 10 is Earth, 1.6 the Moon.
+    gravityPull: float
+    jumpStrength: float
+    @property
+    def grounded(self) -> bool: ...
+    @property
+    def velocity(self) -> Vec3: ...
+    # The object drawn as the player, which the engine hides in first person.
+    body: Object | None
+    # Escape hands the pointer back to the desktop; a click asks for it again.
+    grabMouse: bool
+    def jump(self) -> None: ...
+    def isKeyDown(self, name: str) -> bool: ...
 
 class Scene:
     @property
@@ -183,4 +249,24 @@ def spawnEntity(
 def killEntity(entity: Entity) -> None: ...
 def camera() -> Camera: ...
 def sky() -> Sky: ...
+def player() -> Player: ...
+def mouse() -> Mouse: ...
 def kinds() -> list[str]: ...
+def dt() -> float: ...
+def step(seconds: float) -> None: ...
+
+# Keys are named by the position they sit in, so "w" means the key a French
+# keyboard labels "z". `pressed` and `released` describe the last frame only.
+def key(name: str) -> bool: ...
+def pressed(name: str) -> bool: ...
+def released(name: str) -> bool: ...
+def keys() -> list[str]: ...
+
+# Takes the pointer from the desktop, or hands it back. Reports what the window
+# actually did, since a compositor can refuse. Only a player holds it.
+def grabMouse(grab: bool) -> bool: ...
+
+# For a test or a replay: input that did not come from a window.
+def injectKey(name: str, down: bool) -> None: ...
+def injectMouse(dx: float, dy: float) -> None: ...
+def injectButton(name: str, down: bool) -> None: ...

@@ -4,18 +4,20 @@
 //! GPU type, so a game, the editor, and a headless test all drive the same API.
 
 mod gpu;
+mod input;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use carbine_core::Scene;
+use carbine_core::{FrameInput, Scene};
 pub use gpu::{Gpu, RenderError, create_instance};
+use input::InputCollector;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::WindowEvent;
+use winit::event::{DeviceEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 /// What the renderer draws into: a real window or an offscreen image. Both halves
 /// are bulky, so each lives on the heap and the enum itself stays small.
@@ -47,6 +49,11 @@ struct Windowed {
     size: (u32, u32),
     closed: bool,
     failure: Option<RenderError>,
+    /// Events gathered by a pump nobody polled yet.
+    input: InputCollector,
+    /// Whether the pointer is actually held, which is not always what was asked
+    /// for: a compositor can refuse.
+    grabbed: bool,
 }
 
 struct Offscreen {
@@ -68,6 +75,8 @@ impl Renderer {
             size: (width.max(1), height.max(1)),
             closed: false,
             failure: None,
+            input: InputCollector::default(),
+            grabbed: false,
         };
 
         let deadline = Instant::now() + Duration::from_millis(2000);
@@ -108,6 +117,40 @@ impl Renderer {
         match &mut self.target {
             Target::Windowed(windowed) => windowed.render(scene),
             Target::Offscreen(offscreen) => offscreen.render(scene),
+        }
+    }
+
+    /// Everything the keyboard and mouse did since the last poll, in arrival
+    /// order. An offscreen renderer has no devices to ask and returns an empty
+    /// frame.
+    pub fn poll(&mut self) -> FrameInput {
+        match &mut self.target {
+            Target::Windowed(windowed) => {
+                windowed.pump();
+                windowed.input.take()
+            }
+            Target::Offscreen(_) => FrameInput::default(),
+        }
+    }
+
+    /// Holds the pointer in the window and hides it, which is how a mouse-driven
+    /// camera gets relative motion out of a compositor. Returns the state the
+    /// window ended up in, since a refusal is not an error worth raising.
+    pub fn set_pointer_grab(&mut self, grab: bool) -> bool {
+        let Target::Windowed(windowed) = &mut self.target else {
+            return false;
+        };
+        if windowed.grabbed != grab {
+            let held = windowed.apply_grab(grab);
+            windowed.grabbed = held;
+        }
+        windowed.grabbed
+    }
+
+    pub fn pointer_grabbed(&self) -> bool {
+        match &self.target {
+            Target::Windowed(windowed) => windowed.grabbed,
+            Target::Offscreen(_) => false,
         }
     }
 
@@ -164,6 +207,8 @@ struct Handler {
     size: (u32, u32),
     closed: bool,
     failure: Option<RenderError>,
+    input: InputCollector,
+    grabbed: bool,
 }
 
 impl ApplicationHandler for Handler {
@@ -209,6 +254,7 @@ impl ApplicationHandler for Handler {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        self.input.window_event(event.clone());
         match event {
             WindowEvent::CloseRequested => {
                 self.closed = true;
@@ -229,6 +275,15 @@ impl ApplicationHandler for Handler {
             }
             _ => {}
         }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        self.input.device_event(event);
     }
 }
 
@@ -277,6 +332,8 @@ impl Windowed {
             size: self.size,
             closed: self.closed,
             failure: self.failure.clone(),
+            input: std::mem::take(&mut self.input),
+            grabbed: self.grabbed,
         };
         let status = self
             .event_loop
@@ -286,12 +343,42 @@ impl Windowed {
             size,
             closed,
             failure,
+            mut input,
+            grabbed,
             ..
         } = handler;
         self.session = session;
         self.size = size;
+        self.grabbed = grabbed;
+        self.input.absorb(input.take());
         self.closed = closed || matches!(status, PumpStatus::Exit(_));
         self.failure = failure;
+    }
+
+    /// Asks the compositor to hold the pointer. A locked cursor is what a camera
+    /// wants, but not every desktop grants it, so a confined one that keeps the
+    /// pointer in the window is the next best thing.
+    fn apply_grab(&self, grab: bool) -> bool {
+        let Some(session) = &self.session else {
+            return false;
+        };
+        session.window.set_cursor_visible(!grab);
+
+        if !grab {
+            let _ = session.window.set_cursor_grab(CursorGrabMode::None);
+            return false;
+        }
+        if session
+            .window
+            .set_cursor_grab(CursorGrabMode::Locked)
+            .is_ok()
+        {
+            return true;
+        }
+        session
+            .window
+            .set_cursor_grab(CursorGrabMode::Confined)
+            .is_ok()
     }
 }
 

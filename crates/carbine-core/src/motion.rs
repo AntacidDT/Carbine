@@ -1,4 +1,5 @@
 use bevy_ecs::prelude::*;
+use glam::Vec3;
 
 use crate::node::{NodeId, Scene, SceneError};
 
@@ -6,13 +7,15 @@ use crate::node::{NodeId, Scene, SceneError};
 /// squared, so 10 is "normal" and 1.6 would be the Moon.
 pub const EARTH_GRAVITY_PULL: f32 = 10.0;
 
-/// How a node relates to the physics step. Pure state until the solver arrives;
-/// nothing here integrates motion yet.
+/// How a node relates to the physics step.
 #[derive(Component)]
 pub(crate) struct Motion {
     pub(crate) anchored: bool,
     pub(crate) gravity: bool,
     pub(crate) gravity_pull: f32,
+    /// Meters per second, kept between steps. Only the solver writes it, so a
+    /// node sitting still has no opinion about it.
+    pub(crate) velocity: Vec3,
 }
 
 impl Default for Motion {
@@ -21,6 +24,7 @@ impl Default for Motion {
             anchored: false,
             gravity: false,
             gravity_pull: EARTH_GRAVITY_PULL,
+            velocity: Vec3::ZERO,
         }
     }
 }
