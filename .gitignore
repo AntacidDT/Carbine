@@ -1,0 +1,17 @@
+# Rust
+/target/
+**/*.rs.bk
+**/*.pdb
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Build output
+/build/
+/dist/
+
+# OS
+.DS_Store
