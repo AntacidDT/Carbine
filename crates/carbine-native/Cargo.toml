@@ -15,6 +15,7 @@ extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 carbine-core = { path = "../carbine-core" }
+carbine-pack = { path = "../carbine-pack" }
 carbine-render = { path = "../carbine-render" }
 glam.workspace = true
 pyo3.workspace = true

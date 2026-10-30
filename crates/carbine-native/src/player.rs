@@ -203,7 +203,10 @@ impl PyPlayer {
     }
 
     /// The object drawn as the player. The engine hides it in first person and
-    /// shows it in third, and moves it with every step.
+    /// shows it in third, and moves it with every step. When the actor worn here
+    /// dies the engine takes it off, leaves it in the world and gives its
+    /// visibility back; the controller has no hit points of its own, so what the
+    /// death means is the script's to decide.
     #[getter]
     fn body(&self) -> PyResult<Option<Object>> {
         let body = with_scene(|scene| Ok(scene.player_body()))?;

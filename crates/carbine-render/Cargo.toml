@@ -8,8 +8,8 @@ repository.workspace = true
 [dependencies]
 bytemuck.workspace = true
 carbine-core = { path = "../carbine-core" }
+carbine-ktx = { path = "../carbine-ktx" }
 glam.workspace = true
-image.workspace = true
 pollster.workspace = true
 wgpu.workspace = true
 winit.workspace = true

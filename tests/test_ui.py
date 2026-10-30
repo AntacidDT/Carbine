@@ -185,6 +185,55 @@ def test_ui_draws_over_the_world(flat):
         card.destroy()
 
 
+def test_a_branch_never_crosses_between_the_overlay_and_the_world(flat):
+    cube = carbine.new("cube", name="Cube")
+    panel = carbine.ui.new("rectangle", name="Panel")
+    try:
+        with pytest.raises(ValueError, match="branch"):
+            carbine.ui.new("circle", name="Badge", parent=cube)
+        with pytest.raises(ValueError, match="branch"):
+            carbine.new("cube", name="Hidden", parent=panel)
+        with pytest.raises(ValueError, match="branch"):
+            cube.parent = panel
+        with pytest.raises(ValueError, match="branch"):
+            panel.addChild(cube)
+        with pytest.raises(ValueError, match="branch"):
+            panel.children = [cube]
+        assert cube.parent == carbine.scene.root, "a refused write moved nothing"
+        assert panel.children == []
+
+        # Both kinds still hang off the root, and each keeps its own branch.
+        badge = carbine.ui.new("circle", name="Badge", parent=panel)
+        assert panel.children == [badge]
+        badge.destroy()
+    finally:
+        panel.destroy()
+        cube.destroy()
+
+
+def test_the_child_written_last_is_the_one_painted_on_top(flat):
+    panel = carbine.ui.new("rectangle", name="Panel")
+    panel.position = (32, 32, 0)
+    panel.size = (48, 48, 1)
+    panel.color = "#000000"
+
+    under = carbine.ui.new("square", name="Under", parent=panel)
+    under.size = (32, 32, 1)
+    under.color = "#ff0000"
+    over = carbine.ui.new("square", name="Over", parent=panel)
+    over.size = (32, 32, 1)
+    over.color = "#00ff00"
+    try:
+        assert under.position.toTuple() == over.position.toTuple()
+        assert pixel(carbine.readPixels(), 32, 32) == (0, 255, 0), "the later child sits on top"
+
+        panel.children = [over, under]
+        assert panel.children == [over, under]
+        assert pixel(carbine.readPixels(), 32, 32) == (255, 0, 0), "so the list is the paint order"
+    finally:
+        panel.destroy()
+
+
 def test_an_element_hangs_off_its_panel(flat):
     panel = carbine.ui.new("rectangle", name="Panel")
     try:

@@ -165,14 +165,13 @@ mod tests {
             .set_vec_field(first, VecField::Color, Vec3::new(1.0, 0.0, 0.0))
             .unwrap();
         scene.set_opacity(first, 128.0).unwrap();
-        scene
-            .set_texture(first, Some("assets/wood.png".to_owned()))
-            .unwrap();
+        let wood = crate::test_skin("draw-wood");
+        scene.set_texture(first, Some(wood.clone())).unwrap();
 
         let items = scene.draw_items();
         assert_ne!(items[0].handle, items[1].handle);
         assert_eq!(items[0].color, [1.0, 0.0, 0.0]);
-        assert_eq!(items[0].texture, Some("assets/wood.png"));
+        assert_eq!(items[0].texture, Some(wood.as_str()));
         assert_eq!(second, items[1].node);
 
         let alpha = 128.0 / crate::node::MAX_ALPHA;

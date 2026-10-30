@@ -5,6 +5,7 @@
 
 mod gpu;
 mod input;
+mod pacing;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,6 +13,7 @@ use std::time::{Duration, Instant};
 use carbine_core::{FrameInput, Scene};
 pub use gpu::{Gpu, RenderError, create_instance};
 use input::InputCollector;
+use pacing::Pacing;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{DeviceEvent, WindowEvent};
@@ -28,6 +30,9 @@ enum Target {
 
 pub struct Renderer {
     target: Target,
+    /// The frame limits, kept on the renderer rather than the window so an
+    /// offscreen target answers the same questions with no screen to hold it.
+    pacing: Pacing,
 }
 
 /// The window, surface and device, assembled together once winit has a window.
@@ -37,6 +42,9 @@ struct Session {
     surface: wgpu::Surface<'static>,
     format: wgpu::TextureFormat,
     size: (u32, u32),
+    /// The mode the surface is configured at, remembered so a resize does not
+    /// have to ask the compositor what it offers again.
+    present_mode: wgpu::PresentMode,
     /// The world pass needs somewhere to keep depth, and a resize throws the
     /// buffer it had away.
     depth: (wgpu::Texture, wgpu::TextureView),
@@ -54,6 +62,8 @@ struct Windowed {
     /// Whether the pointer is actually held, which is not always what was asked
     /// for: a compositor can refuse.
     grabbed: bool,
+    /// When the screen's refresh rate was last asked for.
+    monitor_seen: Option<Instant>,
 }
 
 struct Offscreen {
@@ -65,6 +75,11 @@ struct Offscreen {
 impl Renderer {
     /// Opens a window and waits until it exists, so the caller learns about a
     /// headless machine here instead of on the first `render`.
+    ///
+    /// A Wayland compositor only names the screen a window stands on once that
+    /// window has actually put a frame up, so `monitor_hz` reads zero until then and
+    /// a synced window holds to its cap alone; from the first `render` onwards the
+    /// screen is included, and holds the cap back if it turns out to be the lower.
     pub fn window(title: &str, width: u32, height: u32) -> Result<Self, RenderError> {
         let event_loop =
             EventLoop::new().map_err(|error| RenderError::Window(error.to_string()))?;
@@ -77,11 +92,13 @@ impl Renderer {
             failure: None,
             input: InputCollector::default(),
             grabbed: false,
+            monitor_seen: None,
         };
+        let mut pacing = Pacing::default();
 
         let deadline = Instant::now() + Duration::from_millis(2000);
         while windowed.session.is_none() && windowed.failure.is_none() {
-            windowed.pump();
+            windowed.pump(pacing.monitor_sync());
             if windowed.session.is_some() || windowed.failure.is_some() {
                 break;
             }
@@ -95,8 +112,10 @@ impl Renderer {
             return Err(error);
         }
 
+        windowed.watch_monitor(&mut pacing, Instant::now());
         Ok(Self {
             target: Target::Windowed(Box::new(windowed)),
+            pacing,
         })
     }
 
@@ -109,13 +128,15 @@ impl Renderer {
                 width: width.max(1),
                 height: height.max(1),
             })),
+            pacing: Pacing::default(),
         })
     }
 
-    /// Draws one frame of `scene`.
+    /// Draws one frame of `scene`, then waits out whatever the frame limits still
+    /// ask for so the next one cannot start early.
     pub fn render(&mut self, scene: &Scene) -> Result<(), RenderError> {
         match &mut self.target {
-            Target::Windowed(windowed) => windowed.render(scene),
+            Target::Windowed(windowed) => windowed.render(scene, &mut self.pacing),
             Target::Offscreen(offscreen) => offscreen.render(scene),
         }
     }
@@ -126,7 +147,7 @@ impl Renderer {
     pub fn poll(&mut self) -> FrameInput {
         match &mut self.target {
             Target::Windowed(windowed) => {
-                windowed.pump();
+                windowed.pump(self.pacing.monitor_sync());
                 windowed.input.take()
             }
             Target::Offscreen(_) => FrameInput::default(),
@@ -152,6 +173,52 @@ impl Renderer {
             Target::Windowed(windowed) => windowed.grabbed,
             Target::Offscreen(_) => false,
         }
+    }
+
+    /// Frames per second the window may not pass, `None` for no cap. Returns the
+    /// rate the frame actually settles at, which is the screen's if it is lower.
+    pub fn set_fps_cap(&mut self, fps: Option<u32>) -> Option<u32> {
+        self.pacing.set_fps_cap(fps);
+        self.limit_fps()
+    }
+
+    pub fn fps_cap(&self) -> Option<u32> {
+        self.pacing.fps_cap()
+    }
+
+    /// Whether the screen is in charge of the pace. Turning it on hands the swap
+    /// chain to the compositor, turning it off asks for a mode that can run ahead;
+    /// either way the cap still holds. Returns the settled rate.
+    pub fn set_monitor_sync(&mut self, sync: bool) -> Option<u32> {
+        match &mut self.target {
+            Target::Windowed(windowed) => windowed.set_monitor_sync(&mut self.pacing, sync),
+            Target::Offscreen(_) => self.pacing.set_monitor_sync(sync),
+        }
+        self.limit_fps()
+    }
+
+    pub fn monitor_sync(&self) -> bool {
+        self.pacing.monitor_sync()
+    }
+
+    /// The refresh rate of the screen the window is standing on, zero when there is
+    /// no screen to ask or the compositor will not say.
+    pub fn monitor_hz(&self) -> u32 {
+        match &self.target {
+            Target::Windowed(windowed) => windowed.monitor_hz(),
+            Target::Offscreen(_) => 0,
+        }
+    }
+
+    /// The rate the frames settle at: the lower of the cap and the screen, `None`
+    /// when nothing holds them. The screen is asked again first, because a player
+    /// who has just typed a cap wants the rate that is true now, not the one the
+    /// last frame happened to cache.
+    pub fn limit_fps(&mut self) -> Option<u32> {
+        if let Target::Windowed(windowed) = &mut self.target {
+            windowed.watch_monitor(&mut self.pacing, Instant::now());
+        }
+        self.pacing.limit_fps()
     }
 
     /// Renders `scene` and returns its pixels as packed RGBA, top row first.
@@ -209,6 +276,7 @@ struct Handler {
     failure: Option<RenderError>,
     input: InputCollector,
     grabbed: bool,
+    sync: bool,
 }
 
 impl ApplicationHandler for Handler {
@@ -232,13 +300,15 @@ impl ApplicationHandler for Handler {
             let gpu = Gpu::new(instance, Some(&surface))?;
             let format = gpu.pick_format(&surface)?;
             let size = window.inner_size();
-            gpu.configure_surface(&surface, format, size.width, size.height);
+            let present_mode = gpu.pick_present_mode(&surface, self.sync);
+            gpu.configure_surface(&surface, format, size.width, size.height, present_mode);
             let depth = gpu.create_depth(size.width, size.height);
             Ok(Session {
                 window,
                 gpu,
                 surface,
                 format,
+                present_mode,
                 size: (size.width.max(1), size.height.max(1)),
                 depth,
             })
@@ -268,6 +338,7 @@ impl ApplicationHandler for Handler {
                         session.format,
                         size.width,
                         size.height,
+                        session.present_mode,
                     );
                     session.depth = session.gpu.create_depth(size.width, size.height);
                     session.size = self.size;
@@ -288,12 +359,13 @@ impl ApplicationHandler for Handler {
 }
 
 impl Windowed {
-    fn render(&mut self, scene: &Scene) -> Result<(), RenderError> {
+    fn render(&mut self, scene: &Scene, pacing: &mut Pacing) -> Result<(), RenderError> {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
 
-        self.pump();
+        self.pump(pacing.monitor_sync());
+        self.remember_monitor_hz(pacing);
 
         let Some(session) = &mut self.session else {
             return Ok(());
@@ -309,13 +381,18 @@ impl Windowed {
                     .gpu
                     .draw(&view, &session.depth.1, session.format, session.size, scene)?;
                 session.gpu.present(texture);
+                pacing.hold();
                 Ok(())
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 let (width, height) = session.size;
-                session
-                    .gpu
-                    .configure_surface(&session.surface, session.format, width, height);
+                session.gpu.configure_surface(
+                    &session.surface,
+                    session.format,
+                    width,
+                    height,
+                    session.present_mode,
+                );
                 session.depth = session.gpu.create_depth(width, height);
                 Ok(())
             }
@@ -325,7 +402,66 @@ impl Windowed {
         }
     }
 
-    fn pump(&mut self) {
+    /// The refresh rate of the screen the window is standing on, zero when there is
+    /// none to ask. Millihertz rounds down, which is the safe direction: 59997 is
+    /// still a 60 frame pace, not a 59 one.
+    fn monitor_hz(&self) -> u32 {
+        let millihertz = self
+            .session
+            .as_ref()
+            .and_then(|session| session.window.current_monitor())
+            .and_then(|monitor| monitor.refresh_rate_millihertz());
+        millihertz.unwrap_or_default() / 1000
+    }
+
+    /// A player unplugs at the café, so the rate is asked for again every second
+    /// while the screen is in charge. A screen that has not answered yet is asked
+    /// on every frame, because a window only reaches the desktop a moment after it
+    /// is created and guessing 0 Hz would let the cap stand in for the screen.
+    fn remember_monitor_hz(&mut self, pacing: &mut Pacing) {
+        if !pacing.monitor_sync() {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .monitor_seen
+            .is_some_and(|then| now.duration_since(then) < Duration::from_secs(1))
+        {
+            return;
+        }
+        self.watch_monitor(pacing, now);
+    }
+
+    /// Takes the screen's rate, and the moment it was taken, so the next frame can
+    /// tell whether the answer is fresh enough to keep.
+    fn watch_monitor(&mut self, pacing: &mut Pacing, now: Instant) {
+        let hz = self.monitor_hz();
+        if hz > 0 {
+            self.monitor_seen = Some(now);
+        }
+        pacing.set_monitor_hz(hz);
+    }
+
+    /// Hands the swap chain the mode the wish implies, so a change is felt on the
+    /// frame that asked for it instead of on the next resize.
+    fn set_monitor_sync(&mut self, pacing: &mut Pacing, sync: bool) {
+        pacing.set_monitor_sync(sync);
+        self.watch_monitor(pacing, Instant::now());
+
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        let mode = session.gpu.pick_present_mode(&session.surface, sync);
+        if mode != session.present_mode {
+            let (width, height) = session.size;
+            session.present_mode = mode;
+            session
+                .gpu
+                .configure_surface(&session.surface, session.format, width, height, mode);
+        }
+    }
+
+    fn pump(&mut self, sync: bool) {
         let mut handler = Handler {
             session: self.session.take(),
             title: self.title.clone(),
@@ -334,6 +470,7 @@ impl Windowed {
             failure: self.failure.clone(),
             input: std::mem::take(&mut self.input),
             grabbed: self.grabbed,
+            sync,
         };
         let status = self
             .event_loop
@@ -605,15 +742,20 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("carbine-skin-test-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("two-rows.png");
-        let image = image::RgbaImage::from_fn(2, 2, |_x, y| {
-            if y == 0 {
-                image::Rgba([255, 0, 0, 255])
-            } else {
-                image::Rgba([0, 0, 255, 255])
+        let path = directory.join("two-rows.ktx2");
+        // Two whole block rows apiece, so each half of the picture is flat BC7 blocks
+        // and a texel comes back within a step or two of the colour packed in.
+        let mut pixels = Vec::new();
+        for y in 0..8 {
+            for _ in 0..8 {
+                pixels.extend_from_slice(if y < 4 {
+                    &[255, 0, 0, 255]
+                } else {
+                    &[0, 0, 255, 255]
+                });
             }
-        });
-        image.save(&path).unwrap();
+        }
+        std::fs::write(&path, carbine_ktx::pack(8, 8, &pixels, true).unwrap()).unwrap();
 
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
         let mut scene = Scene::new();
@@ -630,9 +772,18 @@ mod tests {
             .unwrap();
 
         let pixels = renderer.read_pixels(&scene).unwrap();
-        // The top of the picture is the top of the tile on screen.
-        assert_eq!(pixel(&pixels, 64, 32, 20), [255, 0, 0]);
-        assert_eq!(pixel(&pixels, 64, 32, 44), [0, 0, 255]);
+        // The top of the picture is the top of the tile on screen. BC7 spends a level
+        // or two even on a flat block, so the ask is the same colour, not the same byte.
+        let top = pixel(&pixels, 64, 32, 20);
+        let bottom = pixel(&pixels, 64, 32, 44);
+        assert!(
+            top[0] > 248 && top[1] < 8 && top[2] < 8,
+            "the top half should read red: {top:?}"
+        );
+        assert!(
+            bottom[2] > 248 && bottom[0] < 8 && bottom[1] < 8,
+            "the bottom half should read blue: {bottom:?}"
+        );
 
         std::fs::remove_dir_all(&directory).ok();
     }
@@ -703,6 +854,264 @@ mod tests {
     fn offscreen_rendering_reports_the_adapter_it_found() {
         let renderer = Renderer::offscreen(8, 8).unwrap();
         assert!(renderer.adapter().is_some_and(|name| !name.is_empty()));
+    }
+
+    /// Precipitation is a particle crowd hung on the sky, so it shows as the drops
+    /// the core laid around the eyes rather than a pattern smeared over the frame.
+    #[test]
+    fn rain_flecks_the_frame_it_falls_through() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        side_on(&mut scene);
+        let rain = scene.create_precipitation("rain", None).unwrap();
+        scene.set_color_hex(rain, "#ffffff").unwrap();
+        // A real sky veil is spread over the whole map; a 64 pixel frame only ever
+        // holds a two metre box of it, so the box is closed in on the eyes.
+        veil_over_the_frame(&mut scene, rain);
+
+        let wet = renderer.read_pixels(&scene).unwrap();
+        scene.set_particles_active(rain, false).unwrap();
+        let dry = renderer.read_pixels(&scene).unwrap();
+
+        assert_eq!(&dry[0..4], &[22, 21, 20, 255]);
+        let brighter = (0..64 * 64)
+            .filter(|index| wet[index * 4 + 1] > dry[index * 4 + 1])
+            .count();
+        assert!(brighter > 400, "only {brighter} pixels caught a drop");
+    }
+
+    /// The steps the world takes move the crowd, so the same weather drawn a few
+    /// steps later has come down the frame.
+    #[test]
+    fn the_weather_slides_as_the_world_steps() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        side_on(&mut scene);
+        let snow = scene.create_precipitation("snow", None).unwrap();
+        veil_over_the_frame(&mut scene, snow);
+
+        let early = renderer.read_pixels(&scene).unwrap();
+        for _ in 0..3 {
+            scene.step(0.25);
+        }
+        // No player takes the step here, so the eyes are still where they were put
+        // and only the snow has had anywhere to go.
+        let late = renderer.read_pixels(&scene).unwrap();
+
+        assert_ne!(early, late, "the snowflakes never moved");
+    }
+
+    /// The framing `flat` gives, turned to look along the ground. A veil hung on the
+    /// sky stands *over* the eyes rather than through them, so a lens pointed down
+    /// at the world has nothing in front of it left to show but the top of the rain.
+    fn side_on(scene: &mut Scene) {
+        flat(scene);
+        scene.set_camera_position(Vec3::new(0.0, -4.0, 1.0));
+        scene.set_camera_target(Vec3::new(0.0, 0.0, 1.0));
+    }
+
+    /// Lay a sky veil so that a test frame can actually hold drops of it: a two
+    /// metre box over the eyes, with drops big enough to be a handful of pixels
+    /// rather than a sub-pixel smear the sampler never resolves.
+    fn veil_over_the_frame(scene: &mut Scene, veil: NodeId) {
+        scene
+            .set_particle_area(veil, Vec3::new(2.0, 2.0, 2.0))
+            .unwrap();
+        scene.set_particle_count(veil, 300).unwrap();
+        scene.set_particle_size(veil, 0.1).unwrap();
+        scene.restart_particles(veil).unwrap();
+    }
+
+    /// Fog is the air rather than anything falling through it, so it takes the far
+    /// end of a field toward its own colour and leaves the near end alone.
+    #[test]
+    fn a_fog_takes_the_far_side_of_a_field_away() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        flat(&mut scene);
+        // The eyes look down from ten meters, so one card is two meters away and
+        // the other is the full ten.
+        card(
+            &mut scene,
+            "rectangle",
+            Vec3::new(0.4, 0.4, 1.0),
+            Vec3::new(0.0, 0.0, 8.0),
+            [1.0, 0.0, 0.0],
+        );
+        card(
+            &mut scene,
+            "rectangle",
+            Vec3::new(0.4, 0.4, 1.0),
+            Vec3::new(0.5, 0.0, 0.0),
+            [1.0, 0.0, 0.0],
+        );
+
+        let clear = renderer.read_pixels(&scene).unwrap();
+        assert_eq!(pixel(&clear, 64, 48, 32), [255, 0, 0], "far, no fog");
+
+        scene.set_fog(60.0);
+        scene.set_fog_color_hex("#ffffff").unwrap();
+        let hazy = renderer.read_pixels(&scene).unwrap();
+        let near = pixel(&hazy, 64, 32, 32);
+        let far = pixel(&hazy, 64, 48, 32);
+
+        assert_eq!(near[0], 255);
+        assert_eq!(far[0], 255);
+        assert!(
+            far[1] as i32 - near[1] as i32 > 40,
+            "the far card should grey out before the near one: {near:?} vs {far:?}"
+        );
+    }
+
+    /// The crowd is drawn over the world and under the interface, because a widget
+    /// is measured in pixels and no weather is allowed to wash one out.
+    #[test]
+    fn the_weather_falls_behind_the_interface() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        button(&mut scene);
+        let rain = scene.create_precipitation("rain", None).unwrap();
+        scene.set_color_hex(rain, "#ffffff").unwrap();
+        // The veil is laid after the camera turns, so the crowd is written over the
+        // eyes that are about to look through it.
+        side_on(&mut scene);
+        veil_over_the_frame(&mut scene, rain);
+
+        let wet = renderer.read_pixels(&scene).unwrap();
+        scene.set_particles_active(rain, false).unwrap();
+        let dry = renderer.read_pixels(&scene).unwrap();
+
+        let moved = (0..64 * 64)
+            .filter(|index| wet[index * 4..index * 4 + 3] != dry[index * 4..index * 4 + 3])
+            .count();
+        assert!(
+            moved > 400,
+            "the rain painted only {moved} pixels for the button to sit over"
+        );
+        for (x, y) in [(32, 32), (14, 14), (49, 49)] {
+            assert_eq!(
+                pixel(&dry, 64, x, y),
+                [235, 122, 52],
+                "the button keeps its own colour"
+            );
+            assert_eq!(
+                pixel(&wet, 64, x, y),
+                [235, 122, 52],
+                "and keeps it with the rain falling over it"
+            );
+        }
+    }
+
+    /// One drop, alone in the middle of the frame: a system holding a single thing,
+    /// given no box to be scattered in and so standing exactly where its node does.
+    fn drop(scene: &mut Scene, shape: &str, size: f32) -> NodeId {
+        flat(scene);
+        let crowd = scene.create_particles(None, None).unwrap();
+        scene.set_particle_count(crowd, 1).unwrap();
+        scene.set_particle_area(crowd, Vec3::ZERO).unwrap();
+        scene.set_particle_size(crowd, size).unwrap();
+        scene.set_particle_shape(crowd, shape).unwrap();
+        scene.set_color_hex(crowd, "#ff0000").unwrap();
+        scene.set_particles_active(crowd, false).unwrap();
+        scene.set_particles_active(crowd, true).unwrap();
+        crowd
+    }
+
+    /// How many pixels the frame holds that are not the clear colour.
+    fn painted(pixels: &[u8]) -> usize {
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|rgba| **rgba != [22, 21, 20, 255])
+            .count()
+    }
+
+    /// A drop is a thing in the world, so it lands on the pixels the core says it
+    /// stands at rather than being smeared over the whole frame.
+    #[test]
+    fn a_single_drop_is_painted_where_the_core_puts_it() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        let crowd = drop(&mut scene, "circle", 0.4);
+        assert_eq!(scene.particles_in_air(crowd).unwrap(), 1);
+        assert_eq!(scene.particle_items()[0].at, Vec3::ZERO);
+
+        let pixels = renderer.read_pixels(&scene).unwrap();
+        let middle = pixel(&pixels, 64, 32, 32);
+        assert!(
+            middle[0] > 150 && middle[1] < 80 && middle[2] < 80,
+            "the middle of the crowd is {middle:?}, not the drop's own red"
+        );
+        assert_eq!(
+            pixel(&pixels, 64, 2, 61),
+            [22, 21, 20],
+            "the frame's corner is air"
+        );
+    }
+
+    /// The crowd is geometry, so it is tested against the depth the world wrote:
+    /// a body put in front of a drop takes it out of the picture.
+    #[test]
+    fn a_wall_in_front_hides_the_drop_behind_it() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        drop(&mut scene, "circle", 0.4);
+
+        let clear = renderer.read_pixels(&scene).unwrap();
+        assert!(
+            pixel(&clear, 64, 32, 32)[0] > 150,
+            "nothing was in front of it yet"
+        );
+
+        card(
+            &mut scene,
+            "cube",
+            Vec3::new(2.0, 2.0, 1.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            [0.0, 1.0, 0.0],
+        );
+        let walled = renderer.read_pixels(&scene).unwrap();
+        assert_eq!(
+            pixel(&walled, 64, 32, 32),
+            [0, 255, 0],
+            "the drop shone through the body in front of it"
+        );
+    }
+
+    /// A streak is the same width as the square it was offered and six times as
+    /// long along the way it travels, which is a lot more of the frame.
+    #[test]
+    fn a_streak_covers_more_of_the_frame_than_a_square() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+
+        let mut square_scene = Scene::new();
+        drop(&mut square_scene, "square", 0.4);
+        let square = painted(&renderer.read_pixels(&square_scene).unwrap());
+
+        let mut streak_scene = Scene::new();
+        drop(&mut streak_scene, "streak", 0.4);
+        let streak = painted(&renderer.read_pixels(&streak_scene).unwrap());
+
+        assert!(square > 20, "a square drop painted only {square} pixels");
+        assert!(
+            streak > square * 2,
+            "a streak of the same size painted {streak}, a square painted {square}"
+        );
+    }
+
+    /// A system switched off still exists and still keeps its settings; it simply
+    /// has nothing in the air to draw.
+    #[test]
+    fn a_switched_off_system_draws_nothing_at_all() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = Scene::new();
+        let crowd = drop(&mut scene, "circle", 0.4);
+        assert!(painted(&renderer.read_pixels(&scene).unwrap()) > 20);
+
+        scene.set_particles_active(crowd, false).unwrap();
+        assert_eq!(painted(&renderer.read_pixels(&scene).unwrap()), 0);
+        assert_eq!(scene.particle_count(crowd).unwrap(), 1);
     }
 
     /// A 40 by 40 pixel element centred on a 64 by 64 target, in Carbine orange.

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::io::Read;
 
 use bevy_ecs::component::Mutable;
 use bevy_ecs::prelude::*;
@@ -108,10 +109,22 @@ pub enum SceneError {
     CannotDestroyRoot,
     CannotReparentRoot,
     Cycle,
+    CrossedTree,
+    NotAChild,
+    DuplicateChild,
     MissingComponent,
     NotAnEntity,
     NotAUi,
+    NotAParticles,
+    UiNotCollidable,
+    UnknownShape(String),
+    UnknownParticleShape(String),
     BadColor(String),
+    UnknownDisaster(String),
+    NoSuchDisaster,
+    UnknownAtmosphere(String),
+    BadTime(String),
+    BadTexture { path: String, why: String },
 }
 
 impl fmt::Display for SceneError {
@@ -126,12 +139,62 @@ impl fmt::Display for SceneError {
             Self::CannotDestroyRoot => write!(formatter, "the scene root cannot be destroyed"),
             Self::CannotReparentRoot => write!(formatter, "the scene root cannot be reparented"),
             Self::Cycle => write!(formatter, "reparenting would create a cycle"),
+            Self::CrossedTree => write!(
+                formatter,
+                "a UI element and a world object cannot share a branch: one is measured in \
+                 pixels, the other in metres. Hang them both on the scene root instead."
+            ),
+            Self::NotAChild => write!(formatter, "that node is not a child of this one"),
+            Self::DuplicateChild => {
+                write!(formatter, "a node cannot appear in a child list twice")
+            }
             Self::MissingComponent => write!(formatter, "the object is missing a component"),
             Self::NotAnEntity => write!(formatter, "the object is not an entity"),
             Self::NotAUi => write!(formatter, "the object is not a UI element"),
+            Self::NotAParticles => {
+                write!(formatter, "the object is not a particle system")
+            }
+            Self::UiNotCollidable => {
+                write!(
+                    formatter,
+                    "a UI element is laid out in pixels and never collides"
+                )
+            }
+            Self::UnknownShape(shape) => write!(
+                formatter,
+                "unknown collider shape \"{shape}\" (available: {})",
+                crate::collision::ColliderShape::NAMES.join(", ")
+            ),
+            Self::UnknownParticleShape(shape) => write!(
+                formatter,
+                "unknown particle shape \"{shape}\" (available: {})",
+                crate::particles::ParticleShape::NAMES.join(", ")
+            ),
             Self::BadColor(color) => write!(
                 formatter,
                 "\"{color}\" is not a colour; use #rgb, #rgba, #rrggbb or #rrggbbaa"
+            ),
+            Self::UnknownDisaster(kind) => write!(
+                formatter,
+                "unknown disaster kind \"{kind}\" (available: {})",
+                crate::disaster::DisasterKind::NAMES.join(", ")
+            ),
+            Self::NoSuchDisaster => write!(formatter, "no such disaster"),
+            Self::UnknownAtmosphere(kind) => write!(
+                formatter,
+                "unknown atmosphere kind \"{kind}\" (available: {}; fog is a knob on \
+                 `atmosphere`, not something that falls)",
+                crate::atmosphere::Precipitation::NAMES.join(", ")
+            ),
+            Self::BadTime(clock) => write!(
+                formatter,
+                "\"{clock}\" is not a time; write \"07:30\" or the hours past midnight"
+            ),
+            Self::BadTexture { path, why } => write!(
+                formatter,
+                "\"{path}\" cannot skin an object: {why}. Images come to Carbine as .ktx2, so \
+                 pack it first with carbine.packager.image(\"{path}\") and skin the object with \
+                 the path that hands back."
             ),
         }
     }
@@ -148,6 +211,19 @@ pub struct Scene {
     pub(crate) sky: crate::sky::Sky,
     pub(crate) input: crate::input::Input,
     pub(crate) player: crate::player::PlayerController,
+    /// The pairs that rode into each other during the last step. The solver
+    /// writes it and the damage pass reads it, so a script can answer a touch.
+    pub(crate) contacts: Vec<(NodeId, NodeId)>,
+    /// Weather, in the order a script wrote it. A disaster is a rule the solver
+    /// asks about every step, not a node, so it has its own little register.
+    pub(crate) disasters: Vec<crate::disaster::Disaster>,
+    pub(crate) next_disaster: u64,
+    /// What the air looks like: how thick the fog is and what clock the world is
+    /// lit for. Neither of these is a node, so the scene holds them itself.
+    pub(crate) atmosphere: crate::atmosphere::Atmosphere,
+    /// How far the view is allowed to sit away from the player's eyes this frame,
+    /// written by the disasters and added by the follow camera.
+    pub(crate) shake: Vec3,
     root: NodeId,
 }
 
@@ -182,6 +258,11 @@ impl Scene {
             sky: crate::sky::Sky::default(),
             input: crate::input::Input::default(),
             player: crate::player::PlayerController::default(),
+            contacts: Vec::new(),
+            disasters: Vec::new(),
+            next_disaster: 0,
+            atmosphere: crate::atmosphere::Atmosphere::default(),
+            shake: Vec3::ZERO,
             root,
         }
     }
@@ -204,6 +285,7 @@ impl Scene {
             primitives::build(kind).ok_or_else(|| SceneError::UnknownKind(kind.to_owned()))?;
         if let Some(parent) = parent {
             self.entity(parent)?;
+            self.branch_allows(parent, false)?;
         }
 
         Ok(self.spawn(kind, name, parent, data))
@@ -281,6 +363,8 @@ impl Scene {
         if self.is_ancestor(id, new_parent)? {
             return Err(SceneError::Cycle);
         }
+        let in_ui = self.is_ui(id)?;
+        self.branch_allows(new_parent, in_ui)?;
 
         let old_parent = self.parent(id)?.ok_or(SceneError::CannotReparentRoot)?;
         if old_parent == new_parent {
@@ -299,6 +383,74 @@ impl Scene {
         }
         if let Some(mut parent) = self.world.get_mut::<Parent>(entity) {
             parent.0 = new_parent;
+        }
+
+        Ok(())
+    }
+
+    /// Hangs `child` under `parent`, at the end of its children. `parent` keeps
+    /// its own transform, so the child starts moving with the branch.
+    pub fn add_child(&mut self, parent: NodeId, child: NodeId) -> Result<(), SceneError> {
+        self.entity(parent)?;
+        self.reparent(child, Some(parent))
+    }
+
+    /// Takes `child` off `parent` and hangs it on the scene root, where it stops
+    /// moving with the branch it came off. Removing a child never destroys it:
+    /// `destroy` is the call that means that.
+    pub fn remove_child(&mut self, parent: NodeId, child: NodeId) -> Result<(), SceneError> {
+        self.entity(parent)?;
+        if !self.children(parent)?.contains(&child) {
+            return Err(SceneError::NotAChild);
+        }
+        self.reparent(child, None)
+    }
+
+    /// Replaces a node's child list. The order given is the order the branch is
+    /// walked in, which is also the order UI elements are painted, so it is how a
+    /// script decides what sits on top.
+    ///
+    /// Children already attached but left out of the list move to the scene root:
+    /// they are detached, never destroyed, and everything under them comes with
+    /// them. New children are hung on, so this adopts as well as reorders.
+    pub fn set_children(&mut self, parent: NodeId, kids: &[NodeId]) -> Result<(), SceneError> {
+        self.entity(parent)?;
+
+        let mut ordered: Vec<NodeId> = Vec::with_capacity(kids.len());
+        for kid in kids {
+            self.entity(*kid)?;
+            if *kid == self.root {
+                return Err(SceneError::CannotReparentRoot);
+            }
+            // The parent itself would close the branch on a loop, and so would any
+            // node the parent already hangs under.
+            if *kid == parent || self.is_ancestor(*kid, parent)? {
+                return Err(SceneError::Cycle);
+            }
+            if ordered.contains(kid) {
+                return Err(SceneError::DuplicateChild);
+            }
+            // Checked here rather than left to the moves below, so a list naming a
+            // world node under a panel is refused before it detaches anything.
+            self.branch_allows(parent, self.is_ui(*kid)?)?;
+            ordered.push(*kid);
+        }
+
+        for old in self.children(parent)? {
+            if !ordered.contains(&old) {
+                self.reparent(old, None)?;
+            }
+        }
+        for kid in &ordered {
+            self.reparent(*kid, Some(parent))?;
+        }
+
+        // A child that already hung here answers `reparent` with "no change", which
+        // would leave it wherever it was, so the list is written out rather than
+        // trusted to the appends above.
+        let parent_entity = self.entity(parent)?;
+        if let Some(mut children) = self.world.get_mut::<Children>(parent_entity) {
+            children.0 = ordered;
         }
 
         Ok(())
@@ -423,13 +575,7 @@ impl Scene {
 
     /// The colour the way a design tool writes it: `#rrggbb`, lowercase.
     pub fn color_hex(&self, id: NodeId) -> Result<String, SceneError> {
-        let color = self.color(id)?;
-        Ok(format!(
-            "#{:02x}{:02x}{:02x}",
-            channel(color.x),
-            channel(color.y),
-            channel(color.z)
-        ))
+        Ok(hex_of(self.color(id)?))
     }
 
     /// Accepts `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa`. A trailing alpha sets
@@ -460,7 +606,16 @@ impl Scene {
     }
 
     pub fn set_texture(&mut self, id: NodeId, path: Option<String>) -> Result<(), SceneError> {
-        self.component_mut::<NodeTexture>(id)?.0 = path;
+        let mut slot = self.component_mut::<NodeTexture>(id)?;
+        if let Some(path) = &path
+            && let Err(why) = packed(path)
+        {
+            return Err(SceneError::BadTexture {
+                path: path.clone(),
+                why,
+            });
+        }
+        slot.0 = path;
         Ok(())
     }
 
@@ -499,6 +654,20 @@ impl Scene {
         let handle = MeshHandle(self.next_mesh);
         self.next_mesh += 1;
         handle
+    }
+
+    /// Whether `parent` may hold a node of `child_ui` kind. The overlay is measured
+    /// in pixels and the world in metres, so a branch never crosses between them -
+    /// except at the scene root, which is where both kinds are hung.
+    pub(crate) fn branch_allows(&self, parent: NodeId, child_ui: bool) -> Result<(), SceneError> {
+        if parent == self.root {
+            return Ok(());
+        }
+        if self.is_ui(parent)? == child_ui {
+            Ok(())
+        } else {
+            Err(SceneError::CrossedTree)
+        }
     }
 
     pub(crate) fn attach(&mut self, id: NodeId, parent: NodeId) {
@@ -550,6 +719,18 @@ fn channel(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+/// Channels in 0..1 written the way a design tool writes them: `#rrggbb`, lowercase.
+/// Anything that wants a colour out of the engine asks for it in this form, so a
+/// preset and a script's own write go through the same door.
+pub(crate) fn hex_of(color: Vec3) -> String {
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        channel(color.x),
+        channel(color.y),
+        channel(color.z)
+    )
+}
+
 pub(crate) fn parse_hex_color(hex: &str) -> Option<(Vec3, Option<f32>)> {
     let digits = hex.strip_prefix('#').unwrap_or(hex);
     let pairs: Vec<Option<u32>> = match digits.len() {
@@ -575,6 +756,25 @@ pub(crate) fn parse_hex_color(hex: &str) -> Option<(Vec3, Option<f32>)> {
         channels[2] as f32 / 255.0,
     );
     Some((color, channels.get(3).map(|&v| v as f32)))
+}
+
+/// Whether a path is a file Carbine's one image loader can read. Only the header is
+/// opened: the renderer checks the whole container when it puts the skin on the GPU,
+/// and a script that names a PNG hears about it here rather than watching an object
+/// draw in a flat colour.
+fn packed(path: &str) -> Result<(), String> {
+    let mut head = [0u8; carbine_ktx::MAGIC.len()];
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Err("there is no file at that path".to_owned());
+    };
+    if file.read_exact(&mut head).is_err() {
+        return Err("it is shorter than an image".to_owned());
+    }
+    if carbine_ktx::is_ktx2(&head) {
+        Ok(())
+    } else {
+        Err("it is not a KTX2 file".to_owned())
+    }
 }
 
 fn set_axis(vector: &mut Vec3, axis: Axis, value: f32) {
@@ -706,6 +906,140 @@ mod tests {
     }
 
     #[test]
+    fn a_child_list_reorders_adopts_and_detaches_the_rest() {
+        let mut scene = Scene::new();
+        let panel = scene.create("rectangle", None, None).unwrap();
+        let first = scene.create("square", None, Some(panel)).unwrap();
+        let second = scene.create("square", None, Some(panel)).unwrap();
+        let third = scene.create("square", None, Some(panel)).unwrap();
+        let stranger = scene.create("square", None, None).unwrap();
+
+        scene
+            .set_children(panel, &[third, first, stranger])
+            .unwrap();
+        assert_eq!(scene.children(panel).unwrap(), vec![third, first, stranger]);
+        assert_eq!(
+            scene.parent(stranger).unwrap(),
+            Some(panel),
+            "a node listed but not yet hung here is adopted"
+        );
+        assert_eq!(
+            scene.parent(second).unwrap(),
+            Some(scene.root()),
+            "a child left out is detached, not destroyed"
+        );
+        assert_eq!(scene.node_count(), 5, "and every node is still standing");
+        assert!(scene.name(second).is_ok());
+
+        scene.set_children(panel, &[first]).unwrap();
+        assert_eq!(scene.children(panel).unwrap(), vec![first]);
+        assert!(scene.name(third).is_ok());
+    }
+
+    #[test]
+    fn a_child_list_refuses_loops_and_repeats_without_changing_anything() {
+        let mut scene = Scene::new();
+        let root = scene.root();
+        let parent = scene.create("rectangle", None, None).unwrap();
+        let child = scene.create("rectangle", None, Some(parent)).unwrap();
+        let grandchild = scene.create("rectangle", None, Some(child)).unwrap();
+
+        assert!(matches!(
+            scene.set_children(parent, &[parent]),
+            Err(SceneError::Cycle)
+        ));
+        assert!(matches!(
+            scene.set_children(grandchild, &[parent]),
+            Err(SceneError::Cycle)
+        ));
+        assert!(matches!(
+            scene.set_children(parent, &[child, child]),
+            Err(SceneError::DuplicateChild)
+        ));
+        assert!(matches!(
+            scene.set_children(parent, &[root]),
+            Err(SceneError::CannotReparentRoot)
+        ));
+        assert_eq!(scene.children(parent).unwrap(), vec![child]);
+        assert_eq!(scene.children(child).unwrap(), vec![grandchild]);
+
+        // A node deeper in the branch is not a loop: this just pulls it up a level.
+        scene.set_children(parent, &[grandchild]).unwrap();
+        assert_eq!(scene.children(child).unwrap(), Vec::<NodeId>::new());
+        assert_eq!(scene.parent(grandchild).unwrap(), Some(parent));
+    }
+
+    #[test]
+    fn adding_and_removing_a_child_moves_one_node() {
+        let mut scene = Scene::new();
+        let parent = scene.create("rectangle", None, None).unwrap();
+        let first = scene.create("square", None, Some(parent)).unwrap();
+        let second = scene.create("square", None, None).unwrap();
+
+        scene.add_child(parent, second).unwrap();
+        assert_eq!(
+            scene.children(parent).unwrap(),
+            vec![first, second],
+            "a fresh child goes last"
+        );
+
+        scene.remove_child(parent, first).unwrap();
+        assert_eq!(scene.children(parent).unwrap(), vec![second]);
+        assert_eq!(scene.parent(first).unwrap(), Some(scene.root()));
+        assert!(
+            scene.name(first).is_ok(),
+            "removing a child never destroys it"
+        );
+
+        assert!(matches!(
+            scene.remove_child(parent, first),
+            Err(SceneError::NotAChild)
+        ));
+        assert!(matches!(
+            scene.add_child(parent, parent),
+            Err(SceneError::Cycle)
+        ));
+    }
+
+    #[test]
+    fn the_overlay_and_the_world_never_share_a_branch() {
+        let mut scene = Scene::new();
+        let cube = scene.create("cube", None, None).unwrap();
+        let panel = scene.create_ui("rectangle", None, None).unwrap();
+
+        assert!(matches!(
+            scene.create_ui("circle", None, Some(cube)),
+            Err(SceneError::CrossedTree)
+        ));
+        assert!(matches!(
+            scene.create("cube", None, Some(panel)),
+            Err(SceneError::CrossedTree)
+        ));
+        assert!(matches!(
+            scene.spawn_entity(Some("cube"), None, Some(panel), None, 1.0, 1.0),
+            Err(SceneError::CrossedTree)
+        ));
+        assert!(matches!(
+            scene.reparent(cube, Some(panel)),
+            Err(SceneError::CrossedTree)
+        ));
+        assert!(matches!(
+            scene.reparent(panel, Some(cube)),
+            Err(SceneError::CrossedTree)
+        ));
+        assert!(matches!(
+            scene.set_children(panel, &[cube]),
+            Err(SceneError::CrossedTree)
+        ));
+
+        // Each branch stays in its own units, and the root still holds both.
+        let badge = scene.create_ui("circle", None, Some(panel)).unwrap();
+        let lid = scene.create("cube", None, Some(cube)).unwrap();
+        assert_eq!(scene.children(panel).unwrap(), vec![badge]);
+        assert_eq!(scene.children(cube).unwrap(), vec![lid]);
+    }
+
+    #[test]
     fn destroying_a_node_destroys_its_subtree() {
         let mut scene = Scene::new();
         let parent = scene.create("rectangle", None, None).unwrap();
@@ -777,16 +1111,57 @@ mod tests {
         let mut scene = Scene::new();
         let crate_ = scene.create("cube", None, None).unwrap();
 
-        scene
-            .set_texture(crate_, Some("assets/wood.png".to_owned()))
-            .unwrap();
+        let wood = crate::test_skin("node-wood");
+        scene.set_texture(crate_, Some(wood.clone())).unwrap();
         assert_eq!(
             scene.texture(crate_).unwrap().as_deref(),
-            Some("assets/wood.png")
+            Some(wood.as_str())
         );
 
         scene.set_texture(crate_, None).unwrap();
         assert_eq!(scene.texture(crate_).unwrap(), None);
+    }
+
+    #[test]
+    fn a_skin_has_to_be_a_packed_image() {
+        let mut scene = Scene::new();
+        let crate_ = scene.create("cube", None, None).unwrap();
+
+        let missing = scene.set_texture(crate_, Some("assets/wood.png".to_owned()));
+        assert!(
+            matches!(&missing, Err(SceneError::BadTexture { why, .. })
+                if why == "there is no file at that path"),
+            "{missing:?}"
+        );
+
+        let lying = std::env::temp_dir().join("carbine-node-lying-skin.png");
+        std::fs::write(
+            &lying,
+            [
+                0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R',
+            ],
+        )
+        .unwrap();
+        let wrong = scene.set_texture(crate_, Some(lying.to_str().unwrap().to_owned()));
+        assert!(
+            matches!(&wrong, Err(SceneError::BadTexture { why, .. })
+                if why == "it is not a KTX2 file"),
+            "{wrong:?}"
+        );
+        assert_eq!(
+            scene.texture(crate_).unwrap(),
+            None,
+            "a refused path leaves the object unskinned"
+        );
+        assert!(
+            wrong
+                .unwrap_err()
+                .to_string()
+                .contains("carbine.packager.image"),
+            "the refusal has to name the tool that fixes it"
+        );
+
+        std::fs::remove_file(&lying).ok();
     }
 
     #[test]

@@ -140,6 +140,23 @@ def test_the_camera_rides_the_player(walker):
     assert camera.position.x > 2.5, "the eyes go where the feet go"
 
 
+def test_a_step_leaves_a_camera_the_script_owns_alone():
+    """No player, so no eyes to put the lens back on: the camera a script placed is
+    its own, and stepping the world must not take it away."""
+    player = carbine.player()
+    player.enabled = False
+    let_go()
+
+    camera = carbine.camera()
+    camera.position = (0.0, -4.0, 1.0)
+    camera.target = (0.0, 0.0, 1.0)
+    for _ in range(30):
+        carbine.step(1.0 / 60.0)
+
+    assert tuple(camera.position) == (0.0, -4.0, 1.0)
+    assert tuple(camera.target) == (0.0, 0.0, 1.0)
+
+
 def test_third_person_parks_a_camera_behind_the_body(walker):
     walker.mode = "third"
     walker.distance = 4.0

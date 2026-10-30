@@ -343,11 +343,20 @@ impl Scene {
         self.follow_camera();
     }
 
-    /// Keeps the camera on the player: in the eyes, or behind the body.
-    fn follow_camera(&mut self) {
+    /// Keeps the camera on the player: in the eyes, or behind the body. The view is
+    /// the only thing a quake is allowed to move without moving the body, so the
+    /// shaking is added here and never to `player.position` — the collider walks the
+    /// floor while the eyes rattle above it.
+    ///
+    /// Only while the player is being driven: a script that has put the camera
+    /// somewhere itself owns that camera, and a step has no business taking it back.
+    pub(crate) fn follow_camera(&mut self) {
+        if !self.player.enabled {
+            return;
+        }
         let player = self.player;
         let look = player.look();
-        let eyes = player.position + UP * player.eye_height;
+        let eyes = player.position + UP * player.eye_height + self.shake;
 
         match player.mode {
             PlayerMode::FirstPerson => {
@@ -356,7 +365,7 @@ impl Scene {
             }
             PlayerMode::ThirdPerson => {
                 let head = player.position + UP * (player.eye_height * 0.9);
-                let mut back = head - look * player.distance;
+                let mut back = head - look * player.distance + self.shake;
                 // A camera under the floor shows the world from inside it.
                 back.z = back.z.max(GROUND_HEIGHT + 0.1);
                 self.set_camera_position(back);
@@ -584,6 +593,22 @@ mod tests {
             third.position
         );
         assert!(near(third.target, Vec3::new(0.0, 0.0, 1.44)));
+    }
+
+    #[test]
+    fn a_camera_a_script_owns_survives_a_step() {
+        let mut scene = Scene::new();
+        scene.set_camera_position(Vec3::new(0.0, -4.0, 1.0));
+        scene.set_camera_target(Vec3::ZERO);
+
+        for _ in 0..10 {
+            scene.step(1.0 / 60.0);
+        }
+
+        // No player is being driven, so there are no eyes to put the lens back on,
+        // and the framing the script wrote is still the framing it asked for.
+        assert_eq!(scene.camera().position, Vec3::new(0.0, -4.0, 1.0));
+        assert_eq!(scene.camera().target, Vec3::ZERO);
     }
 
     #[test]

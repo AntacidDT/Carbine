@@ -1,19 +1,22 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use carbine_core::{DrawItem, MeshData, MeshHandle, Scene, Sky};
+use carbine_core::{DrawItem, MeshData, MeshHandle, ParticleItem, ParticleShape, Scene, Sky};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-/// The world pass: one directional light over an optional skin. A face that
-/// points away from the sun keeps its colour at ambient brightness, which is
-/// what makes a cube read as a solid.
+/// The world pass: one directional light over an optional skin, mixed toward the
+/// colour of the air by how far each pixel stands from the eyes. A face that
+/// points away from the sun keeps its colour at ambient brightness, which is what
+/// makes a cube read as a solid.
 const WORLD_SHADER: &str = r#"
 struct Uniforms {
     view_proj: mat4x4<f32>,
     model: mat4x4<f32>,
     color: vec4<f32>,
     sun: vec4<f32>,
+    fog: vec4<f32>,
+    eyes: vec4<f32>,
     skinned: f32,
 };
 
@@ -25,6 +28,7 @@ struct Pixel {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
+    @location(2) world: vec3<f32>,
 };
 
 @vertex
@@ -34,7 +38,9 @@ fn versus(
     @location(2) uv: vec2<f32>,
 ) -> Pixel {
     var pixel: Pixel;
-    pixel.clip = uniforms.view_proj * uniforms.model * vec4<f32>(position, 1.0);
+    let place = uniforms.model * vec4<f32>(position, 1.0);
+    pixel.clip = uniforms.view_proj * place;
+    pixel.world = place.xyz;
     pixel.normal = normalize((uniforms.model * vec4<f32>(normal, 0.0)).xyz);
     pixel.uv = uv;
     return pixel;
@@ -47,7 +53,13 @@ fn fragment(pixel: Pixel) -> @location(0) vec4<f32> {
     let base = mix(uniforms.color.rgb, skin.rgb * uniforms.color.rgb, uniforms.skinned);
     let facing = max(dot(normalize(pixel.normal), uniforms.sun.xyz), 0.0);
     let lit = uniforms.sun.w + (1.0 - uniforms.sun.w) * facing;
-    return vec4<f32>(base * lit, uniforms.color.a * mix(1.0, skin.a, uniforms.skinned));
+    // Fog is the air rather than anything falling through it, so it is a distance
+    // rather than a shape: every metre between the pixel and the eyes takes some of
+    // the picture away. A density of zero leaves the colour exactly as it was lit.
+    let away = length(pixel.world - uniforms.eyes.xyz);
+    let veil = 1.0 - exp(-max(uniforms.fog.w, 0.0) * away);
+    let tinted = mix(base * lit, uniforms.fog.xyz, clamp(veil, 0.0, 1.0));
+    return vec4<f32>(tinted, uniforms.color.a * mix(1.0, skin.a, uniforms.skinned));
 }
 "#;
 
@@ -95,6 +107,110 @@ fn fragment(@builtin(position) window: vec4<f32>) -> @location(0) vec4<f32> {
     let tint = mix(uniforms.horizon.rgb, uniforms.zenith.rgb, pow(height, 0.45));
     let dust = grain(window.xy) * uniforms.noise;
     return vec4<f32>(clamp(tint + vec3<f32>(dust), vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+"#;
+
+/// A crowd: one instance per thing in the air, each a quad stood up to face the
+/// eyes at its own world position. Unlike the veil above, this is geometry, so a
+/// wall hides the rain behind it and a drop lands on the floor it was thrown off.
+///
+/// The core says where each thing is, how wide it is, which way it travels, and
+/// what colour it kept; how a streak, a chip and a mote each look is decided here.
+const PARTICLE_SHADER: &str = r#"
+struct ParticleUniforms {
+    view_proj: mat4x4<f32>,
+    right: vec4<f32>,
+    up: vec4<f32>,
+    fog: vec4<f32>,
+    eyes: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> uniforms: ParticleUniforms;
+@group(0) @binding(1) var skin_sampler: sampler;
+@group(0) @binding(2) var skin: texture_2d<f32>;
+
+struct Pixel {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) local: vec2<f32>,
+    @location(1) tint: vec4<f32>,
+    @location(2) look: vec2<f32>,
+    @location(3) world: vec3<f32>,
+    @location(4) uv: vec2<f32>,
+};
+
+@vertex
+fn versus(
+    @location(0) corner: vec2<f32>,
+    @location(1) place: vec4<f32>,
+    @location(2) motion: vec4<f32>,
+    @location(3) tint: vec4<f32>,
+    @location(4) look: vec4<f32>,
+) -> Pixel {
+    // The long axis of a streak is the way it travels, seen from the eyes: a drop
+    // falling towards the camera stays a dot and one crossing the frame is a line.
+    let speed = length(motion.xyz);
+    let screen = vec2<f32>(
+        dot(motion.xyz, uniforms.right.xyz),
+        dot(motion.xyz, uniforms.up.xyz),
+    );
+    var long = uniforms.up.xyz;
+    var wide = uniforms.right.xyz;
+    if (length(screen) > 1.0e-4 * max(speed, 1.0)) {
+        let seen = length(screen);
+        long = uniforms.right.xyz * (screen.x / seen) + uniforms.up.xyz * (screen.y / seen);
+        wide = uniforms.right.xyz * (-screen.y / seen) + uniforms.up.xyz * (screen.x / seen);
+    }
+
+    let half = max(place.w, 0.0) * 0.5;
+    let stretch = max(motion.w, 1.0);
+    let offset = long * (corner.x * half * stretch) + wide * (corner.y * half);
+
+    var pixel: Pixel;
+    pixel.clip = uniforms.view_proj * vec4<f32>(place.xyz + offset, 1.0);
+    pixel.local = corner;
+    pixel.tint = tint;
+    pixel.look = look.xy;
+    pixel.world = place.xyz;
+    // The quad's own x axis is the way the drop travels and y is across it, while an
+    // image is stored top row first and read left to right, so the skin's across axis
+    // is corner.y and its top edge sits at corner.x.
+    pixel.uv = vec2<f32>(corner.y * 0.5 + 0.5, 0.5 - corner.x * 0.5);
+    return pixel;
+}
+
+/// Coverage of a shape whose signed distance is `distance`, measured in the
+/// shortest half of the quad. `fwidth` is what makes one feather one pixel,
+/// however far away or tiny the thing is.
+fn coverage(distance: f32) -> f32 {
+    let feather = max(fwidth(distance), 1.0e-5);
+    return 1.0 - smoothstep(-feather, feather, distance);
+}
+
+@fragment
+fn fragment(pixel: Pixel) -> @location(0) vec4<f32> {
+    // 0 a streak, 1 a chip, 2 a mote. The first two are boxes in the quad's own
+    // axes, and a streak is a capsule running the length of its long axis.
+    var distance = 1.0;
+    if (pixel.look.x < 0.5) {
+        let stretch = max(pixel.look.y, 1.0);
+        let along = vec2<f32>(pixel.local.x * stretch, pixel.local.y);
+        let core = vec2<f32>(stretch - 1.0, 0.0);
+        let nearest = vec2<f32>(clamp(along.x, -core.x, core.x), 0.0);
+        distance = length(along - nearest) - 1.0;
+    } else if (pixel.look.x < 1.5) {
+        distance = max(abs(pixel.local.x), abs(pixel.local.y)) - 1.0;
+    } else {
+        distance = length(pixel.local) - 1.0;
+    }
+
+    let skin = textureSample(skin, skin_sampler, pixel.uv);
+    let base = pixel.tint.rgb * skin.rgb;
+    // Fog is the air the crowd falls through, so a far drop is as washed out as a
+    // far wall.
+    let away = length(pixel.world - uniforms.eyes.xyz);
+    let haze = clamp(1.0 - exp(-max(uniforms.fog.w, 0.0) * away), 0.0, 1.0);
+    let tinted = mix(base, uniforms.fog.xyz, haze);
+    return vec4<f32>(tinted, pixel.tint.a * skin.a * coverage(distance));
 }
 "#;
 
@@ -204,6 +320,8 @@ struct Uniforms {
     model: [[f32; 4]; 4],
     color: [f32; 4],
     sun: [f32; 4],
+    fog: [f32; 4],
+    eyes: [f32; 4],
     skinned: f32,
     _pad: [f32; 3],
 }
@@ -232,6 +350,51 @@ struct UiUniforms {
     _pad: [f32; 3],
 }
 
+/// What a crowd is drawn with: the same camera for every thing in it, plus the air
+/// its drops are washed into.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ParticleUniforms {
+    view_proj: [[f32; 4]; 4],
+    /// The world direction that is screen right, taken from the eyes' own view.
+    right: [f32; 4],
+    /// And screen up. A streak is turned to face the lens out of these two.
+    up: [f32; 4],
+    fog: [f32; 4],
+    eyes: [f32; 4],
+}
+
+/// One thing in the air, as the crowd's instance buffer holds it.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ParticleInstance {
+    /// Where it stands, in meters, and how wide it is.
+    place: [f32; 4],
+    /// How fast and which way it travels, and how many widths a streak is long.
+    motion: [f32; 4],
+    tint: [f32; 4],
+    /// Which shape to cut, how long the streak is, and how far the thing stands
+    /// from the eyes - back to front is the order they are drawn in.
+    look: [f32; 4],
+}
+
+impl ParticleInstance {
+    fn of(item: &ParticleItem<'_>, eyes: Vec3) -> ParticleInstance {
+        let code = match item.shape {
+            ParticleShape::Streak => 0.0,
+            ParticleShape::Square => 1.0,
+            ParticleShape::Circle => 2.0,
+        };
+        let stretch = item.shape.stretch();
+        ParticleInstance {
+            place: [item.at.x, item.at.y, item.at.z, item.size],
+            motion: [item.velocity.x, item.velocity.y, item.velocity.z, stretch],
+            tint: [item.color[0], item.color[1], item.color[2], item.alpha],
+            look: [code, stretch, (item.at - eyes).length(), 0.0],
+        }
+    }
+}
+
 /// How a pipeline draws: which shader, whether it is tested against depth, and
 /// whether it binds a skin.
 struct Spec {
@@ -240,6 +403,9 @@ struct Spec {
     uniform_bytes: usize,
     /// A pipeline with no vertex buffer at all, used by the backdrop.
     fullscreen: bool,
+    /// A pipeline whose second vertex buffer is one row per thing drawn, used by a
+    /// crowd.
+    instanced: bool,
     skinned: bool,
     /// Whether the pass it draws into carries a depth attachment.
     depth: bool,
@@ -251,6 +417,7 @@ const WORLD: Spec = Spec {
     source: WORLD_SHADER,
     uniform_bytes: std::mem::size_of::<Uniforms>(),
     fullscreen: false,
+    instanced: false,
     skinned: true,
     depth: true,
     depth_write: true,
@@ -263,6 +430,7 @@ const GLASS: Spec = Spec {
     source: WORLD_SHADER,
     uniform_bytes: std::mem::size_of::<Uniforms>(),
     fullscreen: false,
+    instanced: false,
     skinned: true,
     depth: true,
     depth_write: false,
@@ -273,6 +441,7 @@ const SKY: Spec = Spec {
     source: SKY_SHADER,
     uniform_bytes: std::mem::size_of::<SkyUniforms>(),
     fullscreen: true,
+    instanced: false,
     skinned: false,
     depth: true,
     depth_write: false,
@@ -283,8 +452,22 @@ const UI: Spec = Spec {
     source: UI_SHADER,
     uniform_bytes: std::mem::size_of::<UiUniforms>(),
     fullscreen: false,
+    instanced: false,
     skinned: false,
     depth: false,
+    depth_write: false,
+};
+
+/// A crowd of drops: blended over the world it falls through, tested against its
+/// depth so a wall hides what is behind it, and never claiming that depth itself.
+const PARTICLES: Spec = Spec {
+    label: "carbine particles",
+    source: PARTICLE_SHADER,
+    uniform_bytes: std::mem::size_of::<ParticleUniforms>(),
+    fullscreen: false,
+    instanced: true,
+    skinned: true,
+    depth: true,
     depth_write: false,
 };
 
@@ -350,15 +533,21 @@ pub struct Gpu {
     pub adapter_name: String,
     sampler: wgpu::Sampler,
     meshes: HashMap<MeshHandle, GpuMesh>,
-    /// `None` records a path that could not be decoded, so a missing file is
-    /// opened once rather than once per frame.
+    /// `None` records a skin that could not be read, so a broken file is opened
+    /// once rather than once per frame.
     skins: HashMap<String, Option<wgpu::TextureView>>,
     /// The white pixel every untextured object is skinned with.
     plain: wgpu::TextureView,
     world: HashMap<wgpu::TextureFormat, Pipeline>,
     glass: HashMap<wgpu::TextureFormat, Pipeline>,
     sky: HashMap<wgpu::TextureFormat, Pipeline>,
+    particles: HashMap<wgpu::TextureFormat, Pipeline>,
     ui: HashMap<wgpu::TextureFormat, Pipeline>,
+    /// The one quad every instanced drop is cut from, in its own axes.
+    quad: GpuMesh,
+    /// The instance buffer the crowd is uploaded into, kept and grown between
+    /// frames so a steady rain never allocates again.
+    crowd: Option<wgpu::Buffer>,
 }
 
 impl Gpu {
@@ -376,8 +565,20 @@ impl Gpu {
             let info = adapter.get_info();
             format!("{} ({:?})", info.name, info.backend)
         };
+        // Skins are BC7 blocks straight from the file, so a GPU that cannot read them
+        // cannot show a Carbine scene at all. Saying so here beats a device error from
+        // the first texture write.
+        if !adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+        {
+            return Err(RenderError::Device(format!(
+                "{name} cannot decompress BC textures, which every packed Carbine skin needs"
+            )));
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("carbine"),
+            required_features: wgpu::Features::TEXTURE_COMPRESSION_BC,
             ..Default::default()
         }))
         .map_err(|error| RenderError::Device(error.to_string()))?;
@@ -388,9 +589,11 @@ impl Gpu {
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
         let plain = upload_rgba(&device, &queue, "carbine plain skin", 1, 1, &[255; 4]);
+        let quad = unit_quad(&device);
 
         Ok(Self {
             instance,
@@ -405,7 +608,10 @@ impl Gpu {
             world: HashMap::new(),
             glass: HashMap::new(),
             sky: HashMap::new(),
+            particles: HashMap::new(),
             ui: HashMap::new(),
+            quad,
+            crowd: None,
         })
     }
 
@@ -432,19 +638,37 @@ impl Gpu {
             .ok_or_else(|| RenderError::Surface("the window supports no color format".into()))
     }
 
+    /// How the swap chain is allowed to run. Synced means the screen decides, so
+    /// every frame waits for its refresh. Unlocked prefers the queued mailbox,
+    /// which draws as fast as it can without tearing, and takes immediate when the
+    /// compositor will not queue; a desktop that offers neither keeps waiting,
+    /// because a tear is worse than a rate the machine never had anyway.
+    pub fn pick_present_mode(&self, surface: &wgpu::Surface<'_>, sync: bool) -> wgpu::PresentMode {
+        if sync {
+            return wgpu::PresentMode::Fifo;
+        }
+        let offered = surface.get_capabilities(&self.adapter).present_modes;
+        [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
+            .iter()
+            .find(|mode| offered.contains(mode))
+            .copied()
+            .unwrap_or(wgpu::PresentMode::Fifo)
+    }
+
     pub fn configure_surface(
         &self,
         surface: &wgpu::Surface<'_>,
         format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+        present_mode: wgpu::PresentMode,
     ) -> wgpu::SurfaceConfiguration {
         let mut config = surface
             .get_default_config(&self.adapter, width.max(1), height.max(1))
             .expect("the surface lost its configuration options");
         config.format = format;
         config.usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
-        config.present_mode = wgpu::PresentMode::AutoVsync;
+        config.present_mode = present_mode;
         surface.configure(&self.device, &config);
         config
     }
@@ -503,6 +727,7 @@ impl Gpu {
     ) -> Result<wgpu::SubmissionIndex, RenderError> {
         let camera = scene.camera();
         let sky = scene.sky();
+        let haze = scene.haze();
         let aspect = extent.0 as f32 / extent.1.max(1) as f32;
         let view_proj = camera.view_projection(aspect);
 
@@ -532,6 +757,35 @@ impl Gpu {
             .collect();
         let ui_items = scene.ui_items();
 
+        // A crowd is one instanced draw per skin, so the drops are put in image
+        // order first and then back to front inside each run.
+        let items = scene.particle_items();
+        let mut crowd: Vec<(usize, f32)> = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| (index, (item.at - camera.position).length()))
+            .collect();
+        crowd.sort_by(|(this, this_away), (other, other_away)| {
+            items[*this]
+                .texture
+                .cmp(&items[*other].texture)
+                .then(other_away.total_cmp(this_away))
+        });
+        let mut instances: Vec<ParticleInstance> = Vec::with_capacity(crowd.len());
+        let mut runs: Vec<(Option<String>, wgpu::TextureView, u32, u32)> = Vec::new();
+        for (index, _) in crowd {
+            let item = &items[index];
+            instances.push(ParticleInstance::of(item, camera.position));
+            let skin_key = item.texture.map(str::to_owned);
+            match runs.last_mut().filter(|run| run.0 == skin_key) {
+                Some(run) => run.3 += 1,
+                None => {
+                    let skin = self.skin_for(item.texture);
+                    runs.push((skin_key, skin, instances.len() as u32 - 1, 1));
+                }
+            }
+        }
+
         let world = ensure_pipeline(&mut self.world, &self.device, format, &WORLD, opaque.len());
         let glass_pipeline =
             ensure_pipeline(&mut self.glass, &self.device, format, &GLASS, glass.len());
@@ -545,6 +799,19 @@ impl Gpu {
             ))
         } else {
             None
+        };
+        let particles_pipeline = if runs.is_empty() {
+            None
+        } else {
+            // One set of uniforms serves the whole crowd: it is the same camera and
+            // the same air, drop against drop.
+            Some(ensure_pipeline(
+                &mut self.particles,
+                &self.device,
+                format,
+                &PARTICLES,
+                1,
+            ))
         };
         let ui_pipeline = if ui_items.is_empty() {
             None
@@ -608,7 +875,7 @@ impl Gpu {
 
             for (index, item) in opaque.iter().enumerate() {
                 let mesh = ensure_mesh(&mut self.meshes, &self.device, item.handle, item.mesh);
-                let uniforms = world_uniforms(&view_proj, item, &sky);
+                let uniforms = world_uniforms(&view_proj, item, &sky, &haze, camera.position);
                 self.queue
                     .write_buffer(&world.uniforms[index], 0, bytemuck::bytes_of(&uniforms));
                 let bind = bind_group(
@@ -628,7 +895,7 @@ impl Gpu {
 
             for (index, (_, item)) in glass.iter().enumerate() {
                 let mesh = ensure_mesh(&mut self.meshes, &self.device, item.handle, item.mesh);
-                let uniforms = world_uniforms(&view_proj, item, &sky);
+                let uniforms = world_uniforms(&view_proj, item, &sky, &haze, camera.position);
                 self.queue.write_buffer(
                     &glass_pipeline.uniforms[index],
                     0,
@@ -647,6 +914,49 @@ impl Gpu {
                 pass.set_vertex_buffer(0, mesh.vertex.slice(..));
                 pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+
+            // The crowd is real geometry, so it is tested against the depth the
+            // world wrote: a wall hides the rain behind it and a floor is where it
+            // lands. It goes over the glass it falls past and under the interface.
+            if let Some(pipeline) = particles_pipeline {
+                let view_matrix = camera.view();
+                let right = view_matrix.row(0).truncate();
+                let up = view_matrix.row(1).truncate();
+                let uniforms = ParticleUniforms {
+                    view_proj: view_proj.to_cols_array_2d(),
+                    right: [right.x, right.y, right.z, 0.0],
+                    up: [up.x, up.y, up.z, 0.0],
+                    fog: haze,
+                    eyes: [camera.position.x, camera.position.y, camera.position.z, 0.0],
+                };
+                self.queue
+                    .write_buffer(&pipeline.uniforms[0], 0, bytemuck::bytes_of(&uniforms));
+                let buffer = ensure_crowd(
+                    &mut self.crowd,
+                    &self.device,
+                    &self.queue,
+                    bytemuck::cast_slice(&instances),
+                );
+                let crowd_bytes =
+                    (instances.len() * std::mem::size_of::<ParticleInstance>()) as u64;
+
+                pass.set_pipeline(&pipeline.pipeline);
+                pass.set_vertex_buffer(0, self.quad.vertex.slice(..));
+                pass.set_vertex_buffer(1, buffer.slice(0..crowd_bytes));
+                pass.set_index_buffer(self.quad.index.slice(..), wgpu::IndexFormat::Uint32);
+                for (_, skin, first, count) in &runs {
+                    let bind = bind_group(
+                        &self.device,
+                        &pipeline.layout,
+                        &pipeline.uniforms[0],
+                        &self.sampler,
+                        skin,
+                        pipeline.skinned,
+                    );
+                    pass.set_bind_group(0, &bind, &[]);
+                    pass.draw_indexed(0..self.quad.index_count, 0, *first..*first + *count);
+                }
             }
         }
 
@@ -708,27 +1018,23 @@ impl Gpu {
         Ok(self.queue.submit([encoder.finish()]))
     }
 
-    /// The skin for a path, decoding and uploading it the first time it is asked
-    /// for. An image that cannot be read leaves the object in its own colour.
+    /// The skin for a path, reading and uploading it the first time it is asked
+    /// for. A file that is not a packed image leaves the object in its own colour;
+    /// the core is what tells the script about it.
     fn skin_for(&mut self, path: Option<&str>) -> wgpu::TextureView {
         let Some(path) = path else {
             return self.plain.clone();
         };
         if !self.skins.contains_key(path) {
-            let skin = match image::open(path) {
-                Ok(image) => {
-                    let pixels = image.to_rgba8();
-                    Some(upload_rgba(
-                        &self.device,
-                        &self.queue,
-                        "carbine skin",
-                        pixels.width(),
-                        pixels.height(),
-                        pixels.as_raw(),
-                    ))
-                }
-                Err(_) => None,
-            };
+            let skin = std::fs::read(path).ok().and_then(|bytes| {
+                let texture = carbine_ktx::read(&bytes).ok()?;
+                Some(upload_packed(
+                    &self.device,
+                    &self.queue,
+                    "carbine skin",
+                    &texture,
+                ))
+            });
             self.skins.insert(path.to_owned(), skin);
         }
         match &self.skins[path] {
@@ -829,12 +1135,20 @@ fn sky_uniforms(view_proj: &Mat4, sky: &Sky, extent: (u32, u32)) -> SkyUniforms 
     }
 }
 
-fn world_uniforms(view_proj: &Mat4, item: &DrawItem, sky: &Sky) -> Uniforms {
+fn world_uniforms(
+    view_proj: &Mat4,
+    item: &DrawItem,
+    sky: &Sky,
+    haze: &[f32; 4],
+    eyes: Vec3,
+) -> Uniforms {
     Uniforms {
         view_proj: view_proj.to_cols_array_2d(),
         model: item.model.to_cols_array_2d(),
         color: [item.color[0], item.color[1], item.color[2], item.alpha],
         sun: [sky.sun.x, sky.sun.y, sky.sun.z, sky.ambient],
+        fog: *haze,
+        eyes: [eyes.x, eyes.y, eyes.z, 0.0],
         skinned: f32::from(item.texture.is_some()),
         _pad: [0.0; 3],
     }
@@ -894,6 +1208,8 @@ fn ensure_pipeline<'a>(
                 compilation_options: Default::default(),
                 buffers: if spec.fullscreen {
                     &[]
+                } else if spec.instanced {
+                    &PARTICLE_LAYOUTS
                 } else {
                     &VERTEX_LAYOUTS
                 },
@@ -995,6 +1311,61 @@ fn ensure_mesh<'a>(
     })
 }
 
+/// A packed image goes onto the GPU as the bytes it already is: BC7 blocks, every
+/// level of its mip chain, with no decoder between the file and video memory.
+///
+/// The chain's own transfer flag stays in the file. Carbine's pipeline is
+/// display-referred — a colour reaches the screen exactly as it is stored — so a
+/// texel has to do the same, and an sRGB-decoded sample would darken every picture.
+fn upload_packed(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    texture: &carbine_ktx::Texture<'_>,
+) -> wgpu::TextureView {
+    let gpu = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: texture.width(),
+            height: texture.height(),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: texture.levels().len() as u32,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Bc7RgbaUnorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for (level, blocks) in texture.levels().iter().enumerate() {
+        // BC7 pads an edge that is not a whole block out to one, and the queue counts a
+        // copy in whole blocks, so the size handed over is the padded one. The texels
+        // past the picture live in blocks the sampler is never pointed at.
+        let (rows, columns) = (blocks.height.div_ceil(4), blocks.width.div_ceil(4));
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &gpu,
+                mip_level: level as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            blocks.bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(columns * 16),
+                rows_per_image: Some(rows),
+            },
+            wgpu::Extent3d {
+                width: columns * 4,
+                height: rows * 4,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    gpu.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// One uncompressed RGBA8 picture, which is what the stand-in white pixel is.
 fn upload_rgba(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1048,3 +1419,70 @@ static VERTEX_LAYOUTS: [Option<wgpu::VertexBufferLayout<'static>>; 1] =
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &VERTEX_ATTRIBUTES,
     })];
+
+/// The four corners of a quad, in its own axes, and the two triangles cut from
+/// them. Every drop in a crowd is this same square, stood up to face the eyes.
+const QUAD_CORNERS: [[f32; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+const QUAD_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x2];
+
+const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+    wgpu::vertex_attr_array![1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4];
+
+static PARTICLE_LAYOUTS: [Option<wgpu::VertexBufferLayout<'static>>; 2] = [
+    Some(wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<[f32; 2]>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &QUAD_ATTRIBUTES,
+    }),
+    Some(wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<ParticleInstance>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &INSTANCE_ATTRIBUTES,
+    }),
+];
+
+/// The quad every instanced drop is cut from, made once per device.
+fn unit_quad(device: &wgpu::Device) -> GpuMesh {
+    let vertex = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("carbine crowd quad"),
+        contents: bytemuck::cast_slice(&QUAD_CORNERS),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("carbine crowd indices"),
+        contents: bytemuck::cast_slice(&QUAD_INDICES),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    GpuMesh {
+        vertex,
+        index,
+        index_count: QUAD_INDICES.len() as u32,
+    }
+}
+
+/// Uploads a frame's crowd, growing the instance buffer only when more things are
+/// in the air than the last frame had room for.
+fn ensure_crowd(
+    crowd: &mut Option<wgpu::Buffer>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bytes: &[u8],
+) -> wgpu::Buffer {
+    let needed = bytes.len() as u64;
+    let room = crowd.as_ref().map_or(0, |buffer| buffer.size());
+    if room < needed {
+        *crowd = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("carbine crowd"),
+            size: needed,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+    }
+    let buffer = crowd
+        .as_ref()
+        .expect("a crowd that was asked to be uploaded has no buffer");
+    queue.write_buffer(buffer, 0, bytes);
+    buffer.clone()
+}

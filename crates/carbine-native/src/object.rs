@@ -1,9 +1,12 @@
 use carbine_core::{NodeId, VecField};
+use pyo3::IntoPyObjectExt;
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
 use crate::math::{PyQuat, PyVec3, axis_at, extract_axes, vec3_field};
 use crate::mesh::PyMesh;
+use crate::node_id_of;
 use crate::with_scene;
 
 /// Shared accessor bodies for the classes that wrap a scene node.
@@ -86,16 +89,140 @@ pub(crate) fn set_gravity_pull_on(id: NodeId, value: f32) -> PyResult<()> {
     with_scene(|scene| scene.set_gravity_pull(id, value))
 }
 
-/// The node behind either handle class: an object and the entity wearing it are
-/// the same node, so they compare equal.
+/// The colour painted on a node, from a `Vec3`, a three tuple, or a hex string
+/// such as `"#eb7a34"`. Both handle classes wear colours the same way.
+pub(crate) fn set_color_on(id: NodeId, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    if let Ok(hex) = value.extract::<String>() {
+        return with_scene(|scene| scene.set_color_hex(id, &hex));
+    }
+    set_vec3(id, VecField::Color, value)
+}
+
+/// Whether the solver holds this body apart from the others. Nothing collides
+/// until a script switches it on, and switching it off keeps the shape.
+pub(crate) fn collision_of(id: NodeId) -> PyResult<bool> {
+    with_scene(|scene| scene.has_collision(id))
+}
+
+pub(crate) fn set_collision_on(id: NodeId, value: bool) -> PyResult<()> {
+    with_scene(|scene| scene.set_collision(id, value))
+}
+
+/// The collider cut from the body, as a name: box, sphere, capsule or mesh.
+pub(crate) fn collider_shape_of(id: NodeId) -> PyResult<String> {
+    with_scene(|scene| Ok(scene.collision_shape(id)?.name().to_owned()))
+}
+
+pub(crate) fn set_collider_shape_on(id: NodeId, name: &str) -> PyResult<()> {
+    with_scene(|scene| scene.set_collision_shape_name(id, name))
+}
+
+/// Whoever this node rode into during the last step, handed back as the class it
+/// actually is: an Entity for an actor, an Object for scenery.
+pub(crate) fn touching_handles<'py>(
+    py: Python<'py>,
+    id: NodeId,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let touched = with_scene(|scene| Ok(scene.touches(id)))?;
+    handles_for(py, touched)
+}
+
+/// A node handed back as the class it actually is: a Particle when it flies a
+/// crowd, an Entity when it carries hit points, an Object otherwise. All three
+/// compare equal to each other, so a script can keep comparing handles against
+/// handles.
+pub(crate) fn handle_for<'py>(py: Python<'py>, node: NodeId) -> PyResult<Bound<'py, PyAny>> {
+    if with_scene(|scene| scene.is_particle_system(node))? {
+        crate::procedural::Particle::from_id(node).into_bound_py_any(py)
+    } else if with_scene(|scene| scene.is_entity(node))? {
+        crate::entity::Entity::from_id(node).into_bound_py_any(py)
+    } else {
+        Object::from_id(node).into_bound_py_any(py)
+    }
+}
+
+pub(crate) fn handles_for<'py>(
+    py: Python<'py>,
+    nodes: Vec<NodeId>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    nodes.into_iter().map(|node| handle_for(py, node)).collect()
+}
+
+/// The node behind any handle class: an object, the entity wearing it and a
+/// particle system are all nodes, so they compare equal.
 pub(crate) fn handle_id(value: &Bound<'_, PyAny>) -> Option<NodeId> {
     if let Ok(object) = value.extract::<PyRef<'_, Object>>() {
         return Some(object.node_id());
     }
+    if let Ok(entity) = value.extract::<PyRef<'_, crate::entity::Entity>>() {
+        return Some(entity.node_id());
+    }
     value
-        .extract::<PyRef<'_, crate::entity::Entity>>()
+        .extract::<PyRef<'_, crate::procedural::Particle>>()
         .ok()
-        .map(|entity| entity.node_id())
+        .map(|crowd| crowd.node_id())
+}
+
+/// The node this one hangs under, as the class it is. Every node in a scene has a
+/// parent except the root itself, which answers `None`.
+pub(crate) fn parent_of<'py>(py: Python<'py>, id: NodeId) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let parent = with_scene(|scene| scene.parent(id))?;
+    match parent {
+        Some(parent) => handle_for(py, parent).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// `None` sends the node to the scene root, which is where a detached node stops
+/// moving with the branch it came off.
+pub(crate) fn set_parent_on(id: NodeId, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+    let parent = value.map(node_id_of).transpose()?;
+    with_scene(|scene| scene.reparent(id, parent))
+}
+
+/// The nodes under this one, in the order they are walked - which is also the
+/// order UI elements are painted in.
+pub(crate) fn children_of<'py>(py: Python<'py>, id: NodeId) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let kids = with_scene(|scene| scene.children(id))?;
+    handles_for(py, kids)
+}
+
+/// Reads any one handle or a run of them, since a child list is written both
+/// ways: `panel.children = [a, b]` and `panel.children = sphere`.
+fn child_ids(value: &Bound<'_, PyAny>) -> PyResult<Vec<NodeId>> {
+    if let Some(id) = handle_id(value) {
+        return Ok(vec![id]);
+    }
+    let mut kids = Vec::new();
+    let items = value
+        .try_iter()
+        .map_err(|_| PyTypeError::new_err(NODE_LIST))?;
+    for item in items {
+        let item = item.map_err(|_| PyTypeError::new_err(NODE_LIST))?;
+        kids.push(node_id_of(&item)?);
+    }
+    Ok(kids)
+}
+
+const NODE_LIST: &str = "expected an Object, an Entity or a Particle, or a list of them";
+
+/// Replaces the child list. Left-out children move to the scene root rather than
+/// being destroyed, and nodes newly listed are adopted.
+pub(crate) fn set_children_on(id: NodeId, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    let kids = child_ids(value)?;
+    with_scene(|scene| scene.set_children(id, &kids))
+}
+
+pub(crate) fn add_child_on(id: NodeId, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    let child = node_id_of(value)?;
+    with_scene(|scene| scene.add_child(id, child))
+}
+
+/// Takes a child off this node and hangs it on the scene root. It is removed from
+/// the branch, not from the world: `destroy` is the call that means that.
+pub(crate) fn remove_child_on(id: NodeId, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    let child = node_id_of(value)?;
+    with_scene(|scene| scene.remove_child(id, child))
 }
 
 /// The authored world: geometry, transform, colour. Objects are not
@@ -138,25 +265,44 @@ impl Object {
         kind_of(self.id)
     }
 
+    /// The node this one hangs under, which moves it along with its own transform.
+    /// Only the scene root answers None.
     #[getter]
-    fn parent(&self) -> PyResult<Option<Object>> {
-        let parent = with_scene(|scene| scene.parent(self.id))?;
-        Ok(parent.map(Object::from_id))
+    fn parent<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        parent_of(py, self.id)
     }
 
     #[setter]
     fn set_parent(&self, value: Option<Bound<'_, PyAny>>) -> PyResult<()> {
-        let parent = match value.as_ref() {
-            Some(handle) => Some(crate::node_id_of(handle)?),
-            None => None,
-        };
-        with_scene(|scene| scene.reparent(self.id, parent))
+        set_parent_on(self.id, value.as_ref())
     }
 
+    /// What hangs under this node, in the order it is walked and painted. Writing
+    /// either a list or one node replaces the branch: the order given becomes the
+    /// order walked, unlisted children move to the scene root, and a node named
+    /// here but hanging elsewhere is adopted. Nothing is destroyed.
     #[getter]
-    fn children(&self) -> PyResult<Vec<Object>> {
-        let children = with_scene(|scene| scene.children(self.id))?;
-        Ok(children.into_iter().map(Object::from_id).collect())
+    fn children<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        children_of(py, self.id)
+    }
+
+    #[setter]
+    fn set_children(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
+        set_children_on(self.id, &value)
+    }
+
+    /// Hangs another node under this one, at the end of the children, so it starts
+    /// riding along with this node's transform.
+    #[pyo3(name = "addChild")]
+    fn add_child(&self, child: Bound<'_, PyAny>) -> PyResult<()> {
+        add_child_on(self.id, &child)
+    }
+
+    /// Takes a child off this node and hangs it on the scene root. It leaves the
+    /// branch, not the world - `destroy` is the call that means that.
+    #[pyo3(name = "removeChild")]
+    fn remove_child(&self, child: Bound<'_, PyAny>) -> PyResult<()> {
+        remove_child_on(self.id, &child)
     }
 
     /// Meters from the scene origin.
@@ -228,10 +374,7 @@ impl Object {
     /// element.
     #[setter]
     fn set_color(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
-        if let Ok(hex) = value.extract::<String>() {
-            return with_scene(|scene| scene.set_color_hex(self.id, &hex));
-        }
-        set_vec3(self.id, VecField::Color, &value)
+        set_color_on(self.id, &value)
     }
 
     /// The colour as `#rrggbb`, the way a design tool writes it.
@@ -339,6 +482,37 @@ impl Object {
     #[setter(gravityPull)]
     fn set_gravity_pull(&self, value: f64) -> PyResult<()> {
         set_gravity_pull_on(self.id, value as f32)
+    }
+
+    /// In the solver, or out of it. False until a script says otherwise, and a
+    /// body that never asked falls straight through everything.
+    #[getter]
+    fn collision(&self) -> PyResult<bool> {
+        collision_of(self.id)
+    }
+
+    #[setter]
+    fn set_collision(&self, value: bool) -> PyResult<()> {
+        set_collision_on(self.id, value)
+    }
+
+    /// The collider cut from the body: "box", "sphere", "capsule" or "mesh".
+    /// Writing a name switches collisions on; the shape it answers with before
+    /// that is the one the body would get.
+    #[getter(collisionShape)]
+    fn collision_shape(&self) -> PyResult<String> {
+        collider_shape_of(self.id)
+    }
+
+    #[setter(collisionShape)]
+    fn set_collision_shape(&self, name: &str) -> PyResult<()> {
+        set_collider_shape_on(self.id, name)
+    }
+
+    /// Whatever this body rode into during the last step, as the handle class it
+    /// is. Empty until something has actually been touching it.
+    fn touching<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        touching_handles(py, self.id)
     }
 
     #[getter]

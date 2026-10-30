@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/carbine-core", "crates/carbine-native", "crates/carbine-render"]
+members = [
+    "crates/carbine-core",
+    "crates/carbine-ktx",
+    "crates/carbine-pack",
+    "crates/carbine-native",
+    "crates/carbine-render",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -23,3 +29,9 @@ pollster = "0.4"
 pyo3 = "0.30.1"
 wgpu = "30.0.1"
 winit = "0.30.13"
+
+# Its BC7 encoder debug-asserts that it never overfills a five slot seed list and then
+# handles the sixth anyway, on purpose. The assert is the bug, not the input: the output is
+# still legal BC7, which tests/conformance.rs checks with an independent decoder.
+[profile.dev.package.rusty_dds]
+debug-assertions = false

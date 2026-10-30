@@ -1,0 +1,10 @@
+[package]
+name = "carbine-pack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+carbine-ktx = { path = "../carbine-ktx" }
+image.workspace = true

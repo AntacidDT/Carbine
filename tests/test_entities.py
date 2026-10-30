@@ -36,6 +36,49 @@ def test_an_entity_can_hang_from_an_object():
         pedestal.destroy()
 
 
+def test_an_actor_hangs_in_the_tree_like_any_object():
+    pedestal = carbine.new("cube", name="Pedestal")
+    rider = carbine.spawnEntity("square", name="Rider", parent=pedestal)
+    cargo = carbine.spawnEntity("cube", name="Cargo")
+    try:
+        assert rider.parent == pedestal
+        assert pedestal.children == [rider], "an actor reads back as the actor it is"
+
+        rider.addChild(cargo)
+        assert rider.children == [cargo]
+
+        rider.parent = None
+        assert rider.parent == carbine.scene.root
+        assert cargo.parent == rider, "a whole branch comes along with the actor at its top"
+
+        rider.removeChild(cargo)
+        assert cargo.parent == carbine.scene.root
+        with pytest.raises(ValueError):
+            # It left the branch, so there is nothing left to take off it.
+            rider.removeChild(cargo)
+    finally:
+        cargo.destroy()
+        rider.destroy()
+        pedestal.destroy()
+
+
+def test_a_bodiless_actor_still_hangs_in_the_tree():
+    controller = carbine.spawnEntity(name="Controller")
+    helper = carbine.spawnEntity(name="Helper")
+    try:
+        assert controller.object is None
+        controller.addChild(helper)
+        assert controller.children == [helper]
+        assert helper.parent == controller
+
+        controller.children = []
+        assert helper.parent == carbine.scene.root
+        assert helper.name == "Helper", "detaching an actor does not destroy it"
+    finally:
+        helper.destroy()
+        controller.destroy()
+
+
 def test_gravity_is_a_multiplier_with_earth_at_ten():
     crate = carbine.spawnEntity("rectangle", name="Crate")
     try:
@@ -87,6 +130,22 @@ def test_a_plain_object_is_never_an_entity():
             carbine.killEntity(card)
     finally:
         card.destroy()
+
+
+def test_an_actor_is_painted_the_way_an_object_is():
+    actor = carbine.spawnEntity("cube", name="Painted")
+    try:
+        actor.color = "#eb7a34"
+        assert actor.object.colorHex == "#eb7a34"
+        assert actor.color.x == pytest.approx(235 / 255, abs=1e-4)
+
+        actor.color = (0.0, 1.0, 0.0)
+        assert actor.color.y == 1.0
+
+        with pytest.raises(ValueError):
+            actor.color = "vermilion"
+    finally:
+        actor.destroy()
 
 
 def test_entity_identity_is_the_node():

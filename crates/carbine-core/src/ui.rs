@@ -28,6 +28,7 @@ impl Scene {
             primitives::ui_mesh(kind).ok_or_else(|| SceneError::UnknownKind(kind.to_owned()))?;
         if let Some(parent) = parent {
             self.entity(parent)?;
+            self.branch_allows(parent, true)?;
         }
 
         let id = self.spawn(kind, name, parent, data);

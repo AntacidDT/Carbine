@@ -103,16 +103,37 @@ def test_rotation_takes_a_quat_or_euler_degrees():
         card.destroy()
 
 
-def test_a_skin_is_remembered_as_a_path():
+def test_a_skin_is_remembered_as_a_path(skin):
     card = carbine.new("cube")
     try:
         assert card.texture is None
 
-        card.texture = "assets/wood.png"
-        assert card.texture == "assets/wood.png"
+        card.texture = skin
+        assert card.texture == skin
 
         card.texture = None
         assert card.texture is None
+    finally:
+        card.destroy()
+
+
+def test_a_skin_in_any_other_format_is_refused(tmp_path):
+    """Carbine reads one image format, so a picture authored as a PNG is refused when
+    an object is skinned rather than quietly drawn in a flat colour - and the refusal
+    names the tool that turns it into the format the engine takes."""
+    card = carbine.new("cube")
+    try:
+        picture = tmp_path / "wood.png"
+        picture.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 24)
+
+        with pytest.raises(ValueError, match="carbine.packager.image") as error:
+            card.texture = str(picture)
+        assert "not a KTX2 file" in str(error.value), error
+
+        assert card.texture is None, "a refused path leaves the object unskinned"
+
+        with pytest.raises(ValueError, match="no file at that path"):
+            card.texture = "assets/nowhere.ktx2"
     finally:
         card.destroy()
 
@@ -145,6 +166,53 @@ def test_hierarchy():
             parent.parent = child
     finally:
         parent.destroy()
+
+
+def test_a_child_list_can_be_written_whole():
+    panel = carbine.new("rectangle", name="Panel")
+    first = carbine.new("square", name="First", parent=panel)
+    second = carbine.new("square", name="Second", parent=panel)
+    stranger = carbine.new("square", name="Stranger")
+    try:
+        panel.children = [second, stranger]
+        assert panel.children == [second, stranger], "the order written is the order read back"
+        assert stranger.parent == panel, "a node named here but hanging elsewhere is adopted"
+        assert first.parent == carbine.scene.root
+        assert first.name == "First", "left out of the list, so detached rather than destroyed"
+
+        panel.children = first
+        assert panel.children == [first], "one node is a one-child list"
+
+        panel.children = []
+        assert panel.children == []
+        assert first.parent == carbine.scene.root
+    finally:
+        panel.children = []
+        for node in (first, second, stranger, panel):
+            node.destroy()
+
+
+def test_children_are_added_and_removed_one_at_a_time():
+    parent = carbine.new("rectangle", name="Parent")
+    first = carbine.new("square", name="First", parent=parent)
+    newcomer = carbine.new("square", name="Newcomer")
+    try:
+        parent.addChild(newcomer)
+        assert parent.children == [first, newcomer], "a fresh child goes last"
+
+        parent.removeChild(newcomer)
+        assert parent.children == [first]
+        assert newcomer.parent == carbine.scene.root
+        assert newcomer.name == "Newcomer", "a child removed is still in the world"
+
+        with pytest.raises(ValueError):
+            parent.removeChild(newcomer)
+        with pytest.raises(ValueError):
+            parent.addChild(parent)
+    finally:
+        parent.children = []
+        for node in (first, newcomer, parent):
+            node.destroy()
 
 
 def test_recursive_destroy():
