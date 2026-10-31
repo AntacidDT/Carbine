@@ -57,9 +57,7 @@ def main() -> None:
             frame += 1
             time.sleep(1 / 60)
     finally:
-        triangle.destroy()
-        panel.destroy()
-        carbine.close()
+        carbine.end()
 
 
 if __name__ == "__main__":

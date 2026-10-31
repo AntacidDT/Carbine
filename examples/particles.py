@@ -222,20 +222,8 @@ def main() -> None:
             frame += 1
             time.sleep(1.0 / 120.0)
     finally:
-        for crowd in crowds.values():
-            crowd.destroy()
-        for spark in bursts:
-            spark.destroy()
-        for node in carbine.scene.root.children:
-            if isinstance(node, carbine.Particle):
-                node.destroy()
-        player.enabled = False
-        crosshair.destroy()
-        panel.destroy()
-        crate.destroy()
-        chimney.destroy()
-        ground.destroy()
-        carbine.close()
+        # Crowds, bursts, props, weather and the window: one call takes all of it.
+        carbine.end()
 
 
 if __name__ == "__main__":

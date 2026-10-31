@@ -361,7 +361,7 @@ impl Scene {
         match player.mode {
             PlayerMode::FirstPerson => {
                 self.set_camera_position(eyes);
-                self.set_camera_target(eyes + look);
+                self.set_camera_target(eyes + self.swing(look));
             }
             PlayerMode::ThirdPerson => {
                 let head = player.position + UP * (player.eye_height * 0.9);
@@ -372,6 +372,26 @@ impl Scene {
                 self.set_camera_target(head);
             }
         }
+    }
+
+    /// Where the eyes actually point while the ground is moving: the same jitter
+    /// that displaces them leans the direction they look, along the view's own
+    /// right and up so a shove east swings the frame east however the player is
+    /// facing. A third person camera needs none of this - it slides around a body
+    /// that stays put, and the parallax turns the view for it.
+    fn swing(&self, look: Vec3) -> Vec3 {
+        let right = look.cross(UP).try_normalize().unwrap_or(Vec3::ZERO);
+        let up = right.cross(look);
+        let sideways = (right * self.shake.dot(right) + up * self.shake.dot(up))
+            * crate::disaster::CAMERA_SWING_PER_METER;
+        let worst = crate::disaster::MAX_CAMERA_SWING;
+        let turned = look
+            + if sideways.length() > worst {
+                sideways * (worst / sideways.length())
+            } else {
+                sideways
+            };
+        turned.try_normalize().unwrap_or(look)
     }
 
     /// Moves the attached body with the player: bottom face on the player's feet,

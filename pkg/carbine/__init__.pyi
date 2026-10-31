@@ -191,6 +191,53 @@ class Sky:
     ambient: float
     def colors(self, zenith: str, horizon: str) -> None: ...
 
+class Light:
+    """The light the world is being shaded by, once the rung `atmosphere.lightQuality`
+    names has been resolved. Every number here is the engine's own, so a script or an
+    editor can show what `auto` picked without repeating the rule it picked by.
+    Nothing on this handle is a knob."""
+
+    # "low", "medium", "high" or "extra" - never "auto", because by the time anyone
+    # asks, the machine has been read.
+    @property
+    def quality(self) -> str: ...
+
+    # Whether the sun pre-renders the world to read a shade out of.
+    @property
+    def shadows(self) -> bool: ...
+
+    # Texels on a side of that picture, or 0 when there is none.
+    @property
+    def shadowMap(self) -> int: ...
+
+    # Readings a pixel takes around its own place in the cast. One is a hard edge;
+    # more is a shade that fades where it ends.
+    @property
+    def softness(self) -> int: ...
+
+    # Metres around the eyes the cast reaches. Past it a thing is lit and casts
+    # nothing.
+    @property
+    def reach(self) -> float: ...
+
+    # How much of the sun a face square to it throws back as a sheen, 0..1.
+    @property
+    def gloss(self) -> float: ...
+
+    # Whether the light the sun leaves out comes from the backdrop itself.
+    @property
+    def skyFill(self) -> bool: ...
+
+    # The machine the rung was read off: "discrete", "integrated", "cpu", "virtual"
+    # or "other". None until a renderer has started.
+    @property
+    def device(self) -> str | None: ...
+
+    # Bytes the card owns outright. None for a card that borrows the machine's
+    # memory, and for one that will not say how big it is.
+    @property
+    def memory(self) -> int | None: ...
+
 class Mouse:
     """The pointer as the last frame saw it. `dx` and `dy` are the pixels moved
     since the frame before, which is only useful while the pointer is grabbed."""
@@ -333,7 +380,8 @@ class Physics:
 
 class Atmosphere:
     """The environment register, `carbine.atmosphere`. What time it is, how far the
-    air lets you see and what the sky looks like all live here, and the weather that
+    air lets you see, how much work the light is allowed to take and what the sky
+    looks like all live here, and the weather that
     falls is written by the particle generator - `atmosphere.new("rain")` is the fast
     way to lay a crowd and hang it on the sky, which is why its handle is a
     `Particle` with every particle knob on it."""
@@ -341,6 +389,19 @@ class Atmosphere:
     # The backdrop and the light the world is shaded by:
     # `atmosphere.sky().zenith = "#2f6cb3"`.
     def sky(self) -> Sky: ...
+
+    # How much work the engine is allowed to do lighting a frame: "auto", "low",
+    # "medium", "high" or "extra". A fresh world is on "auto", which is the engine
+    # reading the card it draws on: a card owning more than 4 GB takes the high rung,
+    # one from 0.1 GB up to 4 GB the middle, and anything smaller - or anything that
+    # shares the machine's memory - the lowest.
+    lightQuality: str
+    # The rungs `lightQuality` takes, cheapest first.
+    def lightQualities(self) -> list[str]: ...
+
+    # What the light turned out to be on this machine. Read-only: the knob above is
+    # the only way to move it.
+    def light(self) -> Light: ...
 
     # Where the sun is, in hours past midnight. Write a clock the way a person reads
     # one ("07:30") or a count of hours (18); either way the answer is the hours and
@@ -529,12 +590,50 @@ def viewport() -> tuple[int, int]: ...
 def readPixels() -> bytes: ...
 def close() -> None: ...
 
+# Throws away what the script made. A handle takes that node and everything under it;
+# "all" empties the scene of every node — objects, actors, UI, particle crowds, weather —
+# and removes the disasters with it, which is the one call a teardown wants instead of
+# one per object. The camera, the backdrop and the light are settings the game tuned, so
+# `destroy("all")` leaves them alone. `end()` is `init()` in reverse: the scene comes back
+# brand new, the player gives its camera and the pointer up, and the window closes. The
+# frame limits are engine settings rather than scene content, so those stay as named.
+def destroy(target: Object | Entity | Particle | str) -> None: ...
+def end() -> None: ...
+
 def new(
     kind: str,
     *,
     name: str | None = None,
     parent: Object | Entity | Particle | None = None,
 ) -> Object: ...
+
+# More of the same thing. Each copy hangs beside the original, starts where it stood
+# and stands still from there, and comes back as the class the node is - a body's
+# copies are `Object`s, an actor's are `Entity`s, a crowd's are `Particle`s. Left
+# alone `count` is 1, and 0 makes none. Whatever the node carries is carried: size,
+# colour, skin, whether it takes gravity, what shape it is cut as, a UI element's
+# corners, a crowd's knobs and its air, and the branch under it as copies of their
+# own. Each copy then has its own place, turning, size and hit points.
+def duplicate(
+    target: Object | Entity | Particle,
+    count: int = 1,
+) -> list[Object | Entity | Particle]: ...
+
+# Like `duplicate`, and the copies tied to the original in one configuration, the way
+# Blender's linked duplicates share a data block. A write about what the thing *is*
+# lands on every member - colour, `transparent`, `texture`, `gravity`, `gravityPull`,
+# `anchored`, `collision`, `collisionShape`, an actor's `hitPause` and
+# `stayAfterDeath`, a UI element's `corner`, `polygon` and `outline`, and every
+# particle knob except `active`. A write about where a member is or how much of it is
+# left stays with that member: `position`, `rotation`, `size`, `scale`, `health`,
+# `damage`, `visible`, a crowd's `restart()` - so twins can stand at fifty different
+# windows and die one at a time. A copy of a member joins the group it was copied
+# from; `duplicate` of one leaves the group, and the original only picks up a group
+# when it is first copied by link.
+def linkDuplicate(
+    target: Object | Entity | Particle,
+    count: int = 1,
+) -> list[Object | Entity | Particle]: ...
 
 def spawnEntity(
     kind: str | None = None,

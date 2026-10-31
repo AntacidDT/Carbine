@@ -272,23 +272,9 @@ def main() -> None:
 
             frame += 1
     finally:
-        player.enabled = False
-        crosshair.destroy()
-        panel.destroy()
-        suit.destroy()
-        for actor in actors:
-            # Taking the Wisp down takes the hat pinned under it too, and a Wisp
-            # that already died is gone with it, so there is nothing left to ask.
-            try:
-                actor.destroy()
-            except carbine.DestroyedError:
-                pass
-        lava.destroy()
-        crate.destroy()
-        for block in scenery:
-            block.destroy()
-        ground.destroy()
-        carbine.close()
+        # The suit, the actors, the lava and the ground are all nodes the world was
+        # asked to hold, so one call returns them - and the window - at once.
+        carbine.end()
 
 
 if __name__ == "__main__":

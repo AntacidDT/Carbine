@@ -62,7 +62,7 @@ impl ColliderShape {
 /// A node's invitation to the solver. It is not there at all until the script
 /// asks for it, so an untouched scene has nothing to walk past, and switching
 /// collisions off keeps the shape for the next time.
-#[derive(Component)]
+#[derive(Clone, Copy, Component)]
 pub(crate) struct Collider {
     pub(crate) enabled: bool,
     pub(crate) shape: ColliderShape,
@@ -78,8 +78,21 @@ impl Scene {
     }
 
     /// Puts the body in the solver or takes it out. A body that has never had a
-    /// collider gets the shape its kind reads as.
+    /// collider gets the shape its kind reads as. Being a body the solver answers
+    /// to is part of what a thing is, so the whole link group is told together.
     pub fn set_collision(&mut self, id: NodeId, enabled: bool) -> Result<(), SceneError> {
+        self.spread(id, move |scene, member| {
+            scene.set_collision_one(member, enabled)
+        })
+    }
+
+    /// The same, for the one body the engine is on about itself - a corpse that has
+    /// stopped being in anyone's way, which its twins have no reason to hear about.
+    pub(crate) fn set_collision_one(
+        &mut self,
+        id: NodeId,
+        enabled: bool,
+    ) -> Result<(), SceneError> {
         if self.is_ui(id)? {
             return Err(SceneError::UiNotCollidable);
         }
@@ -120,9 +133,11 @@ impl Scene {
         id: NodeId,
         shape: ColliderShape,
     ) -> Result<(), SceneError> {
-        self.set_collision(id, true)?;
-        self.component_mut::<Collider>(id)?.shape = shape;
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.set_collision_one(member, true)?;
+            scene.component_mut::<Collider>(member)?.shape = shape;
+            Ok(())
+        })
     }
 
     /// The shape the way a script writes it, so the mistake comes back as the

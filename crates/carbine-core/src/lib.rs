@@ -3,6 +3,7 @@ mod camera;
 mod collision;
 mod disaster;
 mod draw;
+mod duplicate;
 mod entity;
 mod geometry;
 mod input;
@@ -17,7 +18,9 @@ mod procgen;
 mod sky;
 mod ui;
 
-pub use atmosphere::{Atmosphere, Precipitation};
+pub use atmosphere::{
+    Atmosphere, DeviceKind, Gpu, Light, LightQuality, Precipitation, auto_quality,
+};
 pub use camera::{Camera, CameraMode, UP};
 pub use collision::ColliderShape;
 pub use disaster::{Disaster, DisasterKind};

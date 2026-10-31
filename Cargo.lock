@@ -480,6 +480,7 @@ dependencies = [
 name = "carbine-render"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "bytemuck",
  "carbine-core",
  "carbine-ktx",

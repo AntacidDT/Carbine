@@ -3,6 +3,7 @@ mod camera;
 mod disaster;
 mod entity;
 mod input;
+mod light;
 mod math;
 mod mesh;
 mod object;
@@ -29,6 +30,7 @@ use crate::camera::PyCamera;
 use crate::disaster::{Disaster, PyPhysics};
 use crate::entity::Entity;
 use crate::input::PyMouse;
+use crate::light::PyLight;
 use crate::math::extract_vec3;
 use crate::object::Object;
 use crate::packager::PyPackager;
@@ -169,6 +171,15 @@ fn init(width: u32, height: u32, window: bool, title: &str) -> PyResult<String> 
     renderer.set_fps_cap(stored.fps_cap);
 
     let adapter = renderer.adapter().unwrap_or("unknown").to_owned();
+    // The light ladder reads the machine, so the scene is told what machine that
+    // is before any frame is drawn. A renderer that never got as far as a device
+    // leaves the scene unreported, which is the headless answer.
+    if let Some(hardware) = renderer.hardware() {
+        with_scene(|scene| {
+            scene.report_gpu(hardware.kind, hardware.vram);
+            Ok(())
+        })?;
+    }
     RENDERER.with(|cell| *cell.borrow_mut() = Some(renderer));
     Ok(adapter)
 }
@@ -298,6 +309,44 @@ fn close() {
     RENDERER.with(|cell| *cell.borrow_mut() = None);
 }
 
+/// Throws away what a script made. A handle takes that node and its whole subtree
+/// out of the tree; `"all"` clears the scene of every node, weather and disaster
+/// alike, which is the one call a game wants at the end instead of one per object.
+/// The camera, the backdrop and the light are settings rather than content, so
+/// `destroy("all")` leaves them where the game left them.
+#[pyfunction]
+fn destroy(target: &Bound<'_, PyAny>) -> PyResult<()> {
+    if let Ok(word) = target.extract::<String>() {
+        if word.eq_ignore_ascii_case("all") {
+            return with_scene(|scene| {
+                scene.clear();
+                Ok(())
+            });
+        }
+        return Err(PyValueError::new_err(format!(
+            "{word} names no node: pass a handle or \"all\""
+        )));
+    }
+
+    let id = node_id_of(target)?;
+    with_scene(|scene| scene.destroy(id))
+}
+
+/// Ends the scene, which is what `init()` started. Everything `destroy("all")`
+/// takes goes, the player gives its camera back, and the window closes behind it.
+/// The frame settings — the cap and the monitor sync — belong to the engine rather
+/// than to the scene, so they stay as they were set.
+#[pyfunction]
+fn end() -> PyResult<()> {
+    with_scene(|scene| {
+        scene.reset();
+        Ok(())
+    })?;
+    CLOCK.with(|cell| *cell.borrow_mut() = (None, 0.0));
+    close();
+    Ok(())
+}
+
 /// Creates an object: authored geometry in the world.
 #[pyfunction]
 #[pyo3(signature = (kind, *, name=None, parent=None))]
@@ -336,6 +385,38 @@ fn spawn_entity<'py>(
 fn kill_entity(entity: &Bound<'_, PyAny>) -> PyResult<()> {
     let id = node_id_of(entity)?;
     with_scene(|scene| scene.kill_entity(id))
+}
+
+/// Writes more of the same thing. Each copy hangs beside the original, starts where
+/// it stood and is still, and from then on has its own place, turning and hit
+/// points; its children come along as copies of their own. Left alone it makes one.
+#[pyfunction]
+#[pyo3(signature = (target, count = 1))]
+fn duplicate<'py>(
+    py: Python<'py>,
+    target: &Bound<'py, PyAny>,
+    count: usize,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let id = node_id_of(target)?;
+    let copies = with_scene(|scene| scene.duplicate(id, count))?;
+    object::handles_for(py, copies)
+}
+
+/// The same as `duplicate`, and the copies tied to the original: a write about what
+/// the thing *is* - colour, skin, gravity, collider shape, a crowd's knobs - lands on
+/// every member, while place, turning, size and hit points stay each member's own.
+/// Copying a twin joins the group it was copied from.
+#[pyfunction]
+#[pyo3(signature = (target, count = 1))]
+#[pyo3(name = "linkDuplicate")]
+fn link_duplicate<'py>(
+    py: Python<'py>,
+    target: &Bound<'py, PyAny>,
+    count: usize,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let id = node_id_of(target)?;
+    let copies = with_scene(|scene| scene.link_duplicate(id, count))?;
+    object::handles_for(py, copies)
 }
 
 #[pyfunction]
@@ -417,6 +498,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyPackager>()?;
     module.add_class::<PyCamera>()?;
     module.add_class::<PySky>()?;
+    module.add_class::<PyLight>()?;
     module.add_class::<PyPlayer>()?;
     module.add_class::<PyMouse>()?;
     module.add_class::<math::PyVec3>()?;
@@ -437,9 +519,13 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(viewport, module)?)?;
     module.add_function(wrap_pyfunction!(read_pixels, module)?)?;
     module.add_function(wrap_pyfunction!(close, module)?)?;
+    module.add_function(wrap_pyfunction!(destroy, module)?)?;
+    module.add_function(wrap_pyfunction!(end, module)?)?;
     module.add_function(wrap_pyfunction!(new, module)?)?;
     module.add_function(wrap_pyfunction!(spawn_entity, module)?)?;
     module.add_function(wrap_pyfunction!(kill_entity, module)?)?;
+    module.add_function(wrap_pyfunction!(duplicate, module)?)?;
+    module.add_function(wrap_pyfunction!(link_duplicate, module)?)?;
     module.add_function(wrap_pyfunction!(get_camera, module)?)?;
     module.add_function(wrap_pyfunction!(get_scene, module)?)?;
     module.add_function(wrap_pyfunction!(get_ui, module)?)?;

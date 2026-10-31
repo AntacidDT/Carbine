@@ -281,3 +281,33 @@ def test_a_destroyed_disaster_is_gone_not_resting(calm):
             read()
     with pytest.raises(ValueError, match="no such disaster"):
         event.start()
+
+
+def test_a_shock_that_ended_can_be_begun_again(calm):
+    """A hand that switches a finished disaster on again means another one, not a
+    frame of nothing: the aftershock a demo queues has to actually shake the ground.
+    A disaster that is only paused keeps its clock, so tapping the switch does not
+    jump the shaking to a new phase."""
+    quake = carbine.physics.new("earthquake", name="Main shock")
+    quake.magnitude = 7.0
+    quake.duration = 0.5
+    try:
+        quake.start()
+        for _ in range(round(1.0 / SECOND)):
+            carbine.step(SECOND)
+        assert quake.running is False, "it ended on its own"
+        assert quake.elapsed == pytest.approx(0.5)
+
+        quake.start()
+        assert quake.running, "a restarted shock is a shock"
+        assert quake.elapsed == 0.0, "and it starts from the beginning"
+        for _ in range(round(0.25 / SECOND)):
+            carbine.step(SECOND)
+        assert quake.elapsed == pytest.approx(0.25, abs=0.02)
+
+        quake.stop()
+        paused = quake.elapsed
+        quake.start()
+        assert quake.elapsed == paused, "a paused one keeps the phase it stopped on"
+    finally:
+        quake.destroy()

@@ -29,5 +29,4 @@ try:
         carbine.render()
         time.sleep(1.0 / 60.0)
 finally:
-    card.destroy()
-    carbine.close()
+    carbine.end()

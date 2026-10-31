@@ -30,13 +30,26 @@ const REFERENCE_MAGNITUDE: f32 = 5.0;
 const MAX_MAGNITUDE: f32 = 10.0;
 
 /// How many meters of camera jitter one meter per second squared of ground shake
-/// is worth. A magnitude 7 quake moves the view about this much times its own
-/// shove, and the cap below keeps it short enough to see the world through.
-const CAMERA_SHAKE_PER_ACCEL: f32 = 0.004;
+/// is worth. A magnitude 6.8 quake shoves about eleven of those, so the view leaves
+/// its post by roughly this much times eleven - enough to read as a rattle at eye
+/// height rather than a drift, and the cap below keeps it short enough to see the
+/// world through.
+const CAMERA_SHAKE_PER_ACCEL: f32 = 0.012;
 
 /// The most the view ever leaves the player's eyes, in meters. Past this a quake
 /// is a strobe light rather than an earthquake.
 const MAX_CAMERA_SHAKE: f32 = 0.35;
+
+/// How many radians the first person view turns aside for every meter of that
+/// jitter. Sliding the eyes a hand's width in the air barely moves the horizon,
+/// which is why a shake alone reads as almost nothing; turning the direction they
+/// point is what makes the same quake swing the whole frame.
+pub(crate) const CAMERA_SWING_PER_METER: f32 = 0.5;
+
+/// The most the view ever turns aside, in radians. A nine landed under the feet
+/// would otherwise throw the horizon five degrees each way every few frames, and
+/// that is a seizure rather than an earthquake.
+pub(crate) const MAX_CAMERA_SWING: f32 = 0.09;
 
 /// The kinds a script can ask for by name.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -297,8 +310,16 @@ impl Scene {
         Ok(())
     }
 
+    /// Sets it going. A disaster that already spent its length is wound back to the
+    /// start, because a hand that switches a finished shock on again means a second
+    /// shock and not a frame of nothing. One that is merely paused keeps its clock,
+    /// so the shaking does not jump phase under a key that is tapped.
     pub fn start_disaster(&mut self, id: u64) -> Result<(), SceneError> {
-        self.disaster_mut(id)?.running = true;
+        let event = self.disaster_mut(id)?;
+        if event.duration > 0.0 && event.elapsed >= event.duration {
+            event.elapsed = 0.0;
+        }
+        event.running = true;
         Ok(())
     }
 
@@ -313,6 +334,13 @@ impl Scene {
         for event in &mut self.disasters {
             event.running = false;
         }
+        self.shake = Vec3::ZERO;
+    }
+
+    /// Takes every disaster out of the world, stopped or not. A script that cleared
+    /// its scene does not want the weather it wrote still waiting to be restarted.
+    pub fn remove_all_disasters(&mut self) {
+        self.disasters.clear();
         self.shake = Vec3::ZERO;
     }
 
@@ -661,6 +689,41 @@ mod tests {
     }
 
     #[test]
+    fn a_quake_turns_the_eyes_and_not_merely_slides_them() {
+        // Sliding the head a hand's width in the air barely moves the horizon, so a
+        // shake you can only measure on the eyes' position is a shake nobody sees.
+        // The first person frame has to turn as well.
+        let mut scene = Scene::new();
+        scene.set_player_enabled(true);
+        scene.step(1.0 / 60.0);
+        let camera = scene.camera();
+        let settled = (camera.target - camera.position).normalize();
+
+        let quake = written(&mut scene, "earthquake");
+        scene.set_disaster_magnitude(quake, 7.0).unwrap();
+        scene
+            .set_disaster_epicentre(quake, Vec3::new(0.0, 0.0, GROUND_HEIGHT))
+            .unwrap();
+        scene.start_disaster(quake).unwrap();
+
+        let mut farthest = 0.0f32;
+        for _ in 0..60 {
+            scene.step(1.0 / 60.0);
+            let camera = scene.camera();
+            let facing = (camera.target - camera.position).normalize();
+            farthest = farthest.max(facing.distance(settled));
+        }
+        assert!(
+            farthest > 0.01,
+            "the frame itself swings: {farthest} radians off the settled view"
+        );
+        assert!(
+            farthest < 0.2,
+            "and still shows a world you can read: {farthest} radians"
+        );
+    }
+
+    #[test]
     fn a_wind_you_stand_in_drifts_you_without_lifting_you() {
         let mut scene = Scene::new();
         scene.set_player_enabled(true);
@@ -749,6 +812,61 @@ mod tests {
         assert_eq!(event.elapsed(), 0.5, "it stops at its length, not past it");
         assert_eq!(scene.acceleration_at(Vec3::new(1.0, 0.0, 0.0)), Vec3::ZERO);
         assert_eq!(scene.camera_shake(), Vec3::ZERO);
+    }
+
+    #[test]
+    fn switching_a_spent_event_on_again_means_another_one() {
+        let mut scene = Scene::new();
+        let quake = written(&mut scene, "earthquake");
+        scene.set_disaster_duration(quake, 1.0).unwrap();
+        scene.set_disaster_magnitude(quake, 7.0).unwrap();
+        scene.start_disaster(quake).unwrap();
+
+        for _ in 0..90 {
+            scene.step(1.0 / 60.0);
+        }
+        assert!(!scene.disaster(quake).unwrap().is_running());
+
+        scene.start_disaster(quake).unwrap();
+        let event = scene.disaster(quake).unwrap();
+        assert!(event.is_running(), "a switched-on shock is a shock");
+        assert!(
+            event.elapsed() < 0.1,
+            "a spent one is wound back, not left at its length"
+        );
+
+        let mut loudest = Vec3::ZERO;
+        for _ in 0..20 {
+            scene.step(1.0 / 60.0);
+            let shove = scene.acceleration_at(Vec3::ZERO);
+            if shove.length() > loudest.length() {
+                loudest = shove;
+            }
+        }
+        assert_ne!(loudest, Vec3::ZERO, "the restarted ground moves again");
+    }
+
+    #[test]
+    fn an_event_only_paused_keeps_its_clock_when_it_starts_again() {
+        let mut scene = Scene::new();
+        let quake = written(&mut scene, "earthquake");
+        scene.set_disaster_duration(quake, 8.0).unwrap();
+        scene.start_disaster(quake).unwrap();
+
+        for _ in 0..30 {
+            scene.step(1.0 / 60.0);
+        }
+        scene.stop_disaster(quake).unwrap();
+        let paused_at = scene.disaster(quake).unwrap().elapsed();
+
+        scene.start_disaster(quake).unwrap();
+        let event = scene.disaster(quake).unwrap();
+        assert!(event.is_running());
+        assert_eq!(
+            event.elapsed(),
+            paused_at,
+            "a hand on the switch must not jump the shaking to a new phase"
+        );
     }
 
     #[test]

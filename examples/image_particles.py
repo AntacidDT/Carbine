@@ -217,17 +217,8 @@ def main(source: str) -> None:
             frame += 1
             time.sleep(1.0 / 120.0)
     finally:
-        for crowd in crowds.values():
-            crowd.destroy()
-        for node in carbine.scene.root.children:
-            if isinstance(node, carbine.Particle):
-                node.destroy()
-        player.enabled = False
-        crosshair.destroy()
-        panel.destroy()
-        plinth.destroy()
-        ground.destroy()
-        carbine.close()
+        # Every crowd, plinth and HUD panel goes with one call, and so does the window.
+        carbine.end()
 
 
 if __name__ == "__main__":

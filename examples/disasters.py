@@ -177,7 +177,8 @@ def main() -> None:
                     for event in storms
                 )
                 print(
-                    f"at ({player.position.x:.1f}, {player.position.y:.1f}, {player.position.z:.1f}) m, "
+                    f"at ({player.position.x:.1f}, {player.position.y:.1f},"
+                    f" {player.position.z:.1f}) m, "
                     f"{shove:.1f} m/s^2 at the feet, crates {travelled:.1f} m from home, "
                     f"weather: {weather or 'none'}"
                 )
@@ -185,17 +186,8 @@ def main() -> None:
             frame += 1
             time.sleep(1.0 / 120.0)
     finally:
-        carbine.physics.stopAll()
-        for event in written.values():
-            event.destroy()
-        player.enabled = False
-        crosshair.destroy()
-        panel.destroy()
-        fan.destroy()
-        for crate in crates:
-            crate.destroy()
-        ground.destroy()
-        carbine.close()
+        # The weather, the props and the window all leave together.
+        carbine.end()
 
 
 if __name__ == "__main__":

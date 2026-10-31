@@ -3,6 +3,7 @@
 //! The renderer owns the frame. `carbine-core` hands it a scene and never sees a
 //! GPU type, so a game, the editor, and a headless test all drive the same API.
 
+mod device;
 mod gpu;
 mod input;
 mod pacing;
@@ -253,6 +254,16 @@ impl Renderer {
         match &self.target {
             Target::Windowed(windowed) => windowed.session.as_ref().map(|s| s.gpu.adapter()),
             Target::Offscreen(offscreen) => Some(offscreen.gpu.adapter()),
+        }
+    }
+
+    /// What kind of graphics device the renderer is drawing on and how much
+    /// memory it owns, as far as this machine will say. The scene sorts a light
+    /// rung out of this, so it is worth reporting once, at start-up.
+    pub fn hardware(&self) -> Option<carbine_core::Gpu> {
+        match &self.target {
+            Target::Windowed(windowed) => windowed.session.as_ref().map(|s| s.gpu.hardware()),
+            Target::Offscreen(offscreen) => Some(offscreen.gpu.hardware()),
         }
     }
 
@@ -555,11 +566,20 @@ impl Offscreen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use carbine_core::{CameraMode, NodeId, Scene, Vec3, VecField};
+    use carbine_core::{CameraMode, LightQuality, NodeId, Scene, Vec3, VecField};
 
     fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 3] {
         let offset = ((y * width + x) * 4) as usize;
         [pixels[offset], pixels[offset + 1], pixels[offset + 2]]
+    }
+
+    /// A scene on the rung the exact colours below were measured against. What
+    /// `auto` picks depends on the card the test runs on, so a fixture that reads
+    /// `[255, 0, 0]` has to say which world it means: this is the bare lambert one.
+    fn bare() -> Scene {
+        let mut scene = Scene::new();
+        scene.set_light_quality(LightQuality::Low);
+        scene
     }
 
     /// The frame the pixel assertions are written against: a top down
@@ -589,7 +609,7 @@ mod tests {
     #[test]
     fn an_offscreen_rectangle_rasterizes_in_its_colour() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         flat(&mut scene);
         card(
             &mut scene,
@@ -611,7 +631,7 @@ mod tests {
     #[test]
     fn an_empty_scene_is_only_the_clear_colour() {
         let mut renderer = Renderer::offscreen(32, 32).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         scene.set_sky_enabled(false);
 
         let pixels = renderer.read_pixels(&scene).unwrap();
@@ -622,7 +642,7 @@ mod tests {
     #[test]
     fn child_geometry_moves_with_its_parent() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         flat(&mut scene);
         let parent = scene.create("rectangle", None, None).unwrap();
         let child = scene.create("rectangle", None, Some(parent)).unwrap();
@@ -645,7 +665,7 @@ mod tests {
     #[test]
     fn depth_keeps_the_nearer_object_in_front() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         flat(&mut scene);
         card(
             &mut scene,
@@ -669,7 +689,7 @@ mod tests {
     #[test]
     fn a_cube_is_lit_on_top_and_left_in_ambient_on_its_side() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         scene.set_sky_enabled(false);
         scene.set_sky_sun(Vec3::Z);
         scene.set_camera_position(Vec3::new(0.0, -3.0, 3.0));
@@ -700,14 +720,69 @@ mod tests {
     }
 
     #[test]
+    fn a_wall_throws_a_shade_only_once_the_light_starts_casting() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = bare();
+        scene.set_sky_enabled(false);
+        // A sun up and off to one side, so a wall standing in it shades the floor
+        // beyond it instead of under itself.
+        scene.set_sky_sun(Vec3::new(0.0, -1.0, 1.0).normalize());
+        scene.set_camera_mode(CameraMode::Orthographic);
+        scene.set_camera_position(Vec3::new(0.0, 0.0, 10.0));
+        scene.set_camera_target(Vec3::ZERO);
+        scene.set_camera_view_height(2.0);
+        card(
+            &mut scene,
+            "rectangle",
+            Vec3::new(2.0, 2.0, 1.0),
+            Vec3::ZERO,
+            [0.8, 0.8, 0.8],
+        );
+        card(
+            &mut scene,
+            "cube",
+            Vec3::new(0.4, 0.4, 1.0),
+            Vec3::new(0.0, 0.0, 0.5),
+            [0.8, 0.8, 0.8],
+        );
+
+        // Half a metre of floor on the far side of the wall, and the same distance
+        // on the near side where the sun has nothing standing in front of it. Both
+        // are the same floor, the same colour and the same face.
+        let mut at = |scene: &Scene, row: u32| {
+            let pixels = renderer.read_pixels(scene).unwrap();
+            pixel(&pixels, 64, 32, row)
+        };
+
+        let bare_shade = at(&scene, 16);
+        let bare_lit = at(&scene, 48);
+        println!("TEMP low: {bare_shade:?} {bare_lit:?}");
+        assert_eq!(bare_shade[0], bare_lit[0], "TEMP");
+
+        scene.set_light_quality(LightQuality::Medium);
+        let cast_shade = at(&scene, 16);
+        let cast_lit = at(&scene, 48);
+
+        assert!(
+            cast_shade[0] + 40 < bare_shade[0],
+            "the floor behind the wall should now be in shade: {cast_shade:?} against {bare_shade:?}"
+        );
+        assert!(
+            (cast_lit[0] as i32 - bare_lit[0] as i32).abs() <= 16,
+            "the sun that does reach the floor should light it the same way it always did: \
+             {cast_lit:?} against {bare_lit:?}"
+        );
+    }
+
+    #[test]
     fn perspective_makes_a_farther_cube_smaller() {
-        let mut near = Scene::new();
+        let mut near = bare();
         near.set_sky_enabled(false);
         near.set_camera_position(Vec3::new(0.0, -4.0, 0.5));
         near.set_camera_target(Vec3::ZERO);
         card(&mut near, "cube", Vec3::ONE, Vec3::ZERO, [1.0, 0.0, 0.0]);
 
-        let mut far = Scene::new();
+        let mut far = bare();
         far.set_sky_enabled(false);
         far.set_camera_position(Vec3::new(0.0, -4.0, 0.5));
         far.set_camera_target(Vec3::ZERO);
@@ -758,7 +833,7 @@ mod tests {
         std::fs::write(&path, carbine_ktx::pack(8, 8, &pixels, true).unwrap()).unwrap();
 
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         flat(&mut scene);
         let tile = card(
             &mut scene,
@@ -791,7 +866,7 @@ mod tests {
     #[test]
     fn transparency_blends_a_world_object_over_what_is_behind_it() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         flat(&mut scene);
         card(
             &mut scene,
@@ -822,7 +897,7 @@ mod tests {
     #[test]
     fn the_sky_graduates_from_horizon_to_zenith() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         scene.set_sky_noise(0.0);
         scene.set_sky_zenith(Vec3::new(0.0, 0.0, 1.0));
         scene.set_sky_horizon(Vec3::new(1.0, 1.0, 1.0));
@@ -843,7 +918,7 @@ mod tests {
     #[test]
     fn switching_the_sky_off_leaves_the_clear_colour() {
         let mut renderer = Renderer::offscreen(32, 32).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         scene.set_sky_enabled(false);
 
         let pixels = renderer.read_pixels(&scene).unwrap();
@@ -861,7 +936,7 @@ mod tests {
     #[test]
     fn rain_flecks_the_frame_it_falls_through() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         side_on(&mut scene);
         let rain = scene.create_precipitation("rain", None).unwrap();
         scene.set_color_hex(rain, "#ffffff").unwrap();
@@ -885,7 +960,7 @@ mod tests {
     #[test]
     fn the_weather_slides_as_the_world_steps() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         side_on(&mut scene);
         let snow = scene.create_precipitation("snow", None).unwrap();
         veil_over_the_frame(&mut scene, snow);
@@ -927,7 +1002,7 @@ mod tests {
     #[test]
     fn a_fog_takes_the_far_side_of_a_field_away() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         flat(&mut scene);
         // The eyes look down from ten meters, so one card is two meters away and
         // the other is the full ten.
@@ -968,7 +1043,7 @@ mod tests {
     #[test]
     fn the_weather_falls_behind_the_interface() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         button(&mut scene);
         let rain = scene.create_precipitation("rain", None).unwrap();
         scene.set_color_hex(rain, "#ffffff").unwrap();
@@ -1032,7 +1107,7 @@ mod tests {
     #[test]
     fn a_single_drop_is_painted_where_the_core_puts_it() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         let crowd = drop(&mut scene, "circle", 0.4);
         assert_eq!(scene.particles_in_air(crowd).unwrap(), 1);
         assert_eq!(scene.particle_items()[0].at, Vec3::ZERO);
@@ -1055,7 +1130,7 @@ mod tests {
     #[test]
     fn a_wall_in_front_hides_the_drop_behind_it() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         drop(&mut scene, "circle", 0.4);
 
         let clear = renderer.read_pixels(&scene).unwrap();
@@ -1085,11 +1160,11 @@ mod tests {
     fn a_streak_covers_more_of_the_frame_than_a_square() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
 
-        let mut square_scene = Scene::new();
+        let mut square_scene = bare();
         drop(&mut square_scene, "square", 0.4);
         let square = painted(&renderer.read_pixels(&square_scene).unwrap());
 
-        let mut streak_scene = Scene::new();
+        let mut streak_scene = bare();
         drop(&mut streak_scene, "streak", 0.4);
         let streak = painted(&renderer.read_pixels(&streak_scene).unwrap());
 
@@ -1105,7 +1180,7 @@ mod tests {
     #[test]
     fn a_switched_off_system_draws_nothing_at_all() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         let crowd = drop(&mut scene, "circle", 0.4);
         assert!(painted(&renderer.read_pixels(&scene).unwrap()) > 20);
 
@@ -1131,7 +1206,7 @@ mod tests {
     #[test]
     fn a_square_element_fills_the_pixels_it_is_given() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         button(&mut scene);
 
         let pixels = renderer.read_pixels(&scene).unwrap();
@@ -1143,7 +1218,7 @@ mod tests {
     #[test]
     fn a_corner_value_cuts_the_corner_and_keeps_the_middle() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         let button = button(&mut scene);
         scene.set_corner(button, 20.0).unwrap();
 
@@ -1156,7 +1231,7 @@ mod tests {
     #[test]
     fn an_outline_is_stroked_even_when_the_element_is_transparent() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         let button = button(&mut scene);
         scene.set_outline(button, 4.0).unwrap();
         scene.set_alpha(button, 0.0).unwrap();
@@ -1170,7 +1245,7 @@ mod tests {
     #[test]
     fn transparency_blends_the_element_into_the_frame() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         let button = button(&mut scene);
         scene.set_alpha(button, 128.0).unwrap();
 
@@ -1194,7 +1269,7 @@ mod tests {
     #[test]
     fn the_polygon_count_replaces_the_box_with_a_triangle() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         let button = button(&mut scene);
         scene.set_polygon_sides(button, 3).unwrap();
 
@@ -1211,7 +1286,7 @@ mod tests {
     #[test]
     fn ui_draws_over_the_world_it_shares_a_scene_with() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
-        let mut scene = Scene::new();
+        let mut scene = bare();
         flat(&mut scene);
         card(
             &mut scene,

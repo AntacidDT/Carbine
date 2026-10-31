@@ -35,9 +35,13 @@ impl Scene {
     }
 
     /// An anchored node is pinned: it cannot be moved by gravity or by a force.
+    /// Whether a body is pinned is part of what it is, so it is written down the
+    /// whole link group.
     pub fn set_anchored(&mut self, id: NodeId, anchored: bool) -> Result<(), SceneError> {
-        self.component_mut::<Motion>(id)?.anchored = anchored;
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.component_mut::<Motion>(member)?.anchored = anchored;
+            Ok(())
+        })
     }
 
     pub fn uses_gravity(&self, id: NodeId) -> Result<bool, SceneError> {
@@ -45,6 +49,14 @@ impl Scene {
     }
 
     pub fn set_uses_gravity(&mut self, id: NodeId, gravity: bool) -> Result<(), SceneError> {
+        self.spread(id, move |scene, member| {
+            scene.set_gravity_one(member, gravity)
+        })
+    }
+
+    /// Gravity on one body alone. What the engine decides about a corpse is not
+    /// something the rest of its group hears about.
+    pub(crate) fn set_gravity_one(&mut self, id: NodeId, gravity: bool) -> Result<(), SceneError> {
         self.component_mut::<Motion>(id)?.gravity = gravity;
         Ok(())
     }
@@ -56,8 +68,10 @@ impl Scene {
     /// How hard gravity pulls this node. 10 is Earth, 0 lets it hang, and a
     /// negative value pulls the other way — up instead of down.
     pub fn set_gravity_pull(&mut self, id: NodeId, pull: f32) -> Result<(), SceneError> {
-        self.component_mut::<Motion>(id)?.gravity_pull = pull;
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.component_mut::<Motion>(member)?.gravity_pull = pull;
+            Ok(())
+        })
     }
 
     /// Whether the solver should move this node: an anchored node stays put no

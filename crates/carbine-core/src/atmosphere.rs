@@ -153,6 +153,194 @@ impl Precipitation {
     }
 }
 
+/// How much work the engine is allowed to do lighting a frame.
+///
+/// A ladder, not a bag of switches: a script picks a rung and the rungs below it
+/// are what that rung costs on a worse machine. `auto` is not a rung of its own -
+/// it is the engine reading the graphics device it got and standing on whichever
+/// rung that device can hold, which is what a fresh world is standing on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LightQuality {
+    /// Whatever this machine can hold. See [`auto_quality`].
+    Auto,
+    /// Only the sun direction and an ambient term: the whole world in one pass
+    /// with nothing to pre-render. This is the cheapest a lit scene can be.
+    Low,
+    /// The sun casts, the sky lends a little light back, and a face pointing at
+    /// the sun carries a hint of sheen. One small pre-pass per frame.
+    Medium,
+    /// The same as [`Self::Medium`] with a larger cast, a wider reach and a
+    /// softer edge to the shade.
+    High,
+    /// The full reach and the finest cast the engine will build, for a machine
+    /// that has memory to spare.
+    Extra,
+}
+
+impl LightQuality {
+    /// The rungs `atmosphere.lightQuality` accepts, in the order they are listed
+    /// when one is wrong.
+    pub const NAMES: &'static [&'static str] = &["auto", "extra", "high", "low", "medium"];
+
+    /// The ladder from cheapest to dearest, which is the order a quality menu
+    /// lists it in. `auto` is last because it is not a rung of its own.
+    pub const LADDER: &'static [Self] =
+        &[Self::Low, Self::Medium, Self::High, Self::Extra, Self::Auto];
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name.trim().to_lowercase().as_str() {
+            "auto" | "best" | "default" => Self::Auto,
+            "extra" | "max" | "ultra" => Self::Extra,
+            "high" | "great" => Self::High,
+            "low" | "fast" => Self::Low,
+            "medium" | "mid" | "balanced" => Self::Medium,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Extra => "extra",
+            Self::High => "high",
+            Self::Low => "low",
+            Self::Medium => "medium",
+        }
+    }
+}
+
+/// What the light pass is told to do, once a rung has been resolved.
+///
+/// These are engine numbers, not a script's: a script moves a rung and this is
+/// what moves with it. Every field has to be answerable on any machine, because
+/// an editor draws its quality menu out of here.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Light {
+    /// Which rung these numbers came from. Always a real rung, never `auto`.
+    pub quality: LightQuality,
+    /// Whether the sun pre-renders the world to cast with. False only at `low`.
+    pub shadows: bool,
+    /// Texels on a side of the cast, or 0 when there is no cast.
+    pub shadow_map: u32,
+    /// How many readings a pixel takes around its place in the cast. One is a
+    /// hard edge; more is a shade that fades where it ends.
+    pub softness: u32,
+    /// Metres around the eyes the cast covers. Anything outside it is lit but
+    /// casts nothing, which is how a big reach stays cheap.
+    pub reach: f32,
+    /// How much of the sun a face throws back as a sheen, 0..1. 0 is chalk.
+    pub gloss: f32,
+    /// Whether the light the sun leaves out comes from the backdrop itself,
+    /// so a north face is sky-blue at noon and starry at midnight.
+    pub sky_fill: bool,
+}
+
+impl Light {
+    /// The numbers a rung is worth. Two rungs are load-bearing and cannot move:
+    /// [`LightQuality::Low`] is the bare lambert world every pixel test was
+    /// measured against, and [`LightQuality::Medium`] is what a plain laptop gets.
+    pub fn of(quality: LightQuality) -> Self {
+        let (shadows, shadow_map, softness, reach, gloss, sky_fill) = match quality {
+            LightQuality::Low | LightQuality::Auto => (false, 0, 0, 0.0, 0.0, false),
+            LightQuality::Medium => (true, 1024, 4, 60.0, 0.25, true),
+            LightQuality::High => (true, 2048, 8, 90.0, 0.45, true),
+            LightQuality::Extra => (true, 4096, 16, 160.0, 0.6, true),
+        };
+        Self {
+            quality,
+            shadows,
+            shadow_map,
+            softness,
+            reach,
+            gloss,
+            sky_fill,
+        }
+    }
+}
+
+/// The kind of graphics device the engine was given, as the core is told it.
+///
+/// The core does not know what wgpu is, so the renderer names the class and the
+/// core only sorts it. `Integrated` is the interesting one: it owns no memory of
+/// its own and borrows the machine's instead, which is the first band.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeviceKind {
+    Cpu,
+    Integrated,
+    Discrete,
+    Virtual,
+    Other,
+}
+
+impl DeviceKind {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name.trim().to_lowercase().as_str() {
+            "cpu" | "software" | "llvmpipe" => Self::Cpu,
+            "integrated" => Self::Integrated,
+            "discrete" => Self::Discrete,
+            "virtual" => Self::Virtual,
+            "other" => Self::Other,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Integrated => "integrated",
+            Self::Discrete => "discrete",
+            Self::Virtual => "virtual",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// A card that owns less than this has nothing worth casting with; four gigabytes
+/// is where a card has room for a big cast and a crowded world both, and a card
+/// only takes the high rung once it owns more than that.
+const SMALL_CARD: u64 = 100 * 1024 * 1024;
+const BIG_CARD: u64 = 4 * 1024 * 1024 * 1024;
+
+/// The rung a machine can hold, from what the renderer found out about it.
+///
+/// The rule a script would otherwise have to guess at: a card owning more than
+/// four gigabytes takes the high rung; one owning from a tenth of a gigabyte up
+/// to four takes the middle; anything smaller, and anything that owns nothing and
+/// borrows the machine's memory, takes the lowest. A discrete card that will not
+/// say how big it is still gets the middle, because it is a card.
+///
+/// A machine the renderer has not described at all is not this function's
+/// business: [`Scene::light`] answers that with the middle.
+///
+/// `extra` is never the answer. A script has to ask for it by name, because the
+/// engine cannot tell from a memory count that a card wants a four-thousand-texel
+/// cast thrown over its shoulder all day.
+pub fn auto_quality(kind: DeviceKind, vram: Option<u64>) -> LightQuality {
+    match kind {
+        DeviceKind::Discrete => match vram {
+            Some(bytes) if bytes > BIG_CARD => LightQuality::High,
+            Some(bytes) if bytes >= SMALL_CARD => LightQuality::Medium,
+            Some(_) => LightQuality::Low,
+            None => LightQuality::Medium,
+        },
+        DeviceKind::Cpu | DeviceKind::Integrated | DeviceKind::Virtual | DeviceKind::Other => {
+            LightQuality::Low
+        }
+    }
+}
+
+/// What the renderer found out about the device it was handed.
+///
+/// A best-effort reading, not a guarantee: a machine that will not be read leaves
+/// [`Gpu::vram`] empty and the engine judges it by its class alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gpu {
+    pub kind: DeviceKind,
+    /// Bytes the card owns outright. `None` for a card that borrows the machine's
+    /// memory, and for one that will not say how much it has.
+    pub vram: Option<u64>,
+}
+
 /// The air, as the renderer is told to see it.
 ///
 /// Times are hours past midnight on the 0..24 clock, wrapped, so `25.5` is half
@@ -167,6 +355,9 @@ pub struct Atmosphere {
     pub fog_color: Vec3,
     /// What the clock last said.
     pub time: f32,
+    /// Which rung the light is worked at. `auto` until a script says otherwise,
+    /// which is the rung this machine can hold.
+    pub quality: LightQuality,
 }
 
 impl Default for Atmosphere {
@@ -175,6 +366,7 @@ impl Default for Atmosphere {
             fog: NO_FOG,
             fog_color: Vec3::new(0.761, 0.800, 0.831),
             time: 15.0,
+            quality: LightQuality::Auto,
         }
     }
 }
@@ -263,6 +455,54 @@ impl Scene {
         let density = HAZE_PER_METRE_AT_FULL * fraction * fraction;
         let color = self.atmosphere.fog_color;
         [color.x, color.y, color.z, density]
+    }
+
+    /// What the light pass is told to do this frame. This is what the renderer
+    /// reads: a script never has to know which rung it got.
+    pub fn light(&self) -> Light {
+        Light::of(self.light_quality())
+    }
+
+    /// Which rung the light is worked at, with `auto` already answered. A machine
+    /// the renderer has not described - a headless scene, a test - gets the middle
+    /// rather than a guess about hardware that is not there.
+    pub fn light_quality(&self) -> LightQuality {
+        match self.atmosphere.quality {
+            LightQuality::Auto => self
+                .gpu
+                .map(|gpu| auto_quality(gpu.kind, gpu.vram))
+                .unwrap_or(LightQuality::Medium),
+            rung => rung,
+        }
+    }
+
+    /// The rung a script actually wrote, which may still be `auto`. An editor's
+    /// menu reads this, so that it can show "auto" and not the rung behind it.
+    pub fn written_light_quality(&self) -> LightQuality {
+        self.atmosphere.quality
+    }
+
+    pub fn set_light_quality(&mut self, quality: LightQuality) {
+        self.atmosphere.quality = quality;
+    }
+
+    /// The rung written the way a name is written, `"high"` and friends.
+    pub fn set_light_quality_name(&mut self, name: &str) -> Result<(), SceneError> {
+        let quality = LightQuality::from_name(name)
+            .ok_or_else(|| SceneError::UnknownLightQuality(name.trim().to_owned()))?;
+        self.set_light_quality(quality);
+        Ok(())
+    }
+
+    /// Told by the renderer what graphics device it was actually given. This is
+    /// what lets an unread world stand `auto` and still pick a sane rung.
+    pub fn report_gpu(&mut self, kind: DeviceKind, vram: Option<u64>) {
+        self.gpu = Some(Gpu { kind, vram });
+    }
+
+    /// What the renderer reported, or nothing before it has drawn a frame.
+    pub fn gpu(&self) -> Option<Gpu> {
+        self.gpu
     }
 
     /// Hours past midnight the world is lit for.
@@ -640,5 +880,163 @@ mod tests {
             Err(SceneError::UnknownAtmosphere(_))
         ));
         assert!(Precipitation::from_name(" blizzard ").is_some());
+    }
+
+    #[test]
+    fn the_light_starts_auto_and_a_machine_that_said_nothing_is_medium() {
+        let scene = Scene::new();
+
+        // A fresh world does not choose a rung; it asks the machine to.
+        assert_eq!(scene.atmosphere().quality, LightQuality::Auto);
+        assert_eq!(scene.written_light_quality(), LightQuality::Auto);
+        // Nothing has been reported, so this is a headless scene and the engine
+        // declines to guess about hardware that is not there.
+        assert_eq!(scene.light().quality, LightQuality::Medium);
+        assert!(scene.gpu().is_none());
+    }
+
+    #[test]
+    fn the_low_rung_is_the_bare_world_the_pixel_tests_were_measured_on() {
+        let low = Light::of(LightQuality::Low);
+
+        assert!(!low.shadows);
+        assert_eq!(low.shadow_map, 0);
+        assert_eq!(low.softness, 0);
+        assert_eq!(low.reach, 0.0);
+        assert_eq!(low.gloss, 0.0);
+        assert!(!low.sky_fill);
+        // Writing it is what a test of an exact colour does, so that the rung the
+        // machine can hold never moves the numbers behind the assertion.
+        let mut scene = Scene::new();
+        scene.set_light_quality(LightQuality::Low);
+        assert_eq!(scene.light(), low);
+    }
+
+    #[test]
+    fn every_rung_above_costs_more_than_the_one_below_it() {
+        let rungs = [
+            LightQuality::Low,
+            LightQuality::Medium,
+            LightQuality::High,
+            LightQuality::Extra,
+        ];
+        let lights: Vec<Light> = rungs.iter().map(|rung| Light::of(*rung)).collect();
+
+        for pair in lights.windows(2) {
+            let (less, more) = (pair[0], pair[1]);
+            assert!(
+                more.shadow_map >= less.shadow_map
+                    && more.softness >= less.softness
+                    && more.reach >= less.reach
+                    && more.gloss >= less.gloss,
+                "{} is not dearer than {}",
+                more.quality.name(),
+                less.quality.name()
+            );
+        }
+
+        // Only the bottom rung is bare; everything above it casts and fills.
+        assert!(
+            lights[1..]
+                .iter()
+                .all(|light| light.shadows && light.sky_fill)
+        );
+        assert!(lights[1].shadow_map >= 1024 && lights[1].reach >= 40.0);
+    }
+
+    #[test]
+    fn auto_reads_the_memory_a_card_actually_owns() {
+        let big = 8 * 1024 * 1024 * 1024;
+        let exactly_four = 4 * 1024 * 1024 * 1024;
+        let a_bit_under = 3 * 1024 * 1024 * 1024;
+        let a_tenth = 100 * 1024 * 1024;
+        let tiny = 64 * 1024 * 1024;
+
+        // More than four gigabytes of its own: the high rung.
+        assert_eq!(
+            auto_quality(DeviceKind::Discrete, Some(big)),
+            LightQuality::High
+        );
+        // Four gigabytes on the nose is still the band a person would call mid,
+        // and it is the same card the day after a driver tells the truth about it.
+        assert_eq!(
+            auto_quality(DeviceKind::Discrete, Some(exactly_four)),
+            LightQuality::Medium
+        );
+        // From a tenth of a gigabyte up to four: the middle.
+        assert_eq!(
+            auto_quality(DeviceKind::Discrete, Some(a_bit_under)),
+            LightQuality::Medium
+        );
+        assert_eq!(
+            auto_quality(DeviceKind::Discrete, Some(a_tenth)),
+            LightQuality::Medium
+        );
+        // Less than that, a card is not worth casting on.
+        assert_eq!(
+            auto_quality(DeviceKind::Discrete, Some(tiny)),
+            LightQuality::Low
+        );
+        // A card that will not say how big it is is still a card.
+        assert_eq!(
+            auto_quality(DeviceKind::Discrete, None),
+            LightQuality::Medium
+        );
+
+        // Anything that owns no memory and borrows the machine's takes the lowest
+        // rung, however much of the machine it is allowed to borrow.
+        for kind in [
+            DeviceKind::Integrated,
+            DeviceKind::Cpu,
+            DeviceKind::Virtual,
+            DeviceKind::Other,
+        ] {
+            assert_eq!(
+                auto_quality(kind, Some(big)),
+                LightQuality::Low,
+                "{} has no memory of its own",
+                kind.name()
+            );
+            assert_eq!(auto_quality(kind, None), LightQuality::Low);
+        }
+    }
+
+    #[test]
+    fn a_script_rung_beats_the_one_the_machine_was_read_as() {
+        let mut scene = Scene::new();
+        scene.report_gpu(DeviceKind::Discrete, Some(8 * 1024 * 1024 * 1024));
+        assert_eq!(scene.light_quality(), LightQuality::High);
+
+        scene.set_light_quality_name("low").unwrap();
+        assert_eq!(scene.light().quality, LightQuality::Low);
+        assert_eq!(scene.written_light_quality(), LightQuality::Low);
+
+        // Back to asking the machine, and the reading has not been thrown away.
+        scene.set_light_quality_name("auto").unwrap();
+        assert_eq!(scene.light_quality(), LightQuality::High);
+        let gpu = scene.gpu().unwrap();
+        assert_eq!(gpu.kind, DeviceKind::Discrete);
+        assert_eq!(gpu.vram, Some(8 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn a_rung_is_a_name_a_person_can_write() {
+        for name in LightQuality::NAMES {
+            let rung = LightQuality::from_name(name).unwrap();
+            assert_eq!(rung.name(), *name);
+        }
+        assert_eq!(LightQuality::from_name(" HIGH "), Some(LightQuality::High));
+        assert_eq!(
+            LightQuality::from_name("balanced"),
+            Some(LightQuality::Medium)
+        );
+
+        let mut scene = Scene::new();
+        assert!(matches!(
+            scene.set_light_quality_name("cinematic"),
+            Err(SceneError::UnknownLightQuality(quality)) if quality == "cinematic"
+        ));
+        // Refused before anything moved.
+        assert_eq!(scene.written_light_quality(), LightQuality::Auto);
     }
 }

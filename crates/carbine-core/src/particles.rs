@@ -255,11 +255,15 @@ impl Scene {
     }
 
     /// What each thing in the crowd is cut as: `streak`, `square` or `circle`.
+    /// Every knob of a system is part of what the thing is, so a linked copy is
+    /// written with its group; what is already in the air is each system's own.
     pub fn set_particle_shape(&mut self, id: NodeId, shape: &str) -> Result<(), SceneError> {
         let shape = ParticleShape::from_name(shape)
             .ok_or_else(|| SceneError::UnknownParticleShape(shape.to_owned()))?;
-        self.particles_mut(id)?.shape = shape;
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.particles_mut(member)?.shape = shape;
+            Ok(())
+        })
     }
 
     pub fn particle_count(&self, id: NodeId) -> Result<usize, SceneError> {
@@ -270,6 +274,12 @@ impl Scene {
     /// at their seeded places, so the ones already in the air keep the places they
     /// had; shrinking it takes the last ones off.
     pub fn set_particle_count(&mut self, id: NodeId, count: usize) -> Result<(), SceneError> {
+        self.spread(id, move |scene, member| {
+            scene.set_particle_count_one(member, count)
+        })
+    }
+
+    fn set_particle_count_one(&mut self, id: NodeId, count: usize) -> Result<(), SceneError> {
         let count = count.min(MAX_PARTICLES);
         let (area, lifetime, seed, active) = {
             let particles = self.particles(id)?;
@@ -305,8 +315,10 @@ impl Scene {
 
     /// Meters across. Every drop already flying takes up the new size at once.
     pub fn set_particle_size(&mut self, id: NodeId, size: f32) -> Result<(), SceneError> {
-        self.particles_mut(id)?.size = size.max(0.0);
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.particles_mut(member)?.size = size.max(0.0);
+            Ok(())
+        })
     }
 
     pub fn particle_speed(&self, id: NodeId) -> Result<f32, SceneError> {
@@ -315,8 +327,10 @@ impl Scene {
 
     /// Meters per second along the way the system points.
     pub fn set_particle_speed(&mut self, id: NodeId, speed: f32) -> Result<(), SceneError> {
-        self.particles_mut(id)?.speed = speed.max(0.0);
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.particles_mut(member)?.speed = speed.max(0.0);
+            Ok(())
+        })
     }
 
     pub fn particle_direction(&self, id: NodeId) -> Result<Vec3, SceneError> {
@@ -337,8 +351,10 @@ impl Scene {
         } else {
             direction
         };
-        self.particles_mut(id)?.direction = direction;
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.particles_mut(member)?.direction = direction;
+            Ok(())
+        })
     }
 
     pub fn particle_area(&self, id: NodeId) -> Result<Vec3, SceneError> {
@@ -348,8 +364,10 @@ impl Scene {
     /// The box new drops are placed in, meters, centred on the node. Like the
     /// lifetime, it bites on the drops the system lays next.
     pub fn set_particle_area(&mut self, id: NodeId, area: Vec3) -> Result<(), SceneError> {
-        self.particles_mut(id)?.area = area.max(Vec3::ZERO);
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.particles_mut(member)?.area = area.max(Vec3::ZERO);
+            Ok(())
+        })
     }
 
     pub fn particle_lifetime(&self, id: NodeId) -> Result<f32, SceneError> {
@@ -361,8 +379,10 @@ impl Scene {
     /// *given*, so it bites on the ones the system lays next - restart it to lay
     /// the whole crowd over.
     pub fn set_particle_lifetime(&mut self, id: NodeId, seconds: f32) -> Result<(), SceneError> {
-        self.particles_mut(id)?.lifetime = seconds.max(0.0);
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.particles_mut(member)?.lifetime = seconds.max(0.0);
+            Ok(())
+        })
     }
 
     pub fn particle_seed(&self, id: NodeId) -> Result<u64, SceneError> {
@@ -372,6 +392,12 @@ impl Scene {
     /// The dice the crowd is laid out with. Setting it throws the veil away and
     /// lays a new one, which is the point: the same seed is the same weather.
     pub fn set_particle_seed(&mut self, id: NodeId, seed: Seed) -> Result<(), SceneError> {
+        self.spread(id, move |scene, member| {
+            scene.set_particle_seed_one(member, seed)
+        })
+    }
+
+    fn set_particle_seed_one(&mut self, id: NodeId, seed: Seed) -> Result<(), SceneError> {
         self.particles_mut(id)?.seed = seed;
         self.particles_mut(id)?.rng = Rng::new(seed);
         self.prefill(id)
@@ -406,8 +432,10 @@ impl Scene {
     /// crowd. Off is the flat way to wear weather: the drops go straight through
     /// everything and only their own time runs them out.
     pub fn set_particles_collide(&mut self, id: NodeId, collide: bool) -> Result<(), SceneError> {
-        self.particles_mut(id)?.collide = collide;
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.particles_mut(member)?.collide = collide;
+            Ok(())
+        })
     }
 
     pub fn particle_splash(&self, id: NodeId) -> Result<usize, SceneError> {
@@ -417,8 +445,11 @@ impl Scene {
     /// How many droplets an impact throws, or zero for a drop that simply stops.
     /// A splash is the last generation: what it throws does not splash in turn.
     pub fn set_particle_splash(&mut self, id: NodeId, count: usize) -> Result<(), SceneError> {
-        self.particles_mut(id)?.splash = count.min(MAX_SPLASH_PER_HIT);
-        Ok(())
+        let count = count.min(MAX_SPLASH_PER_HIT);
+        self.spread(id, move |scene, member| {
+            scene.particles_mut(member)?.splash = count;
+            Ok(())
+        })
     }
 
     pub fn particles_recycle(&self, id: NodeId) -> Result<bool, SceneError> {
@@ -428,8 +459,10 @@ impl Scene {
     /// Whether a spent drop is born again. Off makes the system a burst: one
     /// crowd, thrown once, and then the air is clear.
     pub fn set_particles_recycle(&mut self, id: NodeId, recycle: bool) -> Result<(), SceneError> {
-        self.particles_mut(id)?.recycle = recycle;
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.particles_mut(member)?.recycle = recycle;
+            Ok(())
+        })
     }
 
     pub fn particles_on_sky(&self, id: NodeId) -> Result<bool, SceneError> {
@@ -441,8 +474,10 @@ impl Scene {
     /// at a place, like smoke off a chimney. The box moves at once, because a veil
     /// left behind where the player started is not weather.
     pub fn set_particles_on_sky(&mut self, id: NodeId, on_sky: bool) -> Result<(), SceneError> {
-        self.particles_mut(id)?.on_sky = on_sky;
-        self.prefill(id)
+        self.spread(id, move |scene, member| {
+            scene.particles_mut(member)?.on_sky = on_sky;
+            scene.prefill(member)
+        })
     }
 
     /// Throws the crowd away and lays a new one from where the node stands now,
@@ -659,6 +694,37 @@ impl Scene {
         }
         particles.bursts = alive;
         particles.rng = rng;
+    }
+
+    /// The crowd written again onto a fresh node: the same knobs, the same seed,
+    /// and nothing carried over from the air. What is already flying belongs to the
+    /// system it was born in, so the copy lays its own veil at its own place.
+    pub(crate) fn copy_particles(&mut self, from: NodeId, into: NodeId) -> Result<(), SceneError> {
+        let copied = {
+            let source = self.particles(from)?;
+            Particles {
+                shape: source.shape,
+                count: source.count,
+                size: source.size,
+                speed: source.speed,
+                direction: source.direction,
+                area: source.area,
+                lifetime: source.lifetime,
+                seed: source.seed,
+                active: source.active,
+                collide: source.collide,
+                splash: source.splash,
+                recycle: source.recycle,
+                on_sky: source.on_sky,
+                rng: Rng::new(source.seed),
+                live: Vec::new(),
+                bursts: Vec::new(),
+                impacts: 0,
+            }
+        };
+        let entity = self.entity(into)?;
+        self.world.entity_mut(entity).insert(copied);
+        self.prefill(into)
     }
 
     /// Lays the whole veil at once, each drop part way through its life, so a

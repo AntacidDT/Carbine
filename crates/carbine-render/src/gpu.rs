@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use carbine_core::{DrawItem, MeshData, MeshHandle, ParticleItem, ParticleShape, Scene, Sky};
+use carbine_core::{
+    DrawItem, Light, MeshData, MeshHandle, ParticleItem, ParticleShape, Scene, Sky,
+};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
@@ -9,26 +11,39 @@ use wgpu::util::DeviceExt;
 /// colour of the air by how far each pixel stands from the eyes. A face that
 /// points away from the sun keeps its colour at ambient brightness, which is what
 /// makes a cube read as a solid.
+///
+/// Everything the light quality can switch off is switched off by a zero in a
+/// uniform, and a zero leaves this exact arithmetic alone: the bare lambert term
+/// `ambient + (1 - ambient) * facing` is what `low` draws, pixel for pixel, because
+/// `shade` is one, the sky fill is none and there is no sheen to add.
 const WORLD_SHADER: &str = r#"
 struct Uniforms {
     view_proj: mat4x4<f32>,
     model: mat4x4<f32>,
+    light_view: mat4x4<f32>,
+    zenith: vec4<f32>,
+    horizon: vec4<f32>,
     color: vec4<f32>,
     sun: vec4<f32>,
     fog: vec4<f32>,
     eyes: vec4<f32>,
+    casting: vec4<f32>,
+    sheen: vec4<f32>,
     skinned: f32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var skin_sampler: sampler;
 @group(0) @binding(2) var skin: texture_2d<f32>;
+@group(0) @binding(3) var cast_map: texture_depth_2d;
+@group(0) @binding(4) var cast_sampler: sampler_comparison;
 
 struct Pixel {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) world: vec3<f32>,
+    @location(3) sunside: vec4<f32>,
 };
 
 @vertex
@@ -43,7 +58,41 @@ fn versus(
     pixel.world = place.xyz;
     pixel.normal = normalize((uniforms.model * vec4<f32>(normal, 0.0)).xyz);
     pixel.uv = uv;
+    pixel.sunside = uniforms.light_view * place;
     return pixel;
+}
+
+/// How much of the sun this pixel is standing in. The cast is the world seen from
+/// the sun, so a pixel the sun's own picture cannot reach is behind something.
+///
+/// `casting.z` is how many readings the edge of a shade is smoothed with, and zero of
+/// them is a rung that casts nothing: the arithmetic after it is then exactly the
+/// unshadowed one.
+fn shade(pixel: Pixel) -> f32 {
+    let taps = i32(uniforms.casting.z);
+    if (taps < 1) {
+        return 1.0;
+    }
+
+    let on = pixel.sunside.xyz / pixel.sunside.w;
+    let at = vec2<f32>(on.x * 0.5 + 0.5, on.y * 0.5 + 0.5);
+    // Outside the cast the sun simply did not look this way, which is light.
+    if (at.x < 0.0 || at.x > 1.0 || at.y < 0.0 || at.y > 1.0) {
+        return 1.0;
+    }
+
+    // A pixel at the front of its own face would otherwise shade itself, so the
+    // reading is asked for a little further back than the depth it landed on.
+    let depth = on.z * 0.5 + 0.5 - uniforms.casting.w;
+    var lit = 0.0;
+    for (var i: i32 = 0; i < taps; i = i + 1) {
+        // Taps laid on a golden-angle spiral, so a wider blur costs no clumping.
+        let spread = uniforms.casting.x * uniforms.casting.y * sqrt((f32(i) + 0.5) / f32(taps));
+        let turned = f32(i) * 2.3999632;
+        let where_ = at + vec2<f32>(cos(turned), sin(turned)) * spread;
+        lit = lit + textureSampleCompareLevel(cast_map, cast_sampler, where_, depth);
+    }
+    return lit / f32(taps);
 }
 
 @fragment
@@ -51,15 +100,48 @@ fn fragment(pixel: Pixel) -> @location(0) vec4<f32> {
     // Images are stored top row first and mesh v grows upward, so v is flipped.
     let skin = textureSample(skin, skin_sampler, vec2<f32>(pixel.uv.x, 1.0 - pixel.uv.y));
     let base = mix(uniforms.color.rgb, skin.rgb * uniforms.color.rgb, uniforms.skinned);
-    let facing = max(dot(normalize(pixel.normal), uniforms.sun.xyz), 0.0);
-    let lit = uniforms.sun.w + (1.0 - uniforms.sun.w) * facing;
+    let face = normalize(pixel.normal);
+    let facing = max(dot(face, uniforms.sun.xyz), 0.0);
+    let away = shade(pixel);
+    let sunlit = (1.0 - uniforms.sun.w) * facing * away;
+    // At `low` this stays the same scalar ambient it always was; from `medium` up
+    // the light the sun leaves out comes from the backdrop over the face's head.
+    let dome = mix(uniforms.horizon.rgb, uniforms.zenith.rgb, clamp(face.z, 0.0, 1.0));
+    let ambient = mix(vec3<f32>(uniforms.sun.w), dome, uniforms.sheen.y);
+    let lit = ambient + vec3<f32>(sunlit);
+    // The sun coming back off a face that is squared at it, which is what a wet
+    // or polished thing is. It is shut at `low` as well, and zero of it is nothing.
+    let eye = normalize(uniforms.eyes.xyz - pixel.world);
+    let turned = normalize(uniforms.sun.xyz + eye);
+    let glossy = pow(max(dot(face, turned), 0.0), 24.0) * uniforms.sheen.x * away;
     // Fog is the air rather than anything falling through it, so it is a distance
     // rather than a shape: every metre between the pixel and the eyes takes some of
     // the picture away. A density of zero leaves the colour exactly as it was lit.
-    let away = length(pixel.world - uniforms.eyes.xyz);
-    let veil = 1.0 - exp(-max(uniforms.fog.w, 0.0) * away);
-    let tinted = mix(base * lit, uniforms.fog.xyz, clamp(veil, 0.0, 1.0));
+    let distance = length(pixel.world - uniforms.eyes.xyz);
+    let veil = 1.0 - exp(-max(uniforms.fog.w, 0.0) * distance);
+    let shaded = vec3<f32>(away, clamp(pixel.sunside.x / pixel.sunside.w * 0.5 + 0.5, 0.0, 1.0), clamp(pixel.sunside.y / pixel.sunside.w * 0.5 + 0.5, 0.0, 1.0));
+    let tinted = mix(shaded, uniforms.fog.xyz, clamp(veil, 0.0, 1.0));
     return vec4<f32>(tinted, uniforms.color.a * mix(1.0, skin.a, uniforms.skinned));
+}
+"#;
+
+/// The world seen from the sun, with nothing written but depth. This is the
+/// picture the shade is read out of afterwards.
+const CAST_SHADER: &str = r#"
+struct CastUniforms {
+    light_view: mat4x4<f32>,
+    model: mat4x4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> uniforms: CastUniforms;
+
+@vertex
+fn versus(
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+) -> @builtin(position) vec4<f32> {
+    return uniforms.light_view * uniforms.model * vec4<f32>(position, 1.0);
 }
 "#;
 
@@ -305,6 +387,11 @@ const CLEAR: wgpu::Color = wgpu::Color {
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const COPY_ROW_ALIGNMENT: u32 = 256;
 
+/// How wide the cast is when the rung does not cast at all. The world shader never
+/// reads a texel of it, but its layout still asks for a depth texture to be bound,
+/// and one is the cheapest answer.
+const BARE_CAST: u32 = 1;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Vertex {
@@ -318,12 +405,30 @@ struct Vertex {
 struct Uniforms {
     view_proj: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
+    /// The same world from the sun's side, which is what a shade is read out of.
+    light_view: [[f32; 4]; 4],
+    zenith: [f32; 4],
+    horizon: [f32; 4],
     color: [f32; 4],
     sun: [f32; 4],
     fog: [f32; 4],
     eyes: [f32; 4],
+    /// The cast: one texel in the picture, how far a soft edge reaches in texels,
+    /// how many readings to take, and how far back the depth is read from. All
+    /// zeroes is a rung that casts nothing. (`cast` is a reserved word in WGSL.)
+    casting: [f32; 4],
+    /// How much of the sun a face throws back, and how much of the light the sun
+    /// leaves out comes from the backdrop. Both zero is the bare lambert world.
+    sheen: [f32; 4],
     skinned: f32,
     _pad: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct CastUniforms {
+    light_view: [[f32; 4]; 4],
+    model: [[f32; 4]; 4],
 }
 
 #[repr(C)]
@@ -410,6 +515,9 @@ struct Spec {
     /// Whether the pass it draws into carries a depth attachment.
     depth: bool,
     depth_write: bool,
+    /// A pipeline with no fragment stage at all: it leaves nothing on the screen
+    /// and only says where the world's surface is, which is all a cast needs.
+    depth_only: bool,
 }
 
 const WORLD: Spec = Spec {
@@ -421,6 +529,7 @@ const WORLD: Spec = Spec {
     skinned: true,
     depth: true,
     depth_write: true,
+    depth_only: false,
 };
 
 /// Translucent objects blend over what is already in the frame, so they must not
@@ -434,6 +543,21 @@ const GLASS: Spec = Spec {
     skinned: true,
     depth: true,
     depth_write: false,
+    depth_only: false,
+};
+
+/// The world seen from the sun. Nothing is drawn in colour here; the only thing
+/// this pass leaves behind is the depth a shade is read out of.
+const CAST: Spec = Spec {
+    label: "carbine cast",
+    source: CAST_SHADER,
+    uniform_bytes: std::mem::size_of::<CastUniforms>(),
+    fullscreen: false,
+    instanced: false,
+    skinned: false,
+    depth: true,
+    depth_write: true,
+    depth_only: true,
 };
 
 const SKY: Spec = Spec {
@@ -445,6 +569,7 @@ const SKY: Spec = Spec {
     skinned: false,
     depth: true,
     depth_write: false,
+    depth_only: false,
 };
 
 const UI: Spec = Spec {
@@ -456,6 +581,7 @@ const UI: Spec = Spec {
     skinned: false,
     depth: false,
     depth_write: false,
+    depth_only: false,
 };
 
 /// A crowd of drops: blended over the world it falls through, tested against its
@@ -469,6 +595,7 @@ const PARTICLES: Spec = Spec {
     skinned: true,
     depth: true,
     depth_write: false,
+    depth_only: false,
 };
 
 #[derive(Debug, Clone)]
@@ -531,6 +658,9 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter_name: String,
+    /// What kind of device this is and how much memory it owns, as far as the
+    /// machine will say. The core sorts a light rung out of this.
+    pub hardware: carbine_core::Gpu,
     sampler: wgpu::Sampler,
     meshes: HashMap<MeshHandle, GpuMesh>,
     /// `None` records a skin that could not be read, so a broken file is opened
@@ -540,9 +670,16 @@ pub struct Gpu {
     plain: wgpu::TextureView,
     world: HashMap<wgpu::TextureFormat, Pipeline>,
     glass: HashMap<wgpu::TextureFormat, Pipeline>,
+    casts: HashMap<wgpu::TextureFormat, Pipeline>,
     sky: HashMap<wgpu::TextureFormat, Pipeline>,
     particles: HashMap<wgpu::TextureFormat, Pipeline>,
     ui: HashMap<wgpu::TextureFormat, Pipeline>,
+    /// The depth the sun sees: the world drawn from its side, at `0` texels on a
+    /// side. A rung that casts nothing is held at one texel wide, so the map the
+    /// rung above it needed is let go.
+    cast: (u32, wgpu::Texture, wgpu::TextureView),
+    /// Reads a pixel's own place in the cast and answers whether the sun reaches it.
+    cast_sampler: wgpu::Sampler,
     /// The one quad every instanced drop is cut from, in its own axes.
     quad: GpuMesh,
     /// The instance buffer the crowd is uploaded into, kept and grown between
@@ -594,6 +731,17 @@ impl Gpu {
         });
         let plain = upload_rgba(&device, &queue, "carbine plain skin", 1, 1, &[255; 4]);
         let quad = unit_quad(&device);
+        let cast_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("carbine cast sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            // A pixel is standing in the sun when it is no further from the sun
+            // than the surface the cast found where it is.
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let cast = make_cast(&device, BARE_CAST);
+        let hardware = crate::device::describe(&adapter);
 
         Ok(Self {
             instance,
@@ -601,15 +749,19 @@ impl Gpu {
             device,
             queue,
             adapter_name: name,
+            hardware,
             sampler,
             meshes: HashMap::new(),
             skins: HashMap::new(),
             plain,
             world: HashMap::new(),
             glass: HashMap::new(),
+            casts: HashMap::new(),
             sky: HashMap::new(),
             particles: HashMap::new(),
             ui: HashMap::new(),
+            cast,
+            cast_sampler,
             quad,
             crowd: None,
         })
@@ -617,6 +769,11 @@ impl Gpu {
 
     pub fn adapter(&self) -> &str {
         &self.adapter_name
+    }
+
+    /// The device this renderer drew on, as the core wants it.
+    pub fn hardware(&self) -> carbine_core::Gpu {
+        self.hardware
     }
 
     /// A surface format that passes our sRGB colours straight through.
@@ -714,6 +871,15 @@ impl Gpu {
         (texture, view)
     }
 
+    /// The cast at the size the light's rung asks for. Moving a rung up or down is
+    /// the only time this costs anything, and moving down hands the bigger map back.
+    fn ensure_cast(&mut self, size: u32) {
+        if self.cast.0 == size {
+            return;
+        }
+        self.cast = make_cast(&self.device, size);
+    }
+
     /// Records the scene and submits it, returning the submission index so the
     /// caller can present the texture it rendered into. `extent` is the target in
     /// pixels: the world is measured against its aspect ratio, UI against its size.
@@ -728,8 +894,21 @@ impl Gpu {
         let camera = scene.camera();
         let sky = scene.sky();
         let haze = scene.haze();
+        let light = scene.light();
         let aspect = extent.0 as f32 / extent.1.max(1) as f32;
         let view_proj = camera.view_projection(aspect);
+
+        // The sun's own picture of the world is taken before anything is drawn into
+        // the frame that reads it. A rung that casts nothing keeps its bindings
+        // pointed at a texel wide map and a shader that never looks at it.
+        let casting = light.shadows;
+        let light_view = if casting {
+            sun_view(sky.sun, camera.position, light.reach)
+        } else {
+            Mat4::IDENTITY
+        };
+        self.ensure_cast(if casting { light.shadow_map } else { BARE_CAST });
+        let cast = self.cast.2.clone();
 
         // Solid objects first, then the translucent ones back to front, so each
         // blends over what the camera sees behind it.
@@ -831,6 +1010,57 @@ impl Gpu {
                 label: Some("carbine frame"),
             });
 
+        // The sun takes its picture of the world before anything is drawn into the
+        // frame that reads it, so a shade is always this frame's and never the one
+        // before it.
+        if casting {
+            let pipeline =
+                ensure_pipeline(&mut self.casts, &self.device, format, &CAST, opaque.len());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("carbine cast"),
+                // Only depth is written: the cast is a picture of where the surface
+                // of the world is, not of what colour it is.
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &cast,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline.pipeline);
+            for (index, item) in opaque.iter().enumerate() {
+                let mesh = ensure_mesh(&mut self.meshes, &self.device, item.handle, item.mesh);
+                let uniforms = CastUniforms {
+                    light_view: light_view.to_cols_array_2d(),
+                    model: item.model.to_cols_array_2d(),
+                };
+                self.queue.write_buffer(
+                    &pipeline.uniforms[index],
+                    0,
+                    bytemuck::bytes_of(&uniforms),
+                );
+                let bind = bind_group(
+                    &self.device,
+                    &pipeline.layout,
+                    &pipeline.uniforms[index],
+                    &self.sampler,
+                    &self.plain,
+                    pipeline.skinned,
+                    None,
+                );
+                pass.set_bind_group(0, &bind, &[]);
+                pass.set_vertex_buffer(0, mesh.vertex.slice(..));
+                pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+        }
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("carbine frame"),
@@ -867,6 +1097,7 @@ impl Gpu {
                     &self.sampler,
                     &self.plain,
                     pipeline.skinned,
+                    None,
                 );
                 pass.set_pipeline(&pipeline.pipeline);
                 pass.set_bind_group(0, &bind, &[]);
@@ -875,7 +1106,15 @@ impl Gpu {
 
             for (index, item) in opaque.iter().enumerate() {
                 let mesh = ensure_mesh(&mut self.meshes, &self.device, item.handle, item.mesh);
-                let uniforms = world_uniforms(&view_proj, item, &sky, &haze, camera.position);
+                let uniforms = world_uniforms(
+                    &view_proj,
+                    item,
+                    &sky,
+                    &haze,
+                    camera.position,
+                    &light,
+                    &light_view,
+                );
                 self.queue
                     .write_buffer(&world.uniforms[index], 0, bytemuck::bytes_of(&uniforms));
                 let bind = bind_group(
@@ -885,6 +1124,7 @@ impl Gpu {
                     &self.sampler,
                     &skins[index],
                     world.skinned,
+                    Some((&cast, &self.cast_sampler)),
                 );
                 pass.set_pipeline(&world.pipeline);
                 pass.set_bind_group(0, &bind, &[]);
@@ -895,7 +1135,15 @@ impl Gpu {
 
             for (index, (_, item)) in glass.iter().enumerate() {
                 let mesh = ensure_mesh(&mut self.meshes, &self.device, item.handle, item.mesh);
-                let uniforms = world_uniforms(&view_proj, item, &sky, &haze, camera.position);
+                let uniforms = world_uniforms(
+                    &view_proj,
+                    item,
+                    &sky,
+                    &haze,
+                    camera.position,
+                    &light,
+                    &light_view,
+                );
                 self.queue.write_buffer(
                     &glass_pipeline.uniforms[index],
                     0,
@@ -908,6 +1156,7 @@ impl Gpu {
                     &self.sampler,
                     &glass_skins[index],
                     glass_pipeline.skinned,
+                    Some((&cast, &self.cast_sampler)),
                 );
                 pass.set_pipeline(&glass_pipeline.pipeline);
                 pass.set_bind_group(0, &bind, &[]);
@@ -953,6 +1202,7 @@ impl Gpu {
                         &self.sampler,
                         skin,
                         pipeline.skinned,
+                        None,
                     );
                     pass.set_bind_group(0, &bind, &[]);
                     pass.draw_indexed(0..self.quad.index_count, 0, *first..*first + *count);
@@ -1006,6 +1256,7 @@ impl Gpu {
                         &self.sampler,
                         &self.plain,
                         pipeline.skinned,
+                        None,
                     );
                     pass.set_bind_group(0, &bind, &[]);
                     pass.set_vertex_buffer(0, mesh.vertex.slice(..));
@@ -1135,20 +1386,86 @@ fn sky_uniforms(view_proj: &Mat4, sky: &Sky, extent: (u32, u32)) -> SkyUniforms 
     }
 }
 
+/// A square depth texture the sun's own picture of the world is drawn into.
+fn make_cast(device: &wgpu::Device, size: u32) -> (u32, wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("carbine cast"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (size, texture, view)
+}
+
+/// The world seen from the sun, squared onto the cast.
+///
+/// The picture is centred on the eyes, because a shade is only worth drawing where
+/// someone is standing to see it: everything past the reach stays lit and casts
+/// nothing, which is how a wide reach stays cheap. The eyes sit `reach` in from the
+/// front of the box, so the whole thing falls between the near and far planes.
+fn sun_view(sun: Vec3, eyes: Vec3, reach: f32) -> Mat4 {
+    // A sun almost overhead has no world +z left to stand the picture up with.
+    let up = if sun.z.abs() > 0.99 { Vec3::Y } else { Vec3::Z };
+    let seen_from = eyes + sun * reach;
+    let box_of_view = glam::camera::rh::proj::directx::orthographic(
+        -reach,
+        reach,
+        -reach,
+        reach,
+        0.1,
+        2.0 * reach,
+    );
+    box_of_view * glam::camera::rh::view::look_at_mat4(seen_from, eyes, up)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one uniform block, everything the light pass reads"
+)]
 fn world_uniforms(
     view_proj: &Mat4,
     item: &DrawItem,
     sky: &Sky,
     haze: &[f32; 4],
     eyes: Vec3,
+    light: &Light,
+    light_view: &Mat4,
 ) -> Uniforms {
+    let map = light.shadow_map.max(1) as f32;
+    let taps = light.softness as f32;
     Uniforms {
         view_proj: view_proj.to_cols_array_2d(),
         model: item.model.to_cols_array_2d(),
+        light_view: light_view.to_cols_array_2d(),
+        zenith: [sky.zenith.x, sky.zenith.y, sky.zenith.z, 0.0],
+        horizon: [sky.horizon.x, sky.horizon.y, sky.horizon.z, 0.0],
         color: [item.color[0], item.color[1], item.color[2], item.alpha],
         sun: [sky.sun.x, sky.sun.y, sky.sun.z, sky.ambient],
         fog: *haze,
         eyes: [eyes.x, eyes.y, eyes.z, 0.0],
+        // A rung that casts nothing leaves the whole of this read as "no lookup":
+        // no texel to spread over, no taps to take, and a depth never compared.
+        //
+        // The last is how far back the cast is read from, so a pixel does not shade
+        // the face it stands on. Two texels of a map that holds the whole reach in
+        // one unit of depth is two steps of it.
+        casting: [1.0 / map, taps, taps, 2.0 / map],
+        // The backdrop only lends light when there is a backdrop drawn to lend it.
+        sheen: [
+            light.gloss,
+            f32::from(light.sky_fill && sky.enabled),
+            0.0,
+            0.0,
+        ],
         skinned: f32::from(item.texture.is_some()),
         _pad: [0.0; 3],
     }
@@ -1157,6 +1474,14 @@ fn world_uniforms(
 /// Pipelines whose shader reads a skin also need the sampler and texture bound
 /// beside the uniforms; a pipeline whose layout was deduced from a shader that
 /// reads neither must not be given them.
+///
+/// The same goes for the cast, which only the world and glass shaders declare. It
+/// is filled on a rung that casts nothing too, because a deduced layout asks for
+/// every binding the shader mentions whether or not this frame reads it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one bind group, every binding it can hold"
+)]
 fn bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -1164,6 +1489,7 @@ fn bind_group(
     sampler: &wgpu::Sampler,
     skin: &wgpu::TextureView,
     skinned: bool,
+    cast: Option<(&wgpu::TextureView, &wgpu::Sampler)>,
 ) -> wgpu::BindGroup {
     let mut entries = vec![wgpu::BindGroupEntry {
         binding: 0,
@@ -1177,6 +1503,16 @@ fn bind_group(
         entries.push(wgpu::BindGroupEntry {
             binding: 2,
             resource: wgpu::BindingResource::TextureView(skin),
+        });
+    }
+    if let Some((cast_map, cast_sampler)) = cast {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 3,
+            resource: wgpu::BindingResource::TextureView(cast_map),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 4,
+            resource: wgpu::BindingResource::Sampler(cast_sampler),
         });
     }
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1198,6 +1534,19 @@ fn ensure_pipeline<'a>(
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(spec.label),
             source: wgpu::ShaderSource::Wgsl(spec.source.into()),
+        });
+        // A cast writes depth and nothing else, so it is built with no fragment
+        // stage at all rather than one that writes to no one.
+        let color_target = [Some(wgpu::ColorTargetState {
+            format,
+            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let fragment = (!spec.depth_only).then(|| wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fragment"),
+            compilation_options: Default::default(),
+            targets: &color_target,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(spec.label),
@@ -1239,16 +1588,7 @@ fn ensure_pipeline<'a>(
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fragment"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
+            fragment,
             multiview_mask: None,
             cache: None,
         });

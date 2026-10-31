@@ -168,14 +168,18 @@ impl Scene {
         Ok(self.component::<EntityData>(id)?.living())
     }
 
-    /// The gap one hit leaves before the next one bites, in seconds.
+    /// The gap one hit leaves before the next one bites, in seconds. How an actor is
+    /// built to take hits is part of what it is, so a linked copy is configured with
+    /// its group - while the hit points left in it are its own to lose.
     pub fn hit_pause(&self, id: NodeId) -> Result<f32, SceneError> {
         Ok(self.component::<EntityData>(id)?.hit_pause)
     }
 
     pub fn set_hit_pause(&mut self, id: NodeId, seconds: f32) -> Result<(), SceneError> {
-        self.component_mut::<EntityData>(id)?.hit_pause = seconds.max(0.0);
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.component_mut::<EntityData>(member)?.hit_pause = seconds.max(0.0);
+            Ok(())
+        })
     }
 
     pub fn stays_after_death(&self, id: NodeId) -> Result<bool, SceneError> {
@@ -185,8 +189,10 @@ impl Scene {
     /// Whether the body is left lying in the world when it dies, or removed with
     /// everything hanging off it.
     pub fn set_stays_after_death(&mut self, id: NodeId, stay: bool) -> Result<(), SceneError> {
-        self.component_mut::<EntityData>(id)?.stay_after_death = stay;
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.component_mut::<EntityData>(member)?.stay_after_death = stay;
+            Ok(())
+        })
     }
 
     /// Applies one actor's `damage` to another and answers with the hit points it
@@ -300,9 +306,11 @@ impl Scene {
         }
         if stay {
             // Still falling, no longer in anyone's way, and no longer anything to
-            // hit: the body is scenery the script can look at but not act with.
-            self.set_collision(id, false)?;
-            self.set_uses_gravity(id, true)?;
+            // hit: the body is scenery the script can look at but not act with. The
+            // two writes are this body's own - a corpse that shares a configuration
+            // with living twins leaves them in the solver and on their own settings.
+            self.set_collision_one(id, false)?;
+            self.set_gravity_one(id, true)?;
         } else {
             self.destroy(id)?;
         }

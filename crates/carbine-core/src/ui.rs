@@ -8,7 +8,7 @@ use crate::primitives;
 /// A screen space overlay node. UI is laid out in pixels from the viewport's
 /// top left corner and drawn over the world, so its `position` and `size` are
 /// pixels rather than meters.
-#[derive(Component)]
+#[derive(Clone, Copy, Component)]
 pub(crate) struct Ui {
     pub(crate) corner: f32,
     pub(crate) sides: u32,
@@ -50,14 +50,17 @@ impl Scene {
 
     /// How round the corners are, in pixels. Kept exactly as given: a shape too
     /// round for its own size is rounded down by the renderer, not by the stored
-    /// value.
+    /// value. The shape of the element is part of what it is, so every linked copy
+    /// takes the write with it.
     pub fn corner(&self, id: NodeId) -> Result<f32, SceneError> {
         Ok(self.ui(id)?.corner)
     }
 
     pub fn set_corner(&mut self, id: NodeId, corner: f32) -> Result<(), SceneError> {
-        self.ui_mut(id)?.corner = corner;
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.ui_mut(member)?.corner = corner;
+            Ok(())
+        })
     }
 
     /// The number of polygon sides. Four fills the `size` box; any other count is
@@ -68,8 +71,10 @@ impl Scene {
     }
 
     pub fn set_polygon_sides(&mut self, id: NodeId, sides: u32) -> Result<(), SceneError> {
-        self.ui_mut(id)?.sides = sides;
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.ui_mut(member)?.sides = sides;
+            Ok(())
+        })
     }
 
     /// Outline thickness in pixels. Zero leaves the element filled solid.
@@ -78,8 +83,10 @@ impl Scene {
     }
 
     pub fn set_outline(&mut self, id: NodeId, thickness: f32) -> Result<(), SceneError> {
-        self.ui_mut(id)?.outline = thickness;
-        Ok(())
+        self.spread(id, move |scene, member| {
+            scene.ui_mut(member)?.outline = thickness;
+            Ok(())
+        })
     }
 
     /// Opacity from 0 (invisible) to 255 (opaque). This is the node's
@@ -89,7 +96,7 @@ impl Scene {
     }
 
     pub fn set_alpha(&mut self, id: NodeId, alpha: f32) -> Result<(), SceneError> {
-        self.set_opacity(id, alpha)
+        self.spread(id, move |scene, member| scene.fade(member, alpha))
     }
 
     pub(crate) fn ui(&self, id: NodeId) -> Result<&Ui, SceneError> {

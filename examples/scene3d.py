@@ -77,12 +77,7 @@ def main() -> None:
             frame += 1
             time.sleep(1.0 / 60.0)
     finally:
-        hud.destroy()
-        ball.destroy()
-        slab.destroy()
-        tower.destroy()
-        ground.destroy()
-        carbine.close()
+        carbine.end()
 
 
 if __name__ == "__main__":

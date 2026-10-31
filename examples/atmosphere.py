@@ -193,7 +193,11 @@ def main() -> None:
                 push = max(push, (shove.x**2 + shove.y**2 + shove.z**2) ** 0.5)
 
             heaviest = max(
-                (weather.count / written[k][1] for k, (weather, _) in written.items() if weather.active),
+                (
+                    weather.count / written[k][1]
+                    for k, (weather, _) in written.items()
+                    if weather.active
+                ),
                 default=0.0,
             )
             thickness.size = (4.0 + 110.0 * min(1.0, heaviest), ..., ...)
@@ -217,20 +221,10 @@ def main() -> None:
             frame += 1
             time.sleep(1.0 / 120.0)
     finally:
-        carbine.atmosphere.stopAll()
-        carbine.physics.stopAll()
-        for weather, _ in written.values():
-            weather.destroy()
-        gale.destroy()
-        quake.destroy()
-        player.enabled = False
-        crosshair.destroy()
-        panel.destroy()
-        for pillar in pillars:
-            pillar.destroy()
-        near.destroy()
-        ground.destroy()
-        carbine.close()
+        # One call, whatever the weather put in the world: the scene is emptied of
+        # every node and disaster, the player hands its camera back, and the window
+        # goes with it.
+        carbine.end()
 
 
 if __name__ == "__main__":

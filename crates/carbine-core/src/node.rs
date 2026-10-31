@@ -108,6 +108,7 @@ pub enum SceneError {
     UnknownKind(String),
     CannotDestroyRoot,
     CannotReparentRoot,
+    CannotCopyRoot,
     Cycle,
     CrossedTree,
     NotAChild,
@@ -123,6 +124,7 @@ pub enum SceneError {
     UnknownDisaster(String),
     NoSuchDisaster,
     UnknownAtmosphere(String),
+    UnknownLightQuality(String),
     BadTime(String),
     BadTexture { path: String, why: String },
 }
@@ -138,6 +140,12 @@ impl fmt::Display for SceneError {
             ),
             Self::CannotDestroyRoot => write!(formatter, "the scene root cannot be destroyed"),
             Self::CannotReparentRoot => write!(formatter, "the scene root cannot be reparented"),
+            Self::CannotCopyRoot => {
+                write!(
+                    formatter,
+                    "the scene root holds the world; it is not a thing to copy"
+                )
+            }
             Self::Cycle => write!(formatter, "reparenting would create a cycle"),
             Self::CrossedTree => write!(
                 formatter,
@@ -186,6 +194,11 @@ impl fmt::Display for SceneError {
                  `atmosphere`, not something that falls)",
                 crate::atmosphere::Precipitation::NAMES.join(", ")
             ),
+            Self::UnknownLightQuality(quality) => write!(
+                formatter,
+                "unknown light quality \"{quality}\" (available: {})",
+                crate::atmosphere::LightQuality::NAMES.join(", ")
+            ),
             Self::BadTime(clock) => write!(
                 formatter,
                 "\"{clock}\" is not a time; write \"07:30\" or the hours past midnight"
@@ -207,6 +220,11 @@ pub struct Scene {
     pub(crate) ids: HashMap<NodeId, Entity>,
     pub(crate) next_id: u64,
     pub(crate) next_mesh: u64,
+    /// Which nodes were written as linked copies of the same thing, grouped by the
+    /// number each of them carries in its `Link`. A configuration write to one
+    /// member lands on all of them; see [`crate::duplicate`].
+    pub(crate) links: HashMap<u64, Vec<NodeId>>,
+    pub(crate) next_link: u64,
     pub(crate) camera: Camera,
     pub(crate) sky: crate::sky::Sky,
     pub(crate) input: crate::input::Input,
@@ -221,6 +239,9 @@ pub struct Scene {
     /// What the air looks like: how thick the fog is and what clock the world is
     /// lit for. Neither of these is a node, so the scene holds them itself.
     pub(crate) atmosphere: crate::atmosphere::Atmosphere,
+    /// The graphics device the renderer was given, as soon as it knows. Until it
+    /// says, an `auto` light quality has nothing to be auto about.
+    pub(crate) gpu: Option<crate::atmosphere::Gpu>,
     /// How far the view is allowed to sit away from the player's eyes this frame,
     /// written by the disasters and added by the follow camera.
     pub(crate) shake: Vec3,
@@ -254,6 +275,8 @@ impl Scene {
             ids,
             next_id: 1,
             next_mesh: 1,
+            links: HashMap::new(),
+            next_link: 0,
             camera: Camera::default(),
             sky: crate::sky::Sky::default(),
             input: crate::input::Input::default(),
@@ -262,6 +285,7 @@ impl Scene {
             disasters: Vec::new(),
             next_disaster: 0,
             atmosphere: crate::atmosphere::Atmosphere::default(),
+            gpu: None,
             shake: Vec3::ZERO,
             root,
         }
@@ -352,6 +376,31 @@ impl Scene {
         }
 
         Ok(())
+    }
+
+    /// Throws away everything the script authored: every node under the root, with
+    /// the subtree hanging off it, and every disaster still written into the world.
+    /// The camera, the backdrop, the light and the player are settings a game tuned
+    /// rather than things it made, so they stay where they were left; `reset` is
+    /// what wipes those too.
+    pub fn clear(&mut self) {
+        for id in self.children(self.root).unwrap_or_default() {
+            let _ = self.destroy(id);
+        }
+        self.links.clear();
+        self.remove_all_disasters();
+    }
+
+    /// The scene as it was before anything touched it: no nodes, no weather, the
+    /// camera and the player back at their defaults, the input forgotten. What the
+    /// renderer reported about the machine it is drawing on is not content and
+    /// stays.
+    pub fn reset(&mut self) {
+        // What the machine under the world is does not change when the world is
+        // cleared, so the device reading outlives a reset.
+        let gpu = self.gpu;
+        *self = Self::new();
+        self.gpu = gpu;
     }
 
     pub fn reparent(&mut self, id: NodeId, new_parent: Option<NodeId>) -> Result<(), SceneError> {
@@ -518,8 +567,7 @@ impl Scene {
         value: Vec3,
     ) -> Result<(), SceneError> {
         if matches!(field, VecField::Color) {
-            self.component_mut::<ObjectColor>(id)?.0 = value;
-            return Ok(());
+            return self.set_color(id, value);
         }
 
         let extent = self.natural_extent(id)?;
@@ -544,8 +592,7 @@ impl Scene {
         if matches!(field, VecField::Color) {
             let mut color = self.component::<ObjectColor>(id)?.0;
             set_axis(&mut color, axis, value);
-            self.component_mut::<ObjectColor>(id)?.0 = color;
-            return Ok(());
+            return self.set_color(id, color);
         }
 
         let extent = self.natural_extent(id)?;
@@ -583,11 +630,24 @@ impl Scene {
     pub fn set_color_hex(&mut self, id: NodeId, hex: &str) -> Result<(), SceneError> {
         let (color, alpha) =
             parse_hex_color(hex).ok_or_else(|| SceneError::BadColor(hex.to_owned()))?;
-        self.component_mut::<ObjectColor>(id)?.0 = color;
+        self.set_color(id, color)?;
         if let Some(alpha) = alpha {
             self.set_opacity(id, alpha)?;
         }
         Ok(())
+    }
+
+    /// The colour on one node, with no group asked about it.
+    pub(crate) fn paint(&mut self, id: NodeId, color: Vec3) -> Result<(), SceneError> {
+        self.component_mut::<ObjectColor>(id)?.0 = color;
+        Ok(())
+    }
+
+    /// What a thing is painted is part of what it is, so a linked copy is painted
+    /// with its group. A node nobody linked is a group of one, and the write lands
+    /// on it alone.
+    pub fn set_color(&mut self, id: NodeId, color: Vec3) -> Result<(), SceneError> {
+        self.spread(id, move |scene, member| scene.paint(member, color))
     }
 
     /// Transparency in bytes: 255 is opaque, 0 is invisible.
@@ -595,9 +655,13 @@ impl Scene {
         Ok(self.component::<Opacity>(id)?.0)
     }
 
-    pub fn set_opacity(&mut self, id: NodeId, alpha: f32) -> Result<(), SceneError> {
+    pub(crate) fn fade(&mut self, id: NodeId, alpha: f32) -> Result<(), SceneError> {
         self.component_mut::<Opacity>(id)?.0 = alpha.clamp(0.0, MAX_ALPHA);
         Ok(())
+    }
+
+    pub fn set_opacity(&mut self, id: NodeId, alpha: f32) -> Result<(), SceneError> {
+        self.spread(id, move |scene, member| scene.fade(member, alpha))
     }
 
     /// The image path a node is skinned with, or `None` for a flat colour.
@@ -605,8 +669,12 @@ impl Scene {
         Ok(self.component::<NodeTexture>(id)?.0.clone())
     }
 
+    pub(crate) fn skin(&mut self, id: NodeId, path: Option<String>) -> Result<(), SceneError> {
+        self.component_mut::<NodeTexture>(id)?.0 = path;
+        Ok(())
+    }
+
     pub fn set_texture(&mut self, id: NodeId, path: Option<String>) -> Result<(), SceneError> {
-        let mut slot = self.component_mut::<NodeTexture>(id)?;
         if let Some(path) = &path
             && let Err(why) = packed(path)
         {
@@ -615,8 +683,9 @@ impl Scene {
                 why,
             });
         }
-        slot.0 = path;
-        Ok(())
+
+        let shared = path;
+        self.spread(id, move |scene, member| scene.skin(member, shared.clone()))
     }
 
     pub fn is_visible(&self, id: NodeId) -> Result<bool, SceneError> {
@@ -1193,5 +1262,70 @@ mod tests {
                 "{bad} should not parse"
             );
         }
+    }
+
+    #[test]
+    fn clearing_the_scene_takes_the_tree_and_the_weather_with_it() {
+        let mut scene = Scene::new();
+        let crate_ = scene.create("cube", None, None).unwrap();
+        let bolt = scene.create("sphere", None, Some(crate_)).unwrap();
+        let card = scene.create_ui("rectangle", None, None).unwrap();
+        let crowd = scene.create_particles(None, None).unwrap();
+        let rain = scene.create_precipitation("rain", None).unwrap();
+        let quake = scene.create_disaster("earthquake", None).unwrap();
+        scene.start_disaster(quake).unwrap();
+
+        scene.clear();
+
+        assert_eq!(scene.node_count(), 0);
+        assert_eq!(scene.children(scene.root()).unwrap(), vec![]);
+        for node in [crate_, bolt, card, crowd, rain] {
+            assert_eq!(scene.name(node), Err(SceneError::NodeDestroyed));
+        }
+        assert_eq!(scene.disaster_ids(), vec![]);
+    }
+
+    #[test]
+    fn clearing_leaves_the_look_of_the_world_alone() {
+        let mut scene = Scene::new();
+        scene.set_fog(40.0);
+        scene.camera.position = Vec3::new(3.0, 4.0, 5.0);
+        scene.set_player_enabled(true);
+
+        scene.clear();
+
+        assert_eq!(scene.atmosphere().fog, 40.0);
+        assert_eq!(scene.camera.position, Vec3::new(3.0, 4.0, 5.0));
+        assert!(scene.player_is_enabled());
+    }
+
+    #[test]
+    fn a_reset_scene_is_the_one_the_process_started_with() {
+        let mut scene = Scene::new();
+        let crate_ = scene.create("cube", None, None).unwrap();
+        let rain = scene.create_precipitation("snow", None).unwrap();
+        scene.set_fog(40.0);
+        scene.camera.position = Vec3::new(3.0, 4.0, 5.0);
+        scene.set_player_enabled(true);
+        scene.set_light_quality_name("extra").unwrap();
+        scene.report_gpu(crate::atmosphere::DeviceKind::Discrete, Some(8 << 30));
+
+        scene.reset();
+
+        assert_eq!(scene.node_count(), 0);
+        assert_eq!(scene.name(crate_), Err(SceneError::NodeDestroyed));
+        assert_eq!(scene.name(rain), Err(SceneError::NodeDestroyed));
+        assert_eq!(scene.disaster_ids(), vec![]);
+        assert_eq!(scene.atmosphere().fog, 0.0);
+        assert_eq!(scene.camera.position, Vec3::new(0.0, -6.0, 4.0));
+        assert!(!scene.player_is_enabled());
+        // A script's rung is authored content, so it goes; the machine the world
+        // is drawn on is not, so it stays.
+        assert_eq!(
+            scene.written_light_quality(),
+            crate::atmosphere::LightQuality::Auto
+        );
+        assert_eq!(scene.light().quality, crate::atmosphere::LightQuality::High);
+        assert!(scene.gpu().is_some());
     }
 }
