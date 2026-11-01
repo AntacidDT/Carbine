@@ -85,7 +85,7 @@ impl PySky {
         with_scene(|scene| scene.set_sky_colors_hex(zenith, horizon))
     }
 
-    /// How much grain the gradient carries, 0..1.
+    /// How much haze the gradient is carried in, 0..1.
     #[getter]
     fn noise(&self) -> PyResult<f32> {
         with_scene(|scene| Ok(scene.sky().noise))

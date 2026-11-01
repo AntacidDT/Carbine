@@ -296,6 +296,11 @@ impl Scene {
     /// The first time health runs out, once per body: a corpse is left inert but
     /// still pulled by gravity, or the node is destroyed outright.
     fn expire(&mut self, id: NodeId) -> Result<(), SceneError> {
+        // A wreck has nobody's hands on it. Every rider the death strands is thrown
+        // clear before the node - and the seats hanging under it - are taken away, and
+        // the wheels let go of whatever a driver was asking of them.
+        self.eject_riders(id);
+        self.let_go_of_the_wheel(id);
         let stay = self.component::<EntityData>(id)?.stay_after_death;
         if self.player.body == Some(id) {
             // The engine hid this body to put the camera inside its eyes. A body the

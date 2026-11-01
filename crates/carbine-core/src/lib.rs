@@ -7,6 +7,7 @@ mod duplicate;
 mod entity;
 mod geometry;
 mod input;
+mod light;
 mod mesh;
 mod motion;
 mod node;
@@ -17,9 +18,10 @@ mod primitives;
 mod procgen;
 mod sky;
 mod ui;
+mod vehicle;
 
 pub use atmosphere::{
-    Atmosphere, DeviceKind, Gpu, Light, LightQuality, Precipitation, auto_quality,
+    Atmosphere, DeviceKind, Gpu, Light, LightQuality, LightType, Precipitation, auto_quality,
 };
 pub use camera::{Camera, CameraMode, UP};
 pub use collision::ColliderShape;
@@ -28,8 +30,9 @@ pub use draw::DrawItem;
 pub use geometry::{Contact, Solid};
 pub use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 pub use input::{FrameInput, Input, KEYS, Key, MouseButton};
+pub use light::{KIND as LIGHT_KIND, LampItem, LightShape, MAX_LAMPS};
 pub use mesh::{MeshData, MeshHandle};
-pub use motion::EARTH_GRAVITY_PULL;
+pub use motion::{EARTH_GRAVITY_PULL, MASS_PER_CUBIC_METRE};
 pub use node::{Axis, DEFAULT_COLOR, MAX_ALPHA, NodeId, Scene, SceneError, Transform, VecField};
 pub use particles::{
     COLLISION_BUDGET, MAX_PARTICLES, MAX_SPLASH_DROPS, ParticleItem, ParticleShape,
@@ -41,6 +44,7 @@ pub use primitives::UI_KINDS as UI_SHAPE_KINDS;
 pub use procgen::{Rng, Seed, fbm2, fbm3, hash, noise2, noise3, salt, scatter};
 pub use sky::Sky;
 pub use ui::UiItem;
+pub use vehicle::{DRIVER_SEAT_KIND, HandlingType, KIND as VEHICLE_KIND, SEAT_KIND};
 
 /// A packed skin written to the temporary directory, for tests that only care that a
 /// scene remembers a path. A skin has to be a real file now that the scene checks one.

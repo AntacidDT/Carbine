@@ -85,6 +85,20 @@ class Object:
     color: Vec3 | str
     @property
     def colorHex(self) -> str: ...
+    # Light knobs, for a node made with `carbine.new("Light")`. A world object raises
+    # on them, the way it does on the UI knobs further down.
+    # "point" for a lamp giving light out of one place, "sun" for daylight thrown from
+    # everywhere in one direction. Read, not written: the sun the world is lit by is
+    # the node `carbine.scene.sun` answers with, and a lamp is not made a second one.
+    shape: str
+    # How strongly the light lights. 1 is what a light is born with, past that it is
+    # brighter, and 0 leaves it dark.
+    brightness: float
+    # Metres of world a lamp reaches: past the end of it it lights nothing at all.
+    reach: float
+    # How this light lays what it gives: "straight" or "blocky". A light nobody wrote
+    # on follows `carbine.lightType`, the world's own answer.
+    type: str
     # The packed image (`.ktx2`) painted over the object's colour, as a path. None
     # paints it flat, and an image in any other format is refused - pack it with
     # `carbine.packager.image(...)` and use the path that answers.
@@ -96,6 +110,10 @@ class Object:
     gravity: bool
     # Metres per second squared: 10 is Earth, 1.6 the Moon, 0 lets it hang.
     gravityPull: float
+    # Kilograms. Left alone, an object weighs the box it is drawn from at two
+    # hundred kilograms to the cubic metre, so a metre cube is 200. Weight decides
+    # how much of a push a body takes, never how fast gravity pulls it.
+    mass: float
     # In the solver, or out of it. Nothing collides until a script says so, and a
     # body that never asked falls straight through everything.
     collision: bool
@@ -145,6 +163,8 @@ class Entity:
     anchored: bool
     gravity: bool
     gravityPull: float
+    # Kilograms, or what the actor's box weighs unwritten.
+    mass: float
     collision: bool
     collisionShape: str
     # Whether there is any health left. A corpse answers false, takes no more
@@ -201,6 +221,11 @@ class Light:
     # asks, the machine has been read.
     @property
     def quality(self) -> str: ...
+
+    # How the edge of a shade is laid, which is `carbine.lightType` and nothing else:
+    # "straight" weaves the readings, "blocky" keeps them in steps.
+    @property
+    def style(self) -> str: ...
 
     # Whether the sun pre-renders the world to read a shade out of.
     @property
@@ -308,6 +333,11 @@ class Player:
 class Scene:
     @property
     def root(self) -> Object: ...
+    # The light the daylight is thrown by, which every world is born with. It is a
+    # node like any other: colour it, turn it, brighten it, or switch it off with
+    # `brightness = 0`. Turning it is aiming it, and `atmosphere.time(...)` turns it.
+    @property
+    def sun(self) -> Object | None: ...
     @property
     def nodeCount(self) -> int: ...
     @property
@@ -577,6 +607,15 @@ monitorSync: bool
 monitorHz: int
 fpsLimit: int | None
 
+# How the edge of a shade is laid over the ground. `carbine.lightType = "blocky"`
+# keeps the steps a single cast texel per pixel makes, which is a look of its own;
+# "straight" — what the world starts with — weaves the readings of the cast together,
+# turns the weave by where the pixel stands, lets the far readings count for less, and
+# takes the cut off the border of the cast's picture. It costs the same either way: how
+# much light is worked at all is `atmosphere.lightQuality`, and `lightTypes()` lists
+# both looks.
+lightType: str
+
 def init(
     width: int = 1280,
     height: int = 720,
@@ -622,7 +661,7 @@ def duplicate(
 # Like `duplicate`, and the copies tied to the original in one configuration, the way
 # Blender's linked duplicates share a data block. A write about what the thing *is*
 # lands on every member - colour, `transparent`, `texture`, `gravity`, `gravityPull`,
-# `anchored`, `collision`, `collisionShape`, an actor's `hitPause` and
+# `mass`, `anchored`, `collision`, `collisionShape`, an actor's `hitPause` and
 # `stayAfterDeath`, a UI element's `corner`, `polygon` and `outline`, and every
 # particle knob except `active`. A write about where a member is or how much of it is
 # left stays with that member: `position`, `rotation`, `size`, `scale`, `health`,
@@ -649,8 +688,11 @@ def killEntity(entity: Entity) -> None: ...
 def camera() -> Camera: ...
 def player() -> Player: ...
 def mouse() -> Mouse: ...
+# What `new` accepts: the geometry kinds, plus "light", which makes a light node
+# rather than a body.
 def kinds() -> list[str]: ...
 def collisionShapes() -> list[str]: ...
+def lightTypes() -> list[str]: ...
 def dt() -> float: ...
 def step(seconds: float) -> None: ...
 

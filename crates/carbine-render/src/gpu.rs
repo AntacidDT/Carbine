@@ -2,21 +2,27 @@ use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
 use carbine_core::{
-    DrawItem, Light, MeshData, MeshHandle, ParticleItem, ParticleShape, Scene, Sky,
+    DrawItem, LampItem, Light, LightType, MAX_LAMPS, MeshData, MeshHandle, ParticleItem,
+    ParticleShape, Scene, Sky,
 };
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-/// The world pass: one directional light over an optional skin, mixed toward the
-/// colour of the air by how far each pixel stands from the eyes. A face that
-/// points away from the sun keeps its colour at ambient brightness, which is what
-/// makes a cube read as a solid.
+/// The world pass: one directional light and as many lamps as the register holds,
+/// over an optional skin, mixed toward the colour of the air by how far each pixel
+/// stands from the eyes. A face that points away from the sun keeps its colour at
+/// ambient brightness, which is what makes a cube read as a solid.
 ///
 /// Everything the light quality can switch off is switched off by a zero in a
 /// uniform, and a zero leaves this exact arithmetic alone: the bare lambert term
 /// `ambient + (1 - ambient) * facing` is what `low` draws, pixel for pixel, because
-/// `shade` is one, the sky fill is none and there is no sheen to add.
+/// `shade` is one, the sky fill is none and there is no sheen to add. The light type
+/// never reaches that arithmetic either: it only weaves the readings out of a cast,
+/// and the lowest rung has no cast to weave. A frame with no lamps in it adds nothing
+/// at all, and the sun as the world was born with it is exactly white.
 const WORLD_SHADER: &str = r#"
+const LAMP_REGISTER: i32 = 8;
+
 struct Uniforms {
     view_proj: mat4x4<f32>,
     model: mat4x4<f32>,
@@ -29,7 +35,23 @@ struct Uniforms {
     eyes: vec4<f32>,
     casting: vec4<f32>,
     sheen: vec4<f32>,
+    tint: vec4<f32>,
     skinned: f32,
+    blocky: f32,
+};
+
+/// The lamps this frame is lit by, nearest the eyes first. A lamp is a place, how
+/// far its light reaches, what colour it throws and how strongly, and whether its
+/// edge is run straight or laid in blocks.
+struct Lamp {
+    at: vec4<f32>,
+    tint: vec4<f32>,
+};
+
+struct Lights {
+    /// How many lamps are in the register. Nothing past it is read.
+    head: vec4<f32>,
+    lamps: array<Lamp, LAMP_REGISTER>,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -37,6 +59,7 @@ struct Uniforms {
 @group(0) @binding(2) var skin: texture_2d<f32>;
 @group(0) @binding(3) var cast_map: texture_depth_2d;
 @group(0) @binding(4) var cast_sampler: sampler_comparison;
+@group(0) @binding(5) var<uniform> lights: Lights;
 
 struct Pixel {
     @builtin(position) clip: vec4<f32>,
@@ -68,31 +91,119 @@ fn versus(
 /// `casting.z` is how many readings the edge of a shade is smoothed with, and zero of
 /// them is a rung that casts nothing: the arithmetic after it is then exactly the
 /// unshadowed one.
-fn shade(pixel: Pixel) -> f32 {
+///
+/// Both light types take the same readings out of the same picture, because which one
+/// a shade's edge is is a look and not a cost. A straight edge weaves them: every
+/// reading blends the texels around where it falls, the spiral is laid a texel apart
+/// and started at an angle the pixel's own place on the screen picks, the outer
+/// readings count for less than the one the pixel stands on, and a shade that runs to
+/// the end of the cast's picture is taken off along the way. A blocky edge does none
+/// of that: it reads the single texel it stands on, the same handful in every pixel,
+/// weighed alike, and the border of the picture is where the shade stops.
+fn shade(pixel: Pixel, face: vec3<f32>) -> f32 {
     let taps = i32(uniforms.casting.z);
     if (taps < 1) {
         return 1.0;
     }
 
+    let blocky = uniforms.blocky > 0.5;
+    let texel = uniforms.casting.x;
     let on = pixel.sunside.xyz / pixel.sunside.w;
-    let at = vec2<f32>(on.x * 0.5 + 0.5, on.y * 0.5 + 0.5);
+    // The cast is a picture, so its first row is the top of the light's view, which
+    // is where the light's +y points: v runs the other way up from the axes.
+    var at = vec2<f32>(on.x * 0.5 + 0.5, 0.5 - on.y * 0.5);
     // Outside the cast the sun simply did not look this way, which is light.
     if (at.x < 0.0 || at.x > 1.0 || at.y < 0.0 || at.y > 1.0) {
         return 1.0;
     }
+    if (blocky) {
+        // The middle of the one texel this pixel stands on: four of the same texel is
+        // one texel, which is the block the whole picture is made of.
+        at = floor(at / texel) * texel + vec2<f32>(texel * 0.5);
+    }
 
     // A pixel at the front of its own face would otherwise shade itself, so the
-    // reading is asked for a little further back than the depth it landed on.
-    let depth = on.z * 0.5 + 0.5 - uniforms.casting.w;
-    var lit = 0.0;
-    for (var i: i32 = 0; i < taps; i = i + 1) {
-        // Taps laid on a golden-angle spiral, so a wider blur costs no clumping.
-        let spread = uniforms.casting.x * uniforms.casting.y * sqrt((f32(i) + 0.5) / f32(taps));
-        let turned = f32(i) * 2.3999632;
-        let where_ = at + vec2<f32>(cos(turned), sin(turned)) * spread;
-        lit = lit + textureSampleCompareLevel(cast_map, cast_sampler, where_, depth);
+    // reading is asked for a little further back than the depth it landed on. The
+    // light's picture is already in the 0..1 the cast stores, so it needs no flip.
+    //
+    // A face tilted to the sun keeps changing depth across the cast, and a reading
+    // that only leans back a fixed little loses the tilt: a floor at afternoon would
+    // shade itself. How far to lean is therefore the depth the surface moves over the
+    // widest reach of the blur, which is the tangent of that tilt times the texels.
+    let toward = max(dot(face, uniforms.sun.xyz), 0.05);
+    let tilt = sqrt(1.0 - toward * toward) / toward;
+    let depth = on.z - (uniforms.casting.w + texel * tilt * f32(taps));
+
+    // Taps laid on a golden-angle spiral, so a wider blur costs no clumping.
+    var started = 0.0;
+    if (!blocky) {
+        // Turned by where the pixel stands in the cast, drifting slowly across it,
+        // rather than by a throw of the dice on where it stands on the screen: one
+        // handful laid in every pixel repeats its own shape down the whole length of
+        // an edge, and a handful turned at random per pixel answers a different
+        // question in every pixel, which is a grain and not a fade. Turned slowly
+        // instead, a pixel and its neighbours weigh nearly the same readings, so the
+        // shade runs down smoothly, and by the far side of the picture the spiral has
+        // come round and no two edges are laid alike.
+        started = fract(at.x * 3.7 + at.y * 2.3) * 6.2831853;
     }
-    return lit / f32(taps);
+
+    var lit = 0.0;
+    var weighed = 0.0;
+    // A woven disc is a texel across per reading rather than as wide as the reading
+    // count, because readings further apart than the picture they are taken out of
+    // answer nothing about each other: every pixel then weighs a different handful
+    // and a shade that should fade arrives speckled. The same count laid a texel
+    // apart still covers the blur the cast has room to hold, and a rung with more
+    // texels in it weaves a finer edge instead of a wider noisy one. A blocky handful
+    // stays as wide as it always was: its steps come from the single texel it stands
+    // on, not from the reach of the readings around it.
+    let wide = select(texel * sqrt(f32(taps)), texel * f32(taps), blocky);
+    for (var i: i32 = 0; i < taps; i = i + 1) {
+        let room = sqrt((f32(i) + 0.5) / f32(taps));
+        let turned = started + f32(i) * 2.3999632;
+        let where_ = at + vec2<f32>(cos(turned), sin(turned)) * (wide * room);
+        // A reading out at the rim of the blur only reaches the sun a few texels
+        // further off, so it is let count for less than the one the pixel stands on
+        // and the shade fades into the light instead of arriving in it.
+        let weight = select(exp(-3.0 * room * room), 1.0, blocky);
+        lit = lit + textureSampleCompareLevel(cast_map, cast_sampler, where_, depth) * weight;
+        weighed = weighed + weight;
+    }
+
+    let inshade = lit / weighed;
+    if (blocky) {
+        return inshade;
+    }
+    // The last texel of the cast's picture is not the end of the world, so a shade
+    // that runs that far is taken off across it rather than cut straight by it.
+    let lip = min(min(at.x, 1.0 - at.x), min(at.y, 1.0 - at.y));
+    return mix(1.0, inshade, clamp(lip / texel, 0.0, 1.0));
+}
+
+/// What the lamps add to this pixel. Each one lights the face that is squared at it,
+/// thinned by how far into the lamp's reach the pixel stands, so a lamp adds nothing
+/// past the end of its reach and nothing at all when the register is empty.
+///
+/// A lamp hides nothing behind anything: it has no picture of the world taken from
+/// its own side, so a face that stands in the sun's shade still catches the lamp that
+/// reaches it, which is what a light in a doorway is.
+///
+/// A straight lamp runs its thinning smooth. A blocky one takes it in four steps,
+/// which is the same look `blocky` lays a shade's edge in, and whether this lamp is
+/// one or the other was answered by the core before the register was filled.
+fn lamp_light(pixel: Pixel, face: vec3<f32>) -> vec3<f32> {
+    var glow = vec3<f32>(0.0);
+    for (var i: i32 = 0; i < i32(lights.head.x); i = i + 1) {
+        let lamp = lights.lamps[i];
+        let toward = lamp.at.xyz - pixel.world;
+        let span = length(toward);
+        let within = clamp(1.0 - span / max(lamp.at.w, 0.001), 0.0, 1.0);
+        let shape = select(within, floor(within * 4.0) / 4.0, lamp.tint.a > 0.5);
+        let facing = max(dot(face, toward / max(span, 0.001)), 0.0);
+        glow = glow + lamp.tint.rgb * facing * shape * shape;
+    }
+    return glow;
 }
 
 @fragment
@@ -102,13 +213,15 @@ fn fragment(pixel: Pixel) -> @location(0) vec4<f32> {
     let base = mix(uniforms.color.rgb, skin.rgb * uniforms.color.rgb, uniforms.skinned);
     let face = normalize(pixel.normal);
     let facing = max(dot(face, uniforms.sun.xyz), 0.0);
-    let away = shade(pixel);
+    let away = shade(pixel, face);
     let sunlit = (1.0 - uniforms.sun.w) * facing * away;
     // At `low` this stays the same scalar ambient it always was; from `medium` up
     // the light the sun leaves out comes from the backdrop over the face's head.
     let dome = mix(uniforms.horizon.rgb, uniforms.zenith.rgb, clamp(face.z, 0.0, 1.0));
     let ambient = mix(vec3<f32>(uniforms.sun.w), dome, uniforms.sheen.y);
-    let lit = ambient + vec3<f32>(sunlit);
+    // The sun's own colour and strength, which is one for one as the world was born
+    // with it: white light at the brightness a new sun carries.
+    let lit = ambient + uniforms.tint.rgb * vec3<f32>(sunlit) + lamp_light(pixel, face);
     // The sun coming back off a face that is squared at it, which is what a wet
     // or polished thing is. It is shut at `low` as well, and zero of it is nothing.
     let eye = normalize(uniforms.eyes.xyz - pixel.world);
@@ -119,7 +232,7 @@ fn fragment(pixel: Pixel) -> @location(0) vec4<f32> {
     // the picture away. A density of zero leaves the colour exactly as it was lit.
     let distance = length(pixel.world - uniforms.eyes.xyz);
     let veil = 1.0 - exp(-max(uniforms.fog.w, 0.0) * distance);
-    let shaded = vec3<f32>(away, clamp(pixel.sunside.x / pixel.sunside.w * 0.5 + 0.5, 0.0, 1.0), clamp(pixel.sunside.y / pixel.sunside.w * 0.5 + 0.5, 0.0, 1.0));
+    let shaded = base * lit + vec3<f32>(glossy);
     let tinted = mix(shaded, uniforms.fog.xyz, clamp(veil, 0.0, 1.0));
     return vec4<f32>(tinted, uniforms.color.a * mix(1.0, skin.a, uniforms.skinned));
 }
@@ -168,9 +281,32 @@ fn versus(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(x, y, 0.0, 1.0);
 }
 
-fn grain(point: vec2<f32>) -> f32 {
-    let swept = sin(point.x * 12.9898 + point.y * 78.233) * 43758.5453;
-    return fract(swept) - 0.5;
+/// The dust the gradient is carried in, laid on the same lattice the core's noise
+/// field is laid on: a value at every whole number and the eight around a point,
+/// blended by how close the point is. A pixel and its neighbours therefore answer
+/// nearly the same question, which is what a haze is, and the seam where two cells
+/// meet is eased flat instead of creased.
+fn corner(cell: vec3<f32>) -> f32 {
+    let swept = sin(dot(cell, vec3<f32>(127.11, 311.7, 74.68))) * 43758.5453;
+    return fract(swept);
+}
+
+fn haze(point: vec3<f32>) -> f32 {
+    let cell = floor(point);
+    let into = point - cell;
+    let eased = into * into * (3.0 - 2.0 * into);
+    var kept = 0.0;
+    for (var layer: i32 = 0; layer < 2; layer = layer + 1) {
+        for (var across: i32 = 0; across < 2; across = across + 1) {
+            for (var side: i32 = 0; side < 2; side = side + 1) {
+                let corner_at = vec3<f32>(f32(side), f32(across), f32(layer));
+                let weigh = mix(1.0 - eased, eased, corner_at);
+                kept = kept + corner(cell + corner_at) * weigh.x * weigh.y * weigh.z;
+            }
+        }
+    }
+    // Centred, because a dust that leans one way would tint the whole backdrop.
+    return kept - 0.5;
 }
 
 @fragment
@@ -187,7 +323,13 @@ fn fragment(@builtin(position) window: vec4<f32>) -> @location(0) vec4<f32> {
     // horizon keeps the horizon colour.
     let height = clamp(direction.z, 0.0, 1.0);
     let tint = mix(uniforms.horizon.rgb, uniforms.zenith.rgb, pow(height, 0.45));
-    let dust = grain(window.xy) * uniforms.noise;
+    // Kept to the direction rather than to the window, so the haze is a dome the
+    // view turns through instead of a film of static pinned to the screen. Forty
+    // cells across the sky's own radius puts a blob at a degree and a half wide,
+    // which is some twenty pixels across an afternoon frame: far enough that the
+    // eye reads it as the air, close enough that it still breaks up the banding a
+    // long gradient leaves behind.
+    let dust = haze(direction * 40.0) * uniforms.noise;
     return vec4<f32>(clamp(tint + vec3<f32>(dust), vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 "#;
@@ -420,8 +562,73 @@ struct Uniforms {
     /// How much of the sun a face throws back, and how much of the light the sun
     /// leaves out comes from the backdrop. Both zero is the bare lambert world.
     sheen: [f32; 4],
+    /// What the sun throws, colour for colour: the sun node's own colour times how
+    /// strongly it is lit. One for one is the daylight the world was born with, and
+    /// nil in a colour is that light switched off.
+    tint: [f32; 4],
     skinned: f32,
-    _pad: [f32; 3],
+    /// Whether the edge of a shade is laid in blocks instead of woven straight. One or
+    /// nil, and a rung that casts nothing never reads it.
+    blocky: f32,
+    _pad: [f32; 2],
+}
+
+/// The shader's own register is eight lamps wide, and no wider than the core's
+/// handful of nearest ones.
+const _: () = assert!(
+    MAX_LAMPS == 8,
+    "widen LAMP_REGISTER in the world shader too"
+);
+
+/// One lamp as the world shader reads it: where it stands and how far it reaches,
+/// and what colour it throws at how strong a rate and whether its edge is blocked.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct LampRow {
+    at: [f32; 4],
+    tint: [f32; 4],
+}
+
+impl LampRow {
+    fn of(lamp: &LampItem) -> LampRow {
+        LampRow {
+            at: [lamp.at.x, lamp.at.y, lamp.at.z, lamp.reach],
+            tint: [
+                lamp.color[0] * lamp.brightness,
+                lamp.color[1] * lamp.brightness,
+                lamp.color[2] * lamp.brightness,
+                f32::from(lamp.blocky),
+            ],
+        }
+    }
+}
+
+/// The register the nearest handful of lamps is uploaded into. One buffer serves a
+/// whole frame: every object in it is lit by the same lamps.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Lights {
+    /// How many lamps the shader walks. The rest of the register is unread, so a
+    /// frame with none of them in it adds exactly nothing.
+    head: [f32; 4],
+    lamps: [LampRow; MAX_LAMPS],
+}
+
+impl Lights {
+    fn of(lamps: &[LampItem]) -> Lights {
+        let blank = LampRow {
+            at: [0.0; 4],
+            tint: [0.0; 4],
+        };
+        let mut register = Lights {
+            head: [lamps.len() as f32, 0.0, 0.0, 0.0],
+            lamps: [blank; MAX_LAMPS],
+        };
+        for (slot, lamp) in register.lamps.iter_mut().zip(lamps) {
+            *slot = LampRow::of(lamp);
+        }
+        register
+    }
 }
 
 #[repr(C)]
@@ -685,6 +892,9 @@ pub struct Gpu {
     /// The instance buffer the crowd is uploaded into, kept and grown between
     /// frames so a steady rain never allocates again.
     crowd: Option<wgpu::Buffer>,
+    /// The handful of lamps nearest the eyes, uploaded once a frame into a register
+    /// every object in the frame reads.
+    lamp_register: Option<wgpu::Buffer>,
 }
 
 impl Gpu {
@@ -738,6 +948,11 @@ impl Gpu {
             // A pixel is standing in the sun when it is no further from the sun
             // than the surface the cast found where it is.
             compare: Some(wgpu::CompareFunction::LessEqual),
+            // A straight edge asks the card to weigh the four texels around each
+            // reading instead of taking the nearest one; `blocky` still gets its
+            // single texel, because it reads from the middle of one.
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
         let cast = make_cast(&device, BARE_CAST);
@@ -764,6 +979,7 @@ impl Gpu {
             cast_sampler,
             quad,
             crowd: None,
+            lamp_register: None,
         })
     }
 
@@ -880,6 +1096,21 @@ impl Gpu {
         self.cast = make_cast(&self.device, size);
     }
 
+    /// The buffer a frame's lamps are uploaded into, made once and kept: the register
+    /// is as wide in an empty frame as in a full one.
+    fn ensure_lamps(&mut self) -> wgpu::Buffer {
+        self.lamp_register
+            .get_or_insert_with(|| {
+                self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("carbine lamps"),
+                    size: std::mem::size_of::<Lights>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .clone()
+    }
+
     /// Records the scene and submits it, returning the submission index so the
     /// caller can present the texture it rendered into. `extent` is the target in
     /// pixels: the world is measured against its aspect ratio, UI against its size.
@@ -895,6 +1126,14 @@ impl Gpu {
         let sky = scene.sky();
         let haze = scene.haze();
         let light = scene.light();
+        // What the sun throws, and the nearest handful of lamps. Both are the same
+        // for every object in the frame, so the register is filled once and bound to
+        // all of them.
+        let sunlight = scene.sunlight();
+        let lamps = Lights::of(&scene.lamps(camera.position));
+        let lamp_register = self.ensure_lamps();
+        self.queue
+            .write_buffer(&lamp_register, 0, bytemuck::bytes_of(&lamps));
         let aspect = extent.0 as f32 / extent.1.max(1) as f32;
         let view_proj = camera.view_projection(aspect);
 
@@ -1053,6 +1292,7 @@ impl Gpu {
                     &self.plain,
                     pipeline.skinned,
                     None,
+                    None,
                 );
                 pass.set_bind_group(0, &bind, &[]);
                 pass.set_vertex_buffer(0, mesh.vertex.slice(..));
@@ -1098,6 +1338,7 @@ impl Gpu {
                     &self.plain,
                     pipeline.skinned,
                     None,
+                    None,
                 );
                 pass.set_pipeline(&pipeline.pipeline);
                 pass.set_bind_group(0, &bind, &[]);
@@ -1114,6 +1355,7 @@ impl Gpu {
                     camera.position,
                     &light,
                     &light_view,
+                    &sunlight,
                 );
                 self.queue
                     .write_buffer(&world.uniforms[index], 0, bytemuck::bytes_of(&uniforms));
@@ -1125,6 +1367,7 @@ impl Gpu {
                     &skins[index],
                     world.skinned,
                     Some((&cast, &self.cast_sampler)),
+                    Some(&lamp_register),
                 );
                 pass.set_pipeline(&world.pipeline);
                 pass.set_bind_group(0, &bind, &[]);
@@ -1143,6 +1386,7 @@ impl Gpu {
                     camera.position,
                     &light,
                     &light_view,
+                    &sunlight,
                 );
                 self.queue.write_buffer(
                     &glass_pipeline.uniforms[index],
@@ -1157,6 +1401,7 @@ impl Gpu {
                     &glass_skins[index],
                     glass_pipeline.skinned,
                     Some((&cast, &self.cast_sampler)),
+                    Some(&lamp_register),
                 );
                 pass.set_pipeline(&glass_pipeline.pipeline);
                 pass.set_bind_group(0, &bind, &[]);
@@ -1202,6 +1447,7 @@ impl Gpu {
                         &self.sampler,
                         skin,
                         pipeline.skinned,
+                        None,
                         None,
                     );
                     pass.set_bind_group(0, &bind, &[]);
@@ -1256,6 +1502,7 @@ impl Gpu {
                         &self.sampler,
                         &self.plain,
                         pipeline.skinned,
+                        None,
                         None,
                     );
                     pass.set_bind_group(0, &bind, &[]);
@@ -1427,10 +1674,7 @@ fn sun_view(sun: Vec3, eyes: Vec3, reach: f32) -> Mat4 {
     box_of_view * glam::camera::rh::view::look_at_mat4(seen_from, eyes, up)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one uniform block, everything the light pass reads"
-)]
+#[allow(clippy::too_many_arguments)]
 fn world_uniforms(
     view_proj: &Mat4,
     item: &DrawItem,
@@ -1439,6 +1683,7 @@ fn world_uniforms(
     eyes: Vec3,
     light: &Light,
     light_view: &Mat4,
+    sunlight: &[f32; 3],
 ) -> Uniforms {
     let map = light.shadow_map.max(1) as f32;
     let taps = light.softness as f32;
@@ -1466,8 +1711,12 @@ fn world_uniforms(
             0.0,
             0.0,
         ],
+        // The sun node's own colour and strength, which is one for one as long as it
+        // is the sun the world was born with and nobody has written on it.
+        tint: [sunlight[0], sunlight[1], sunlight[2], 0.0],
         skinned: f32::from(item.texture.is_some()),
-        _pad: [0.0; 3],
+        blocky: f32::from(light.style == LightType::Blocky),
+        _pad: [0.0; 2],
     }
 }
 
@@ -1477,11 +1726,9 @@ fn world_uniforms(
 ///
 /// The same goes for the cast, which only the world and glass shaders declare. It
 /// is filled on a rung that casts nothing too, because a deduced layout asks for
-/// every binding the shader mentions whether or not this frame reads it.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one bind group, every binding it can hold"
-)]
+/// every binding the shader mentions whether or not this frame reads it. The lamp
+/// register is bound the same way: an empty one is a frame that adds nothing.
+#[allow(clippy::too_many_arguments)]
 fn bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -1490,6 +1737,7 @@ fn bind_group(
     skin: &wgpu::TextureView,
     skinned: bool,
     cast: Option<(&wgpu::TextureView, &wgpu::Sampler)>,
+    lamps: Option<&wgpu::Buffer>,
 ) -> wgpu::BindGroup {
     let mut entries = vec![wgpu::BindGroupEntry {
         binding: 0,
@@ -1513,6 +1761,12 @@ fn bind_group(
         entries.push(wgpu::BindGroupEntry {
             binding: 4,
             resource: wgpu::BindingResource::Sampler(cast_sampler),
+        });
+    }
+    if let Some(lamps) = lamps {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 5,
+            resource: lamps.as_entire_binding(),
         });
     }
     device.create_bind_group(&wgpu::BindGroupDescriptor {

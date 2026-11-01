@@ -260,6 +260,84 @@ def test_grain_roughens_the_backdrop_without_hiding_it(headless):
     assert len(grainy) > 4, grainy
 
 
+def roughness(line):
+    """How much a run changes by more than the ground it lies on asks for: the mean of
+    its second differences, which a haze a pixel shares with its neighbours answers with
+    about a level and a throw of the dice in every pixel answers with seven."""
+    steps = [line[i] - 2 * line[i + 1] + line[i + 2] for i in range(len(line) - 2)]
+    return sum(abs(step) for step in steps) / len(steps)
+
+
+def reversals(line):
+    """How much brightness a run gives back on the way along it. A bare gradient climbs
+    and answers with nothing; dust that wanders gives some back, and a static gives back
+    most of everything it walked."""
+    steps = list(zip(line, line[1:]))
+    return min(
+        sum(later - earlier for earlier, later in steps if later > earlier),
+        sum(earlier - later for earlier, later in steps if earlier > later),
+    )
+
+
+@pytest.fixture
+def skyward(headless):
+    """A frame with nothing in it but the backdrop, seen through an eight degree lens.
+    The haze is laid about a degree and a half wide, so here one blob covers a dozen
+    pixels and a run down the frame is a handful of blobs; through the wide lens a world
+    opens on the same haze is finer than a pixel, and no test could tell it from a
+    static. The backdrop keeps the colours it was given, because the ask is how its dust
+    is laid and not what the gradient looks like."""
+    sky = carbine.atmosphere.sky()
+    camera = carbine.camera()
+    found = (
+        sky.enabled,
+        sky.noise,
+        camera.mode,
+        camera.fov,
+        tuple(camera.position),
+        tuple(camera.target),
+    )
+
+    sky.enabled = True
+    camera.mode = "perspective"
+    camera.fov = 8.0
+    camera.position = (0.0, 0.0, 0.0)
+    camera.lookAt((0.0, -1.0, 0.6))
+
+    yield
+
+    (
+        sky.enabled,
+        sky.noise,
+        camera.mode,
+        camera.fov,
+        camera.position,
+        camera.target,
+    ) = found
+
+
+def test_the_backdrop_carries_its_dust_as_a_haze_and_not_a_static(skyward):
+    sky = carbine.atmosphere.sky()
+
+    sky.noise = 0.0
+    still = carbine.readPixels()
+    sky.noise = 0.035  # the dust a fresh world opens on
+    dusty = carbine.readPixels()
+
+    assert still != dusty, "the dust the backdrop is asked to carry is not drawn"
+
+    for column in (16, 32, 48):
+        without = [pixel(still, column, row)[0] for row in range(HEIGHT)]
+        with_dust = [pixel(dusty, column, row)[0] for row in range(HEIGHT)]
+
+        rough = roughness(with_dust)
+        assert rough <= 2.0, f"the backdrop is laid {rough} levels rough: {with_dust}"
+        gave_back = reversals(with_dust)
+        assert gave_back <= 24, f"the backdrop gives back {gave_back} levels: {with_dust}"
+        # Centred, so the dust never tints the gradient it lies on.
+        assert abs(sum(with_dust) - sum(without)) <= 2.0 * HEIGHT, (without, with_dust)
+
+
 def test_a_texture_paints_the_object(flat, skin):
     tile = carbine.new("plane")
     try:

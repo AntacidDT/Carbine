@@ -9,7 +9,9 @@ def test_version():
 
 
 def test_kinds_are_advertised():
-    assert carbine.kinds() == ["cube", "plane", "sphere", "rectangle", "square"]
+    # The shapes the geometry knows, and the one kind it does not: a light is a node
+    # `new` writes like any other, and draws nothing.
+    assert carbine.kinds() == ["cube", "plane", "sphere", "rectangle", "square", "light"]
 
 
 def test_new_rectangle_defaults():
@@ -62,6 +64,26 @@ def test_size_is_meters_and_scale_is_the_factor():
         assert card.size.toTuple() == (5.0, 1.0, 1.0)
     finally:
         card.destroy()
+
+
+def test_a_body_weighs_the_box_it_was_made_from():
+    box = carbine.new("cube", name="Box")
+    try:
+        assert box.mass == pytest.approx(200.0), "a metre cube of the world's stuff"
+
+        box.size = (2.0, 3.0, 1.0)
+        assert box.mass == pytest.approx(1200.0), "six of them"
+
+        box.mass = 42.0
+        assert box.mass == pytest.approx(42.0)
+
+        box.size = (1.0, 1.0, 1.0)
+        assert box.mass == pytest.approx(42.0), "a written weight outranks the box"
+
+        box.mass = -8.0
+        assert box.mass == 0.0, "nothing weighs less than nothing"
+    finally:
+        box.destroy()
 
 
 def test_an_axis_left_out_keeps_the_value_it_had():

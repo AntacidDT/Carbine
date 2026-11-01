@@ -34,6 +34,14 @@ impl PyLight {
         with_scene(|scene| Ok(scene.light().shadows))
     }
 
+    /// How the edge of a shade is laid: `"straight"` weaves the readings of the cast
+    /// together, `"blocky"` keeps them in steps. It is `carbine.lightType`, and it is
+    /// a look rather than a cost - the rung decides what the machine is asked to do.
+    #[getter]
+    fn style(&self) -> PyResult<String> {
+        with_scene(|scene| Ok(scene.light_style().name().to_owned()))
+    }
+
     /// Texels on a side of that pre-rendered picture, or 0 when there is none.
     #[getter(shadowMap)]
     fn shadow_map(&self) -> PyResult<u32> {

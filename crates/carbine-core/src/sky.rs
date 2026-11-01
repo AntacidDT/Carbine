@@ -3,8 +3,8 @@ use glam::Vec3;
 use crate::node::Scene;
 use crate::node::{SceneError, parse_hex_color};
 
-/// The backdrop behind the world: a horizon to zenith gradient with a faint
-/// grain, plus the one directional light every object is shaded by.
+/// The backdrop behind the world: a horizon to zenith gradient carried in a faint
+/// haze, plus the one directional light every object is shaded by.
 ///
 /// Colours are sRGB channels in 0..1, the same way an object's colour is stored.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -14,7 +14,9 @@ pub struct Sky {
     pub zenith: Vec3,
     /// The line where the sky meets the ground.
     pub horizon: Vec3,
-    /// How much grain the gradient carries, 0..1.
+    /// How much haze the gradient is carried in, 0..1. The haze is a dome of soft
+    /// blobs, not a film thrown on the window, so this is how far the sky's own air
+    /// pulls away from the colour the gradient asked for.
     pub noise: f32,
     /// The direction the light arrives from, in world space. Normals facing it
     /// get full colour, normals facing away get ambient.
@@ -83,19 +85,27 @@ impl Scene {
         Ok(())
     }
 
-    /// Grain strength, clamped to the range a backdrop can actually show.
+    /// Haze strength, clamped to the range a backdrop can actually show.
     pub fn set_sky_noise(&mut self, noise: f32) {
         self.sky.noise = noise.clamp(0.0, 1.0);
     }
 
     /// Points the light. A zero or near-zero vector would leave a face with no
     /// direction to shade toward, so it falls back to the default sun.
+    ///
+    /// The sun is a node, so this turns it as well: writing the direction the
+    /// backdrop is lit for and rotating the light are the same act seen from either
+    /// end of it.
     pub fn set_sky_sun(&mut self, direction: Vec3) {
         self.sky.sun = if direction.length_squared() > 1e-12 {
             direction.normalize()
         } else {
             Sky::default().sun
         };
+        let sun = self.sun;
+        if let Some(sun) = sun {
+            let _ = self.point_sun(sun, self.sky.sun);
+        }
     }
 
     /// Brightness of a face that points away from the sun, 0..1.
@@ -138,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn sky_colours_round_trip_and_grain_stays_visible() {
+    fn sky_colours_round_trip_and_haze_stays_visible() {
         let mut scene = Scene::new();
 
         scene.set_sky_zenith(Vec3::new(0.1, 0.2, 0.3));

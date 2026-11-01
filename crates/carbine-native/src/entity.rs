@@ -5,10 +5,10 @@ use pyo3::types::PyAny;
 use crate::math::{PyQuat, PyVec3};
 use crate::object::{
     Object, add_child_on, anchored_of, children_of, collider_shape_of, collision_of, gravity_of,
-    gravity_pull_of, handle_id, kind_of, name_of, parent_of, remove_child_on, set_anchored_on,
-    set_children_on, set_collider_shape_on, set_collision_on, set_color_on, set_gravity_on,
-    set_gravity_pull_on, set_name_on, set_parent_on, set_rotation, set_texture_on, set_vec3,
-    set_visible_on, texture_of, touching_handles, vec3_of, visible_of,
+    gravity_pull_of, handle_id, kind_of, mass_of, name_of, parent_of, remove_child_on,
+    set_anchored_on, set_children_on, set_collider_shape_on, set_collision_on, set_color_on,
+    set_gravity_on, set_gravity_pull_on, set_mass_on, set_name_on, set_parent_on, set_rotation,
+    set_texture_on, set_vec3, set_visible_on, texture_of, touching_handles, vec3_of, visible_of,
 };
 use crate::with_scene;
 
@@ -228,6 +228,18 @@ impl Entity {
     #[setter(gravityPull)]
     fn set_gravity_pull(&self, value: f64) -> PyResult<()> {
         set_gravity_pull_on(self.id, value as f32)
+    }
+
+    /// Kilograms, or what the actor's box weighs at two hundred to the cubic
+    /// metre while nobody has said.
+    #[getter]
+    fn mass(&self) -> PyResult<f32> {
+        mass_of(self.id)
+    }
+
+    #[setter]
+    fn set_mass(&self, value: f64) -> PyResult<()> {
+        set_mass_on(self.id, value as f32)
     }
 
     /// In the solver, or out of it. An actor that does not collide cannot be

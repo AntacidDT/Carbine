@@ -20,6 +20,13 @@ impl PyScene {
         with_scene(|scene| Ok(Object::from_id(scene.root())))
     }
 
+    /// The light the daylight is thrown by, which every world is born with. It is a
+    /// node like any other: colour it, turn it, brighten it, or switch it off.
+    #[getter]
+    fn sun(&self) -> PyResult<Option<Object>> {
+        with_scene(|scene| Ok(scene.sun().map(Object::from_id)))
+    }
+
     #[getter(nodeCount)]
     fn node_count(&self) -> PyResult<usize> {
         with_scene(|scene| Ok(scene.node_count()))

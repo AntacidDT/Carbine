@@ -117,6 +117,10 @@ pub enum SceneError {
     NotAnEntity,
     NotAUi,
     NotAParticles,
+    NotALight,
+    NotAVehicle,
+    NotASeat,
+    SeatCannotSit,
     UiNotCollidable,
     UnknownShape(String),
     UnknownParticleShape(String),
@@ -125,6 +129,8 @@ pub enum SceneError {
     NoSuchDisaster,
     UnknownAtmosphere(String),
     UnknownLightQuality(String),
+    UnknownLightType(String),
+    UnknownHandling(String),
     BadTime(String),
     BadTexture { path: String, why: String },
 }
@@ -135,8 +141,10 @@ impl fmt::Display for SceneError {
             Self::NodeDestroyed => write!(formatter, "the object has been destroyed"),
             Self::UnknownKind(kind) => write!(
                 formatter,
-                "unknown object kind \"{kind}\" (available: {})",
-                primitives::KINDS.join(", ")
+                "unknown object kind \"{kind}\" (available: {}, {}, {})",
+                primitives::KINDS.join(", "),
+                crate::light::KIND,
+                crate::vehicle::KIND
             ),
             Self::CannotDestroyRoot => write!(formatter, "the scene root cannot be destroyed"),
             Self::CannotReparentRoot => write!(formatter, "the scene root cannot be reparented"),
@@ -162,6 +170,31 @@ impl fmt::Display for SceneError {
             Self::NotAParticles => {
                 write!(formatter, "the object is not a particle system")
             }
+            Self::NotALight => {
+                write!(
+                    formatter,
+                    "the object is not a light; a light is written with carbine.new(\"Light\")"
+                )
+            }
+            Self::NotAVehicle => {
+                write!(
+                    formatter,
+                    "the object is not a vehicle; a vehicle is written with \
+                     carbine.new(\"Vehicle\")"
+                )
+            }
+            Self::NotASeat => {
+                write!(
+                    formatter,
+                    "the object is not a seat; a seat is written with carbine.new(\"Seat\") \
+                     or carbine.new(\"DriverSeat\")"
+                )
+            }
+            Self::SeatCannotSit => write!(
+                formatter,
+                "a seat is somewhere a node sits, not a node that sits; seat the avatar or \
+                 the entity, not the seat"
+            ),
             Self::UiNotCollidable => {
                 write!(
                     formatter,
@@ -198,6 +231,16 @@ impl fmt::Display for SceneError {
                 formatter,
                 "unknown light quality \"{quality}\" (available: {})",
                 crate::atmosphere::LightQuality::NAMES.join(", ")
+            ),
+            Self::UnknownLightType(style) => write!(
+                formatter,
+                "unknown light type \"{style}\" (available: {})",
+                crate::atmosphere::LightType::NAMES.join(", ")
+            ),
+            Self::UnknownHandling(handling) => write!(
+                formatter,
+                "unknown handling type \"{handling}\" (available: {})",
+                crate::vehicle::HandlingType::NAMES.join(", ")
             ),
             Self::BadTime(clock) => write!(
                 formatter,
@@ -246,6 +289,10 @@ pub struct Scene {
     /// written by the disasters and added by the follow camera.
     pub(crate) shake: Vec3,
     root: NodeId,
+    /// The light node the daylight is thrown by, which a fresh world is born with.
+    /// `None` only after a script has destroyed it, which is a world the sun leaves
+    /// out; see [`crate::light`].
+    pub(crate) sun: Option<NodeId>,
 }
 
 impl Default for Scene {
@@ -270,7 +317,7 @@ impl Scene {
         let mut ids = HashMap::new();
         ids.insert(root, root_entity);
 
-        Self {
+        let mut scene = Self {
             world,
             ids,
             next_id: 1,
@@ -288,31 +335,54 @@ impl Scene {
             gpu: None,
             shake: Vec3::ZERO,
             root,
-        }
+            sun: None,
+        };
+        // A world is lit by something standing in it, so the sun is a node like
+        // anything else and pointed wherever the backdrop is lit for.
+        scene.make_sun();
+        scene
     }
 
     pub fn root(&self) -> NodeId {
         self.root
     }
 
+    /// What a script has put in the world. The root is not content and neither is
+    /// the sun the scene was born with, so neither is counted.
     pub fn node_count(&self) -> usize {
-        self.ids.len().saturating_sub(1)
+        let furniture = 1 + usize::from(self.sun.is_some());
+        self.ids.len().saturating_sub(furniture)
     }
 
+    /// Creates a world node. The kind word is read whichever way a script spells it,
+    /// and a light or a seat is not a shape the geometry knows, so they go by their own
+    /// doors.
     pub fn create(
         &mut self,
         kind: &str,
         name: Option<String>,
         parent: Option<NodeId>,
     ) -> Result<NodeId, SceneError> {
-        let data =
-            primitives::build(kind).ok_or_else(|| SceneError::UnknownKind(kind.to_owned()))?;
+        let kind = kind.trim().to_lowercase();
+        if kind == crate::light::KIND {
+            return self.create_light(name, parent);
+        }
+        if kind == crate::vehicle::KIND {
+            return self.create_vehicle(name, parent);
+        }
+        if let Some(drives) = crate::vehicle::seat_kind(&kind) {
+            return self.create_seat(name, parent, drives);
+        }
+
+        let Some(data) = primitives::build(&kind) else {
+            return Err(SceneError::UnknownKind(kind));
+        };
         if let Some(parent) = parent {
             self.entity(parent)?;
             self.branch_allows(parent, false)?;
         }
 
-        Ok(self.spawn(kind, name, parent, data))
+        Ok(self.spawn(&kind, name, parent, data))
     }
 
     /// Attaches a node holding `data` to the tree. Shared by world objects and UI
@@ -374,17 +444,29 @@ impl Scene {
                 self.world.entity_mut(entity).despawn();
             }
         }
+        // The sun is a node like any other and can be destroyed with the branch it
+        // hangs on; once it is gone the world has nothing left to shine with.
+        if self.sun.is_some_and(|sun| !self.ids.contains_key(&sun)) {
+            self.sun = None;
+        }
+        // A seat, a vehicle or a rider can be the thing that just went away, and a
+        // rider welded to a seat that no longer exists would be held nowhere.
+        self.release_seats();
 
         Ok(())
     }
 
     /// Throws away everything the script authored: every node under the root, with
     /// the subtree hanging off it, and every disaster still written into the world.
-    /// The camera, the backdrop, the light and the player are settings a game tuned
-    /// rather than things it made, so they stay where they were left; `reset` is
-    /// what wipes those too.
+    /// The camera, the backdrop and the player are settings a game tuned rather than
+    /// things it made, and the sun it was born with is the world's own, so they stay
+    /// where they were left; `reset` is what wipes those too.
     pub fn clear(&mut self) {
+        let sun = self.sun;
         for id in self.children(self.root).unwrap_or_default() {
+            if Some(id) == sun {
+                continue;
+            }
             let _ = self.destroy(id);
         }
         self.links.clear();
@@ -542,6 +624,7 @@ impl Scene {
             Quat::IDENTITY
         };
         self.component_mut::<Transform>(id)?.rotation = rotation;
+        self.sun_aimed_from(id);
         Ok(())
     }
 
@@ -579,6 +662,7 @@ impl Scene {
             VecField::RotationEuler => transform.rotation = quat_from_euler_degrees(value),
             VecField::Color => unreachable!("colour is handled above"),
         }
+        self.sun_aimed_from(id);
         Ok(())
     }
 
@@ -613,6 +697,7 @@ impl Scene {
             VecField::Color => unreachable!("colour is handled above"),
         }
         *self.component_mut::<Transform>(id)? = transform;
+        self.sun_aimed_from(id);
         Ok(())
     }
 
@@ -889,7 +974,11 @@ mod tests {
         assert_eq!(scene.name(node).unwrap(), "Rectangle");
         assert_eq!(scene.kind(node).unwrap(), "rectangle");
         assert_eq!(scene.parent(node).unwrap(), Some(scene.root()));
-        assert_eq!(scene.children(scene.root()).unwrap(), vec![node]);
+        assert_eq!(
+            scene.children(scene.root()).unwrap(),
+            vec![scene.sun().unwrap(), node],
+            "the world's own sun is already hung on the root"
+        );
         assert_eq!(scene.mesh(node).unwrap().vertex_count(), 4);
         assert_eq!(scene.color(node).unwrap(), DEFAULT_COLOR);
     }
@@ -1278,7 +1367,11 @@ mod tests {
         scene.clear();
 
         assert_eq!(scene.node_count(), 0);
-        assert_eq!(scene.children(scene.root()).unwrap(), vec![]);
+        assert_eq!(
+            scene.children(scene.root()).unwrap(),
+            vec![scene.sun().unwrap()],
+            "the authored tree is gone; the world keeps its own sun"
+        );
         for node in [crate_, bolt, card, crowd, rain] {
             assert_eq!(scene.name(node), Err(SceneError::NodeDestroyed));
         }

@@ -100,6 +100,20 @@ def test_gravity_is_a_multiplier_with_earth_at_ten():
         crate.destroy()
 
 
+def test_an_actor_weighs_what_an_object_of_the_same_box_does():
+    actor = carbine.spawnEntity("cube", name="Weightlifter")
+    try:
+        assert actor.mass == pytest.approx(200.0)
+
+        actor.mass = 12.5
+        assert actor.mass == pytest.approx(12.5)
+
+        actor.size = (3.0, 3.0, 3.0)
+        assert actor.mass == pytest.approx(12.5), "the written weight stays"
+    finally:
+        actor.destroy()
+
+
 def test_killing_an_entity_keeps_its_body():
     before = carbine.scene.entityCount
     actor = carbine.spawnEntity("rectangle", name="Soldier", health=30.0)

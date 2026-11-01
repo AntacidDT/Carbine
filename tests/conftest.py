@@ -15,6 +15,11 @@ def headless():
         adapter = carbine.init(WIDTH, HEIGHT, window=False)
     except RuntimeError as error:
         pytest.skip(f"no GPU renderer available: {error}")
+    # Every exact colour in this suite was measured against the bare lambert world,
+    # and a rung above it shades, tints and glares. Left to `auto` the numbers would
+    # mean whatever the card in the machine picked, so a fixture that reads one says
+    # which rung it reads it on.
+    carbine.atmosphere.lightQuality = "low"
     try:
         yield adapter
     finally:

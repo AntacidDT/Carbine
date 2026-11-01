@@ -47,6 +47,7 @@ def test_a_copy_starts_where_the_original_stands_and_then_goes_its_own_way():
         original.transparent = 200.0
         original.gravity = True
         original.gravityPull = 1.6
+        original.mass = 500.0
         original.collisionShape = "capsule"
 
         copy = carbine.duplicate(original)[0]
@@ -57,6 +58,7 @@ def test_a_copy_starts_where_the_original_stands_and_then_goes_its_own_way():
         assert copy.transparent == 200.0
         assert copy.gravity is True
         assert copy.gravityPull == pytest.approx(1.6)
+        assert copy.mass == pytest.approx(500.0)
         assert copy.collision is True
         assert copy.collisionShape == "capsule"
 
@@ -157,6 +159,24 @@ def test_a_linked_copy_keeps_its_own_place_its_own_size_and_wounds():
         assert actor.rotationEuler.toTuple() == pytest.approx((0.0, 0.0, 0.0))
         assert actor.size.toTuple() == (1.0, 1.0, 1.0), "a city needs towers of odd heights"
         assert actor.alive is True, "one twin dying is one twin's business"
+    finally:
+        carbine.destroy("all")
+
+
+def test_a_twin_weighs_its_own_box_until_the_group_is_told_otherwise():
+    original = carbine.new("cube")
+    try:
+        twin = carbine.linkDuplicate(original)[0]
+
+        # Nobody has said what either weighs, so each weighs the box it stands in.
+        twin.size = (2.0, 2.0, 2.0)
+        assert original.mass == pytest.approx(200.0)
+        assert twin.mass == pytest.approx(1600.0)
+
+        # A weight is about what the thing is, so the whole group hears about it.
+        twin.mass = 42.0
+        assert original.mass == pytest.approx(42.0)
+        assert twin.mass == pytest.approx(42.0)
     finally:
         carbine.destroy("all")
 

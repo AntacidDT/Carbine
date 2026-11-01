@@ -347,7 +347,8 @@ fn end() -> PyResult<()> {
     Ok(())
 }
 
-/// Creates an object: authored geometry in the world.
+/// Creates an object: authored geometry in the world, or a light with
+/// `carbine.new("Light")`, which draws nothing and lights what stands near it.
 #[pyfunction]
 #[pyo3(signature = (kind, *, name=None, parent=None))]
 fn new<'py>(
@@ -474,7 +475,9 @@ fn get_player() -> PyPlayer {
 /// The object kinds `new()` and `spawnEntity()` accept.
 #[pyfunction]
 fn kinds() -> Vec<&'static str> {
-    carbine_core::PRIMITIVE_KINDS.to_vec()
+    let mut kinds = carbine_core::PRIMITIVE_KINDS.to_vec();
+    kinds.push(carbine_core::LIGHT_KIND);
+    kinds
 }
 
 /// The collider shapes a body can be cut as, for `obj.collisionShape`.
@@ -482,6 +485,31 @@ fn kinds() -> Vec<&'static str> {
 #[pyo3(name = "collisionShapes")]
 fn collision_shapes() -> Vec<&'static str> {
     carbine_core::ColliderShape::NAMES.to_vec()
+}
+
+/// How the edge of a shade is laid: `"straight"` weaves the readings of the cast
+/// together, `"blocky"` keeps them in steps. Straight is what the world starts with.
+#[pyfunction]
+#[pyo3(name = "lightType")]
+fn light_type() -> PyResult<String> {
+    with_scene(|scene| Ok(scene.light_style().name().to_owned()))
+}
+
+/// Writes the light type and hands back what the world is now using.
+#[pyfunction]
+#[pyo3(name = "setLightType")]
+fn set_light_type(name: &str) -> PyResult<String> {
+    with_scene(|scene| {
+        scene.set_light_style_name(name)?;
+        Ok(scene.light_style().name().to_owned())
+    })
+}
+
+/// The light types `carbine.lightType` takes.
+#[pyfunction]
+#[pyo3(name = "lightTypes")]
+fn light_types() -> Vec<&'static str> {
+    carbine_core::LightType::NAMES.to_vec()
 }
 
 #[pymodule]
@@ -536,6 +564,9 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(get_player, module)?)?;
     module.add_function(wrap_pyfunction!(kinds, module)?)?;
     module.add_function(wrap_pyfunction!(collision_shapes, module)?)?;
+    module.add_function(wrap_pyfunction!(light_type, module)?)?;
+    module.add_function(wrap_pyfunction!(set_light_type, module)?)?;
+    module.add_function(wrap_pyfunction!(light_types, module)?)?;
     module.add_function(wrap_pyfunction!(input::key, module)?)?;
     module.add_function(wrap_pyfunction!(input::pressed, module)?)?;
     module.add_function(wrap_pyfunction!(input::released, module)?)?;

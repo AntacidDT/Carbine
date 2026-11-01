@@ -40,6 +40,7 @@ from ._native import (
     kinds,
     killEntity,
     keys,
+    lightTypes,
     linkDuplicate,
     mouse,
     new,
@@ -75,7 +76,12 @@ class _Carbine(ModuleType):
     of the two is what the frames settle at.
 
     Neither one exists until it is asked for. Left alone, `fpsCap` is `None`,
-    `monitorSync` is `False` and nothing holds the frames."""
+    `monitorSync` is `False` and nothing holds the frames.
+
+    `carbine.lightType` lives here for the same reason: `carbine.lightType = "blocky"`
+    asks for shade edges laid in steps, and `"straight"` — which is what the world
+    starts with — weaves them. It is a look, not a cost; how much light is worked at
+    all is `carbine.atmosphere.lightQuality`."""
 
     @property
     def fpsCap(self) -> int | None:
@@ -100,6 +106,14 @@ class _Carbine(ModuleType):
     @property
     def fpsLimit(self) -> int | None:
         return _native.fpsLimit()
+
+    @property
+    def lightType(self) -> str:
+        return _native.lightType()
+
+    @lightType.setter
+    def lightType(self, style: str) -> None:
+        _native.setLightType(style)
 
 
 sys.modules[__name__].__class__ = _Carbine
@@ -144,6 +158,8 @@ __all__ = [
     "kinds",
     "killEntity",
     "keys",
+    "lightType",
+    "lightTypes",
     "linkDuplicate",
     "mouse",
     "monitorHz",

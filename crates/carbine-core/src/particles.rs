@@ -917,7 +917,10 @@ mod tests {
         assert_eq!(scene.kind(rain).unwrap(), "particles");
         assert_eq!(scene.name(rain).unwrap(), "Particles");
         assert_eq!(scene.parent(rain).unwrap(), Some(scene.root()));
-        assert_eq!(scene.children(scene.root()).unwrap(), vec![rain]);
+        assert_eq!(
+            scene.children(scene.root()).unwrap(),
+            vec![scene.sun().unwrap(), rain]
+        );
         assert!(scene.is_particle_system(rain).unwrap());
         assert!(
             !scene.has_body(rain).unwrap(),

@@ -108,8 +108,10 @@ mod tests {
 
     #[test]
     fn only_memory_on_the_device_is_counted_as_its_own() {
-        let mut memory = vk::PhysicalDeviceMemoryProperties::default();
-        memory.memory_heap_count = 2;
+        let mut memory = vk::PhysicalDeviceMemoryProperties {
+            memory_heap_count: 2,
+            ..Default::default()
+        };
         memory.memory_heaps[0] = vk::MemoryHeap::default()
             .size(4096)
             .flags(vk::MemoryHeapFlags::DEVICE_LOCAL);

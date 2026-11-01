@@ -209,6 +209,49 @@ impl LightQuality {
     }
 }
 
+/// Whether the edge of a shade is drawn straight or laid in blocks.
+///
+/// This is not a cost, so it is not a rung: both of these read the same cast and take
+/// the same number of readings out of it. What changes is what a reading is told to do
+/// with the texels it lands on. `straight`, which is what a fresh world stands on,
+/// blends the texels under each reading, turns the handful a pixel reads to that
+/// pixel's own place on the screen and lets the outer readings count less, so a
+/// shade's edge is one long line. `blocky` takes the single texel a pixel stands on,
+/// the same handful in every pixel, and cuts the shade off where the cast's picture
+/// ends, which is the staircase a retro world asks for on purpose.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LightType {
+    /// The shade is filtered where it lies, so its edge runs along the caster's own.
+    Straight,
+    /// The shade is the cast's texels, unwoven: hard steps the width of a texel.
+    Blocky,
+}
+
+impl LightType {
+    /// The types `carbine.lightType` accepts, in the order they are listed when one
+    /// is wrong.
+    pub const NAMES: &'static [&'static str] = &["blocky", "straight"];
+
+    /// The type a fresh world is drawn with. A blocky shade is a look a person asks
+    /// for, never one to hand them by default.
+    pub const DEFAULT: Self = Self::Straight;
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name.trim().to_lowercase().as_str() {
+            "straight" | "smooth" | "soft" | "normal" => Self::Straight,
+            "blocky" | "pixel" | "stepped" | "hard" => Self::Blocky,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Straight => "straight",
+            Self::Blocky => "blocky",
+        }
+    }
+}
+
 /// What the light pass is told to do, once a rung has been resolved.
 ///
 /// These are engine numbers, not a script's: a script moves a rung and this is
@@ -218,6 +261,9 @@ impl LightQuality {
 pub struct Light {
     /// Which rung these numbers came from. Always a real rung, never `auto`.
     pub quality: LightQuality,
+    /// Whether the edges this rung draws are straight or in blocks, which is the
+    /// other thing a script names about the light: `carbine.lightType`.
+    pub style: LightType,
     /// Whether the sun pre-renders the world to cast with. False only at `low`.
     pub shadows: bool,
     /// Texels on a side of the cast, or 0 when there is no cast.
@@ -236,10 +282,12 @@ pub struct Light {
 }
 
 impl Light {
-    /// The numbers a rung is worth. Two rungs are load-bearing and cannot move:
-    /// [`LightQuality::Low`] is the bare lambert world every pixel test was
-    /// measured against, and [`LightQuality::Medium`] is what a plain laptop gets.
-    pub fn of(quality: LightQuality) -> Self {
+    /// The numbers a rung is worth, drawn the way the type says. Two rungs are
+    /// load-bearing and cannot move: [`LightQuality::Low`] is the bare lambert world
+    /// every pixel test was measured against, and [`LightQuality::Medium`] is what a
+    /// plain laptop gets. Neither of them is a rung that draws any edge at all, so
+    /// for `low` the type makes no difference: there is nothing to be straight about.
+    pub fn of(quality: LightQuality, style: LightType) -> Self {
         let (shadows, shadow_map, softness, reach, gloss, sky_fill) = match quality {
             LightQuality::Low | LightQuality::Auto => (false, 0, 0, 0.0, 0.0, false),
             LightQuality::Medium => (true, 1024, 4, 60.0, 0.25, true),
@@ -248,6 +296,7 @@ impl Light {
         };
         Self {
             quality,
+            style,
             shadows,
             shadow_map,
             softness,
@@ -358,6 +407,9 @@ pub struct Atmosphere {
     /// Which rung the light is worked at. `auto` until a script says otherwise,
     /// which is the rung this machine can hold.
     pub quality: LightQuality,
+    /// Whether the edges that rung draws are straight or in blocks. `straight` until
+    /// a script says otherwise, because a blocky shade is a look and not a default.
+    pub style: LightType,
 }
 
 impl Default for Atmosphere {
@@ -367,6 +419,7 @@ impl Default for Atmosphere {
             fog_color: Vec3::new(0.761, 0.800, 0.831),
             time: 15.0,
             quality: LightQuality::Auto,
+            style: LightType::DEFAULT,
         }
     }
 }
@@ -460,7 +513,7 @@ impl Scene {
     /// What the light pass is told to do this frame. This is what the renderer
     /// reads: a script never has to know which rung it got.
     pub fn light(&self) -> Light {
-        Light::of(self.light_quality())
+        Light::of(self.light_quality(), self.atmosphere.style)
     }
 
     /// Which rung the light is worked at, with `auto` already answered. A machine
@@ -494,6 +547,25 @@ impl Scene {
         Ok(())
     }
 
+    /// Whether the edges the light draws are straight or in blocks. There is no
+    /// `auto` answer here: the machine gets a say about what a frame costs, not about
+    /// what a shade looks like.
+    pub fn light_style(&self) -> LightType {
+        self.atmosphere.style
+    }
+
+    pub fn set_light_style(&mut self, style: LightType) {
+        self.atmosphere.style = style;
+    }
+
+    /// The type written the way a name is written, `"blocky"` and friends.
+    pub fn set_light_style_name(&mut self, name: &str) -> Result<(), SceneError> {
+        let style = LightType::from_name(name)
+            .ok_or_else(|| SceneError::UnknownLightType(name.trim().to_owned()))?;
+        self.set_light_style(style);
+        Ok(())
+    }
+
     /// Told by the renderer what graphics device it was actually given. This is
     /// what lets an unread world stand `auto` and still pick a sane rung.
     pub fn report_gpu(&mut self, kind: DeviceKind, vram: Option<u64>) {
@@ -522,7 +594,7 @@ impl Scene {
 
         let sun = sun_at(hours);
         let (zenith, horizon, ambient) = colours_of(sun);
-        self.sky.sun = sun;
+        self.set_sky_sun(sun);
         self.sky.zenith = zenith;
         self.sky.horizon = horizon;
         self.sky.ambient = ambient;
@@ -897,7 +969,7 @@ mod tests {
 
     #[test]
     fn the_low_rung_is_the_bare_world_the_pixel_tests_were_measured_on() {
-        let low = Light::of(LightQuality::Low);
+        let low = Light::of(LightQuality::Low, LightType::DEFAULT);
 
         assert!(!low.shadows);
         assert_eq!(low.shadow_map, 0);
@@ -913,6 +985,62 @@ mod tests {
     }
 
     #[test]
+    fn the_light_starts_straight_and_a_script_can_ask_for_blocks() {
+        let scene = Scene::new();
+
+        // A blocky shade is a look somebody chooses, so nothing hands it out by
+        // default - not even a machine that could not afford the smooth one.
+        assert_eq!(scene.atmosphere().style, LightType::Straight);
+        assert_eq!(scene.light().style, LightType::Straight);
+
+        let mut scene = Scene::new();
+        scene.set_light_style_name("blocky").unwrap();
+        assert_eq!(scene.light().style, LightType::Blocky);
+        assert_eq!(scene.atmosphere().style.name(), "blocky");
+
+        for (written, want) in [
+            (" straight ", LightType::Straight),
+            ("SMOOTH", LightType::Straight),
+            ("pixel", LightType::Blocky),
+        ] {
+            let mut scene = Scene::new();
+            scene.set_light_style_name(written).unwrap();
+            assert_eq!(scene.light().style, want, "\"{written}\" is not it");
+        }
+
+        assert!(matches!(
+            scene.set_light_style_name("wobbly"),
+            Err(SceneError::UnknownLightType(style)) if style == "wobbly"
+        ));
+        // The message a typo gets names both of the looks it could have asked for.
+        assert_eq!(
+            SceneError::UnknownLightType("wobbly".to_owned()).to_string(),
+            "unknown light type \"wobbly\" (available: blocky, straight)"
+        );
+    }
+
+    #[test]
+    fn the_look_of_an_edge_costs_what_the_rung_said_it_costs() {
+        // The type is not a rung: it weaves the same readings out of the same picture,
+        // so a script switching to blocks is not quietly buying a cheaper frame - and
+        // a bare world has no edge to weave, so it cannot tell the two apart at all.
+        for rung in [LightQuality::Low, LightQuality::Medium, LightQuality::Extra] {
+            let straight = Light::of(rung, LightType::Straight);
+            let blocky = Light::of(rung, LightType::Blocky);
+
+            assert_eq!(straight.quality, blocky.quality);
+            assert_eq!(straight.shadows, blocky.shadows);
+            assert_eq!(straight.shadow_map, blocky.shadow_map);
+            assert_eq!(straight.softness, blocky.softness);
+            assert_eq!(straight.reach, blocky.reach);
+            assert_eq!(straight.gloss, blocky.gloss);
+            assert_eq!(straight.sky_fill, blocky.sky_fill);
+            // On `low` every one of those is nothing at all, which is the same frame
+            // either way: a rung that draws no edge has no style to draw it with.
+        }
+    }
+
+    #[test]
     fn every_rung_above_costs_more_than_the_one_below_it() {
         let rungs = [
             LightQuality::Low,
@@ -920,7 +1048,10 @@ mod tests {
             LightQuality::High,
             LightQuality::Extra,
         ];
-        let lights: Vec<Light> = rungs.iter().map(|rung| Light::of(*rung)).collect();
+        let lights: Vec<Light> = rungs
+            .iter()
+            .map(|rung| Light::of(*rung, LightType::DEFAULT))
+            .collect();
 
         for pair in lights.windows(2) {
             let (less, more) = (pair[0], pair[1]);

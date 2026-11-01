@@ -137,6 +137,35 @@ def test_two_crates_settle_one_on_top_of_the_other():
     lower.destroy()
 
 
+def test_an_anvil_barely_gives_way_to_a_bolt():
+    anvil = crate(at=(0.0, 0.0, 5.0))
+    bolt = crate(at=(0.8, 0.0, 5.0))
+    anvil.mass = 2000.0
+    bolt.mass = 0.05
+
+    # Twenty centimetres the two boxes share, handed out between them.
+    carbine.step(SECOND)
+
+    assert bolt.position.x - 0.8 > 0.19, "the bolt takes nearly all of it"
+    assert abs(anvil.position.x) < 1e-3, "and the anvil the rest"
+
+    bolt.destroy()
+    anvil.destroy()
+
+
+def test_weight_does_not_change_how_fast_a_body_falls():
+    anvil = crate(at=(0.0, 0.0, 8.0))
+    bolt = crate(at=(4.0, 0.0, 8.0))
+    anvil.mass = 2000.0
+    bolt.mass = 0.05
+    settle(1.0)
+
+    assert anvil.position.z == pytest.approx(bolt.position.z, abs=1e-6)
+
+    bolt.destroy()
+    anvil.destroy()
+
+
 def test_touching_hands_back_an_entity_for_an_actor():
     walker = carbine.spawnEntity("cube", name="Walker", position=(0.0, 0.0, 1.0))
     pushed = carbine.spawnEntity("cube", name="Pushed", position=(0.0, 0.0, 3.0))

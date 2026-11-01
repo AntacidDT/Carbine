@@ -174,7 +174,15 @@ impl Scene {
     /// Puts the player's feet somewhere. A teleport arrives at rest, so the walk
     /// does not carry on from the new place and the drop starts from still: only
     /// gravity has hold of a player left above the floor.
+    ///
+    /// A player seated in a seat is where its seat is, so this asks it to get out
+    /// first - the feet are the script's again from the moment it writes them.
     pub fn set_player_position(&mut self, position: Vec3) {
+        if self.rides_somewhere()
+            && let Some(body) = self.player.body
+        {
+            let _ = self.stand(body);
+        }
         self.player.position = position;
         self.player.velocity = Vec3::ZERO;
         self.player.grounded = position.z <= GROUND_HEIGHT + 1e-4;
@@ -292,9 +300,10 @@ impl Scene {
         self.player.grab_mouse = grab && self.player.enabled;
     }
 
-    /// Pushes the player off the ground, if it is standing on it.
+    /// Pushes the player off the ground, if it is standing on it. A player sitting in a
+    /// seat is standing on nothing of its own, so the key does nothing until it gets out.
     pub fn player_jump(&mut self) {
-        if self.player.grounded {
+        if self.player.grounded && !self.rides_somewhere() {
             self.player.velocity.z = self.player.jump_strength;
             self.player.grounded = false;
         }
@@ -304,6 +313,13 @@ impl Scene {
     /// the camera where that leaves the eyes.
     pub(crate) fn step_player(&mut self, dt: f32) {
         if !self.player.enabled {
+            return;
+        }
+        // A player sitting in a seat has no feet to walk with. Its keys still arrive -
+        // a script reads them for the throttle - but the walk maths, the jump and the
+        // gravity belong to the car now, and the step puts the eyes on the seat after
+        // the solver has moved it.
+        if self.rides_somewhere() {
             return;
         }
         let mut input = self.input.clone();
@@ -343,6 +359,46 @@ impl Scene {
         self.follow_camera();
     }
 
+    /// Whether the player's body is seated in something, which is the only way a
+    /// player stops being a walker.
+    pub(crate) fn rides_somewhere(&self) -> bool {
+        self.player.body.is_some_and(|body| self.rides_a_seat(body))
+    }
+
+    /// The place the seat under the player has in the world, or `None` while the player
+    /// stands on its own feet.
+    fn seat_place(&self) -> Option<Vec3> {
+        let body = self.player.body?;
+        let seat = self.seat_of(body).ok().flatten()?;
+        Some(self.world_place(seat)?.0)
+    }
+
+    /// Which way the vehicle the player rides points along the ground. A player walking,
+    /// or sitting in a seat that drives nothing, has no answer for a chase camera.
+    fn ridden_nose(&self) -> Option<Vec3> {
+        let body = self.player.body?;
+        let seat = self.seat_of(body).ok().flatten()?;
+        let car = self.seat_vehicle(seat).ok().flatten()?;
+        let (_, turning) = self.world_place(car)?;
+        crate::vehicle::ground_direction(turning * glam::Vec3::X)
+    }
+
+    /// Puts the player's feet on the seat its body rides in, after the solver has moved
+    /// the vehicle that seat hangs on. From here the eyes, the drawn body and the
+    /// camera all read the car's place rather than the ground it last walked on.
+    pub(crate) fn ride_seat(&mut self) {
+        let Some(at) = self.seat_place() else {
+            return;
+        };
+        let mut player = self.player;
+        player.position = at;
+        player.velocity = Vec3::ZERO;
+        // The seat holds them up: a rider is not falling, and the key that steps a
+        // player off a kerb does not throw them out of a car.
+        player.grounded = true;
+        self.player = player;
+    }
+
     /// Keeps the camera on the player: in the eyes, or behind the body. The view is
     /// the only thing a quake is allowed to move without moving the body, so the
     /// shaking is added here and never to `player.position` — the collider walks the
@@ -365,7 +421,11 @@ impl Scene {
             }
             PlayerMode::ThirdPerson => {
                 let head = player.position + UP * (player.eye_height * 0.9);
-                let mut back = head - look * player.distance + self.shake;
+                // Ridden by a seat, the camera keeps behind the chassis rather than
+                // behind the way the driver's mouse happens to point; on foot, it chases
+                // the player's own view.
+                let line = self.ridden_nose().unwrap_or(look);
+                let mut back = head - line * player.distance + self.shake;
                 // A camera under the floor shows the world from inside it.
                 back.z = back.z.max(GROUND_HEIGHT + 0.1);
                 self.set_camera_position(back);
@@ -403,6 +463,11 @@ impl Scene {
         };
         if self.entity(body).is_err() {
             self.player.body = None;
+            return;
+        }
+        // A body seated in a seat belongs to the seat: the welding put it there this
+        // step, and standing it back on the floor would pull it out of the car.
+        if self.rides_a_seat(body) {
             return;
         }
 
@@ -777,5 +842,171 @@ mod tests {
 
         scene.step(10.0);
         assert!(scene.player_position().z.is_finite());
+    }
+
+    /// A car settled on the floor with a driver's seat, and the player's own body
+    /// buckled into it: the world a driver starts in.
+    fn driven(mode: PlayerMode) -> (Scene, NodeId, NodeId, NodeId) {
+        let mut scene = Scene::new();
+        let car = scene.create("vehicle", None, None).unwrap();
+        let seat = scene.create("DriverSeat", None, Some(car)).unwrap();
+        let body = scene.create("cube", Some("Driver".into()), None).unwrap();
+        scene.set_player_body(Some(body)).unwrap();
+        scene.set_player_enabled(true);
+        scene.set_player_mode(mode);
+        // Out of the way of the car while it falls to rest, so the only thing left
+        // holding the driver up is the seat.
+        scene.set_player_position(Vec3::new(0.0, 30.0, GROUND_HEIGHT));
+
+        for _ in 0..120 {
+            scene.step(1.0 / 60.0);
+        }
+        scene.sit(body, seat).unwrap();
+        scene.step(0.0);
+
+        (scene, car, seat, body)
+    }
+
+    fn near(a: Vec3, b: Vec3) -> bool {
+        (a - b).length() < 1e-4
+    }
+
+    #[test]
+    fn a_seated_player_has_no_feet_to_walk_with() {
+        let (mut scene, _, seat, body) = driven(PlayerMode::ThirdPerson);
+        let in_the_car = scene.world_place(seat).unwrap().0;
+
+        for _ in 0..60 {
+            scene.update_input(&FrameInput {
+                keys: vec![(Key::W, true)],
+                ..Default::default()
+            });
+            scene.step(1.0 / 60.0);
+        }
+
+        assert!(scene.is_seated(body).unwrap(), "still in the car");
+        assert!(
+            near(scene.player_position(), in_the_car),
+            "the eyes never left the seat: {}",
+            scene.player_position()
+        );
+        assert_eq!(scene.player_velocity(), Vec3::ZERO);
+        assert!(scene.player_is_grounded(), "a seat holds them up");
+    }
+
+    #[test]
+    fn a_driven_car_carries_its_driver_along_with_it() {
+        let (mut scene, car, seat, body) = driven(PlayerMode::ThirdPerson);
+        scene.set_throttle(car, 1.0).unwrap();
+
+        for _ in 0..120 {
+            scene.step(1.0 / 60.0);
+        }
+
+        let gone = scene.world_place(car).unwrap().0;
+        assert!(
+            Vec3::new(gone.x, gone.y, 0.0).length() > 5.0,
+            "a car with its foot down went nowhere: {gone}"
+        );
+        let there = scene.world_place(seat).unwrap().0;
+        assert!(
+            near(scene.player_position(), there),
+            "the eyes are on the seat, not on the last kerb they stood at"
+        );
+        assert!(
+            near(scene.world_place(body).unwrap().0, there),
+            "and the drawn body is in the car too"
+        );
+    }
+
+    #[test]
+    fn a_rider_takes_up_no_room_the_solver_has_to_push() {
+        let (mut scene, car, _, body) = driven(PlayerMode::ThirdPerson);
+        let parked_at = scene.world_place(car).unwrap().0;
+
+        for _ in 0..30 {
+            scene.step(1.0 / 60.0);
+        }
+
+        assert!(scene.touches(body).is_empty(), "a person welded in a seat");
+        assert!(
+            near(scene.world_place(car).unwrap().0, parked_at),
+            "inside its own car is nothing the solver has to squeeze out"
+        );
+
+        // The same body standing on the same spot is a person, and a person inside a
+        // car is two bodies the solver keeps apart.
+        scene.set_player_position(parked_at);
+        scene.step(1.0 / 60.0);
+        assert!(
+            scene.touches(car).contains(&body),
+            "on foot, the hull and the chassis overlap: {:?}",
+            scene.touches(car)
+        );
+    }
+
+    #[test]
+    fn a_chase_camera_watches_the_car_it_rides_in() {
+        let (mut scene, _, _, _) = driven(PlayerMode::ThirdPerson);
+        // Looking off to the left. On foot the chase lens would park behind that
+        // gaze; ridden, it keeps behind the chassis the driver is in.
+        scene.set_player_yaw(90.0);
+        scene.step(1.0 / 60.0);
+
+        let head = scene.player_position() + Vec3::Z * (scene.player_eye_height() * 0.9);
+        let back = head - Vec3::X * scene.player_distance();
+        let camera = scene.camera();
+        assert!(
+            near(camera.position, back),
+            "the car faces +x, so the camera should too: {} vs {back}",
+            camera.position
+        );
+        assert!(near(camera.target, head));
+    }
+
+    #[test]
+    fn the_jump_key_leaves_a_rider_in_its_seat() {
+        let (mut scene, _, _, body) = driven(PlayerMode::ThirdPerson);
+
+        scene.update_input(&FrameInput {
+            keys: vec![(Key::Space, true)],
+            ..Default::default()
+        });
+        scene.step(1.0 / 60.0);
+        scene.player_jump();
+
+        assert!(
+            scene.player().velocity == Vec3::ZERO,
+            "a seat, not a launch: {:?}",
+            scene.player().velocity
+        );
+        assert!(scene.player_is_grounded());
+        assert!(scene.is_seated(body).unwrap());
+    }
+
+    #[test]
+    fn a_teleport_sets_a_rider_back_on_its_feet() {
+        let (mut scene, _, seat, body) = driven(PlayerMode::ThirdPerson);
+
+        scene.set_player_position(Vec3::new(0.0, 12.0, GROUND_HEIGHT));
+
+        assert!(
+            !scene.is_seated(body).unwrap(),
+            "being told where to stand is how you get out"
+        );
+        assert_eq!(scene.seated_in(seat).unwrap(), None, "and the seat is free");
+
+        for _ in 0..60 {
+            scene.update_input(&FrameInput {
+                keys: vec![(Key::W, true)],
+                ..Default::default()
+            });
+            scene.step(1.0 / 60.0);
+        }
+        assert!(
+            scene.player_position().x > 3.0,
+            "the feet work again: {}",
+            scene.player_position()
+        );
     }
 }

@@ -138,7 +138,9 @@ impl Scene {
                 anchored: source.anchored,
                 gravity: source.gravity,
                 gravity_pull: source.gravity_pull,
+                mass: source.mass,
                 velocity: Vec3::ZERO,
+                spin: 0.0,
             }
         };
         // The same bytes the original is drawn from, under the same handle: the mesh
@@ -157,6 +159,17 @@ impl Scene {
             hit_pause: data.hit_pause,
             stay_after_death: data.stay_after_death,
         });
+        let lamp = self.world.get::<crate::light::Lamp>(source).copied();
+        let driven = self.world.get::<crate::vehicle::Vehicle>(source).copied();
+        let seat =
+            self.world
+                .get::<crate::vehicle::Seat>(source)
+                .map(|place| crate::vehicle::Seat {
+                    // The copy is built empty: whoever rides the original rides nowhere
+                    // near it.
+                    seated: None,
+                    ..*place
+                });
         let flying = self.is_particle_system(id)?;
 
         let fresh = self.reserve();
@@ -183,6 +196,15 @@ impl Scene {
         }
         if let Some(actor) = actor {
             spawned.insert(actor);
+        }
+        if let Some(lamp) = lamp {
+            spawned.insert(lamp);
+        }
+        if let Some(driven) = driven {
+            spawned.insert(driven);
+        }
+        if let Some(place) = seat {
+            spawned.insert(place);
         }
         if let Some(group) = group {
             spawned.insert(Link(group));
@@ -312,8 +334,9 @@ mod tests {
             );
         }
 
-        // And none of them is the same node: the copies hang beside the original.
-        assert_eq!(scene.children(scene.root()).unwrap().len(), 4);
+        // And none of them is the same node: the copies hang beside the original,
+        // with the world's own sun as the root's other child.
+        assert_eq!(scene.children(scene.root()).unwrap().len(), 5);
     }
 
     #[test]

@@ -13,7 +13,7 @@
 
 use glam::Vec3;
 
-use crate::motion::Motion;
+use crate::motion::{MASS_PER_CUBIC_METRE, Motion};
 use crate::node::{NodeId, Scene, SceneError};
 
 /// The shove a magnitude-5 event lays on the world, in meters per second squared.
@@ -457,10 +457,13 @@ impl Scene {
             if shove.length_squared() <= 0.0 {
                 continue;
             }
+            // Weight is what a quake has to shift, so a body heavier than a metre
+            // cube of the world's own stuff takes a smaller share of the shove.
+            let share = (MASS_PER_CUBIC_METRE / self.mass_of(id)).clamp(0.0, 1.0);
             let Ok(mut motion) = self.component_mut::<Motion>(id) else {
                 continue;
             };
-            motion.velocity += shove * dt;
+            motion.velocity += shove * (share * dt);
         }
 
         if self.player.enabled {
@@ -600,6 +603,30 @@ mod tests {
             (length(&scene, wind), length(&scene, tornado)),
             (0.0, 0.0),
             "a storm keeps going until a script stops it"
+        );
+    }
+
+    #[test]
+    fn a_heavier_body_takes_a_smaller_share_of_the_quake() {
+        let mut scene = Scene::new();
+        let crate_ = loose(&mut scene, Vec3::new(0.0, 0.0, 5.0));
+        let anvil = loose(&mut scene, Vec3::new(0.0, 0.0, 5.0));
+        scene.set_mass(anvil, 10.0 * MASS_PER_CUBIC_METRE).unwrap();
+
+        let quake = written(&mut scene, "earthquake");
+        scene.set_disaster_magnitude(quake, 7.0).unwrap();
+        scene
+            .set_disaster_epicentre(quake, Vec3::new(0.0, 0.0, 5.0))
+            .unwrap();
+        scene.start_disaster(quake).unwrap();
+
+        scene.step(1.0 / 60.0);
+        let light = velocity(&scene, crate_);
+        let heavy = velocity(&scene, anvil);
+        assert!(light.length() > 0.0, "a metre cube takes all of it");
+        assert!(
+            (heavy.length() - light.length() * 0.1).abs() < light.length() * 0.01,
+            "ten metre cubes take a tenth of the shove: {heavy} against {light}"
         );
     }
 

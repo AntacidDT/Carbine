@@ -89,6 +89,14 @@ pub(crate) fn set_gravity_pull_on(id: NodeId, value: f32) -> PyResult<()> {
     with_scene(|scene| scene.set_gravity_pull(id, value))
 }
 
+pub(crate) fn mass_of(id: NodeId) -> PyResult<f32> {
+    with_scene(|scene| scene.mass(id))
+}
+
+pub(crate) fn set_mass_on(id: NodeId, value: f32) -> PyResult<()> {
+    with_scene(|scene| scene.set_mass(id, value))
+}
+
 /// The colour painted on a node, from a `Vec3`, a three tuple, or a hex string
 /// such as `"#eb7a34"`. Both handle classes wear colours the same way.
 pub(crate) fn set_color_on(id: NodeId, value: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -383,6 +391,49 @@ impl Object {
         with_scene(|scene| scene.color_hex(self.id))
     }
 
+    /// What a light shines as: `"point"` for a lamp giving light out of one place,
+    /// `"sun"` for daylight thrown from everywhere in one direction. Read, not
+    /// written: the sun the world is lit by is the one the scene was born with.
+    #[getter]
+    fn shape(&self) -> PyResult<String> {
+        with_scene(|scene| Ok(scene.light_shape(self.id)?.name().to_owned()))
+    }
+
+    /// How strongly a light lights, where 1 is what it was born with. Past that it is
+    /// brighter, and 0 leaves it dark. Light nodes only.
+    #[getter]
+    fn brightness(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.brightness(self.id))
+    }
+
+    #[setter]
+    fn set_brightness(&self, value: f32) -> PyResult<()> {
+        with_scene(|scene| scene.set_brightness(self.id, value))
+    }
+
+    /// Metres of world a lamp reaches: past the end of it it lights nothing at all.
+    #[getter]
+    fn reach(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.reach(self.id))
+    }
+
+    #[setter]
+    fn set_reach(&self, value: f32) -> PyResult<()> {
+        with_scene(|scene| scene.set_reach(self.id, value))
+    }
+
+    /// How this light lays what it gives: `"straight"` or `"blocky"`. A light nobody
+    /// wrote on follows `carbine.lightType`, the world's own answer.
+    #[getter]
+    fn r#type(&self) -> PyResult<String> {
+        with_scene(|scene| Ok(scene.light_type(self.id)?.name().to_owned()))
+    }
+
+    #[setter]
+    fn set_type(&self, name: &str) -> PyResult<()> {
+        with_scene(|scene| scene.set_light_type_name(self.id, name))
+    }
+
     /// How round the corners are, in pixels. UI elements only.
     #[getter]
     fn corner(&self) -> PyResult<f32> {
@@ -482,6 +533,18 @@ impl Object {
     #[setter(gravityPull)]
     fn set_gravity_pull(&self, value: f64) -> PyResult<()> {
         set_gravity_pull_on(self.id, value as f32)
+    }
+
+    /// Kilograms. Left unwritten, an object weighs its box at two hundred
+    /// kilograms to the cubic metre, so a metre cube is 200.
+    #[getter]
+    fn mass(&self) -> PyResult<f32> {
+        mass_of(self.id)
+    }
+
+    #[setter]
+    fn set_mass(&self, value: f64) -> PyResult<()> {
+        set_mass_on(self.id, value as f32)
     }
 
     /// In the solver, or out of it. False until a script says otherwise, and a

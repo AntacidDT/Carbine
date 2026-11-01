@@ -6,7 +6,7 @@
 //! are switched on refuse to share the same meters — and owe each other whatever
 //! `damage` says that is worth.
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::geometry::{self, Solid};
 use crate::motion::Motion;
@@ -30,7 +30,8 @@ const UP: Vec3 = Vec3::Z;
 
 /// Per second, how much of a sliding body's sideways speed the floor eats. The
 /// solver has no friction of its own, so without this a shove from a quake, a gust
-/// or a blast would keep a crate moving long after the weather had stopped.
+/// or a blast would keep a crate moving long after the weather had stopped. A
+/// vehicle with a driver on the controls is the one body this never touches.
 const FLOOR_DRAG: f32 = 3.0;
 
 /// Anything the solver may put somewhere, or hold exactly where it is.
@@ -41,6 +42,8 @@ struct Body {
     solid: Solid,
     /// Whether a push may move it. Scenery holds its ground.
     movable: bool,
+    /// Kilograms. Two bodies that may both move divide the push by it.
+    mass: f32,
     /// The player, which gives way to a wall but never to a crate it walks into.
     player: bool,
 }
@@ -57,6 +60,9 @@ impl Scene {
         self.step_player(dt);
         self.count_down_hits(dt);
         self.run_disasters(dt);
+        // A driver's wishes are read before anything moves, so the speed they ask for is
+        // the speed the solver integrates this step rather than the one after it.
+        self.step_vehicles(dt);
 
         for id in self.node_tree() {
             self.integrate(id, dt);
@@ -64,26 +70,54 @@ impl Scene {
 
         self.push_apart();
         self.hurt_by_contacts();
+        // Riders come last of the things that move: they are held where their seats
+        // ended up, so nothing has to wait for a car to settle before its driver is
+        // drawn in it.
+        self.place_seats();
+        // The player's eyes ride the same seat its body was just welded to, so the
+        // camera below it looks out of a car that has already been driven.
+        self.ride_seat();
         self.follow_camera();
         self.place_body();
         self.run_particles(dt);
     }
 
-    /// Pulls one node down unless it is anchored or has no gravity. The floor is
-    /// the one thing every falling body meets before its own collider is asked.
+    /// Pulls one node down unless it is anchored or has no gravity, and turns one
+    /// the drive model has spun. The floor is the one thing every falling body meets
+    /// before its own collider is asked.
     fn integrate(&mut self, id: NodeId, dt: f32) {
         let Ok(motion) = self.component::<Motion>(id) else {
             return;
         };
-        if motion.anchored || !motion.gravity {
+        if motion.anchored {
             return;
         }
+        // A body riding in a seat is not its own to move: the step puts it where the
+        // seat is, and gravity or a wheel has no claim on it until it gets out.
+        if self.rides_a_seat(id) {
+            return;
+        }
+        let spin = motion.spin;
+        let gravity = motion.gravity;
+        let pull = motion.gravity_pull;
         let mut velocity = motion.velocity;
         let Ok(transform) = self.transform(id) else {
             return;
         };
 
-        velocity.z -= motion.gravity_pull * dt;
+        // A spin is a turn the drive model asked for, and it is taken here rather than
+        // there so that a body has exactly one place the world moves it: an anchored
+        // car is not allowed to roll, and so is not allowed to pivot either.
+        if spin != 0.0 {
+            let turned = Quat::from_rotation_z(spin.to_radians() * dt) * transform.rotation;
+            if self.set_rotation(id, turned).is_err() {
+                return;
+            }
+        }
+        if !gravity {
+            return;
+        }
+        velocity.z -= pull * dt;
         let mut position = transform.position + velocity * dt;
 
         let size = self.vec_field(id, VecField::Size).unwrap_or(Vec3::ONE);
@@ -101,10 +135,15 @@ impl Scene {
                 velocity.z = 0.0;
             }
             // A body brought to the floor this step is sliding on it, and a floor
-            // with no grip at all never lets go of the speed a disaster gave it.
-            let grip = (-FLOOR_DRAG * dt).exp();
-            velocity.x *= grip;
-            velocity.y *= grip;
+            // with no grip at all never lets go of the speed a disaster gave it. A
+            // vehicle a driver is asking something of is not sliding: its tyres have
+            // already said how fast it goes this step, and the floor does not
+            // second-guess them.
+            if !self.is_driven(id) {
+                let grip = (-FLOOR_DRAG * dt).exp();
+                velocity.x *= grip;
+                velocity.y *= grip;
+            }
         }
 
         if self
@@ -176,13 +215,20 @@ impl Scene {
         let mut bodies = Vec::new();
         let player = self.player;
 
+        // A player sitting in a seat takes up the room its car already takes up: the
+        // person's own hull would shove the vehicle it rides in, so the solver is told
+        // the car is the body and nothing else.
         if player.enabled
+            && !self.rides_somewhere()
             && let Some(solid) = player_hull(&player)
         {
             bodies.push(Body {
                 node: player.body,
                 solid,
                 movable: true,
+                // A person's share of a push is settled by the rule below, not by
+                // their weight, so this figure is never asked.
+                mass: 0.0,
                 player: true,
             });
         }
@@ -193,10 +239,16 @@ impl Scene {
             if player.enabled && player.body == Some(id) {
                 continue;
             }
+            // A rider is inside the car it sits in, and a body that is inside another
+            // body would spend the step fighting its way out of it.
+            if self.rides_a_seat(id) {
+                continue;
+            }
             bodies.push(Body {
                 node: Some(id),
                 solid,
                 movable: self.is_dynamic(id).unwrap_or(false),
+                mass: self.mass_of(id),
                 player: false,
             });
         }
@@ -318,8 +370,9 @@ fn player_hull(player: &PlayerController) -> Option<Solid> {
 }
 
 /// How a pair divides the push. Scenery keeps its ground and whatever ran into it
-/// gives way entirely; two falling bodies split it; the player never yields to a
-/// crate it walks into, only to a wall. `None` is a pair with nobody to move.
+/// gives way entirely; two falling bodies split it by weight, each giving way in
+/// proportion to how heavy the other is; the player never yields to a crate it
+/// walks into, only to a wall. `None` is a pair with nobody to move.
 fn gives_way(a: &Body, b: &Body) -> Option<(f32, f32)> {
     match (a.movable, b.movable) {
         (false, false) => None,
@@ -327,7 +380,13 @@ fn gives_way(a: &Body, b: &Body) -> Option<(f32, f32)> {
         (false, true) => Some((0.0, 1.0)),
         (true, true) if a.player => Some((0.0, 1.0)),
         (true, true) if b.player => Some((1.0, 0.0)),
-        (true, true) => Some((0.5, 0.5)),
+        (true, true) => {
+            let total = a.mass + b.mass;
+            if total <= 0.0 || !total.is_finite() {
+                return Some((0.5, 0.5));
+            }
+            Some((b.mass / total, a.mass / total))
+        }
     }
 }
 
@@ -407,6 +466,76 @@ mod tests {
         scene.set_gravity_pull(id, 0.0).unwrap();
         scene.step(1.0);
         assert_eq!(height(&scene, id), 10.0);
+    }
+
+    /// What a body is pointing at, in degrees about the upright axis.
+    fn yaw(scene: &Scene, id: NodeId) -> f32 {
+        scene.vec_field(id, VecField::RotationEuler).unwrap().z
+    }
+
+    fn spin(scene: &mut Scene, id: NodeId, rate: f32) {
+        scene.component_mut::<Motion>(id).unwrap().spin = rate;
+    }
+
+    #[test]
+    fn a_spun_body_turns_on_the_spot() {
+        let (mut scene, id) = dropped(0.0, 10.0);
+        scene.set_uses_gravity(id, false).unwrap();
+        spin(&mut scene, id, 90.0);
+
+        // Ten tenths of a second, because a step is never longer than a tenth: a
+        // quarter turn written as ninety degrees a second takes a second of steps.
+        for _ in 0..10 {
+            scene.step(0.1);
+        }
+
+        assert!(
+            yaw(&scene, id) > 89.9 && yaw(&scene, id) < 90.1,
+            "{}",
+            yaw(&scene, id)
+        );
+        let position = scene.vec_field(id, VecField::Position).unwrap();
+        assert_eq!(position, Vec3::new(0.0, 0.0, 10.0), "and turns only");
+    }
+
+    #[test]
+    fn an_anchored_body_holds_its_direction() {
+        let (mut scene, id) = dropped(0.0, 10.0);
+        spin(&mut scene, id, 90.0);
+        scene.set_anchored(id, true).unwrap();
+
+        for _ in 0..10 {
+            scene.step(0.1);
+        }
+
+        assert_eq!(yaw(&scene, id), 0.0, "a pinned car cannot be steered");
+    }
+
+    #[test]
+    fn a_body_turns_while_it_falls_and_still_spins_after_it_lands() {
+        let (mut scene, id) = dropped(EARTH_GRAVITY_PULL, 10.0);
+        spin(&mut scene, id, 60.0);
+
+        scene.step(0.1);
+        assert!(yaw(&scene, id) > 5.9 && yaw(&scene, id) < 6.1);
+        assert!(
+            height(&scene, id) < 10.0,
+            "the turn did not cancel the fall"
+        );
+
+        let nose = scene.rotation(id).unwrap() * Vec3::X;
+        for _ in 0..300 {
+            scene.step(1.0 / 60.0);
+        }
+        assert!(
+            (height(&scene, id) - 0.5).abs() < 1e-3,
+            "and it came to the floor normally"
+        );
+        let turned = scene.rotation(id).unwrap() * Vec3::X;
+        assert!(
+            nose.distance(turned) > 0.1,
+            "spinning is not something a floor stops"
+        );
     }
 
     #[test]
@@ -562,6 +691,23 @@ mod tests {
         );
         assert!((top.z - 1.5).abs() < 1e-2, "and the other on top: {top}");
         assert!(scene.touches(upper).contains(&lower));
+    }
+
+    #[test]
+    fn an_anvil_barely_gives_way_to_a_bolt() {
+        let mut scene = Scene::new();
+        let anvil = falling(&mut scene, Vec3::new(0.0, 0.0, 5.0));
+        let bolt = falling(&mut scene, Vec3::new(0.8, 0.0, 5.0));
+        scene.set_mass(anvil, 2_000.0).unwrap();
+        scene.set_mass(bolt, 0.05).unwrap();
+
+        // Twenty centimetres of the two boxes is shared out between them.
+        scene.step(1.0 / 60.0);
+
+        let anvil = scene.vec_field(anvil, VecField::Position).unwrap().x;
+        let bolt = scene.vec_field(bolt, VecField::Position).unwrap().x - 0.8;
+        assert!(bolt > 0.19, "the bolt takes nearly all of it: {bolt}");
+        assert!(anvil.abs() < 1e-3, "and the anvil the rest: {anvil}");
     }
 
     #[test]

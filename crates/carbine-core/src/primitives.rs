@@ -39,7 +39,7 @@ pub fn default_name(kind: &str) -> String {
 
 /// A one meter cube centred on the origin, so `size = (length, width, height)`
 /// scales it directly. Each face carries its own normal and a full set of UVs.
-fn cube() -> MeshData {
+pub(crate) fn cube() -> MeshData {
     // Normal, then four corners in the order that winds counter-clockwise as
     // seen from outside the face.
     const FACES: [(Vec3, [Vec3; 4]); 6] = [

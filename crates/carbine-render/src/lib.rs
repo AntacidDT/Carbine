@@ -566,7 +566,7 @@ impl Offscreen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use carbine_core::{CameraMode, LightQuality, NodeId, Scene, Vec3, VecField};
+    use carbine_core::{CameraMode, LightQuality, LightType, NodeId, Scene, Vec3, VecField};
 
     fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 3] {
         let offset = ((y * width + x) * 4) as usize;
@@ -580,6 +580,34 @@ mod tests {
         let mut scene = Scene::new();
         scene.set_light_quality(LightQuality::Low);
         scene
+    }
+
+    /// The rung that casts, asked to lay its edges in steps. The shade numbers below
+    /// were read off that look, and a woven edge reaches the same places by a
+    /// different road, so a fixture that says "forty darker" names the staircase it
+    /// was measured on.
+    fn stepped(scene: &mut Scene) {
+        scene.set_light_style(LightType::Blocky);
+        scene.set_light_quality(LightQuality::Medium);
+    }
+
+    /// How a column of pixels is built: how often its brightness changes, and how
+    /// many pixels in a row hold one brightness. A stepped edge changes a handful of
+    /// times over long runs; a woven one changes nearly every pixel.
+    fn weave(column: &[u8]) -> (usize, usize) {
+        let mut changes = 0;
+        let mut longest = 1;
+        let mut run = 1;
+        for pair in column.windows(2) {
+            if pair[0] == pair[1] {
+                run += 1;
+            } else {
+                changes += 1;
+                run = 1;
+            }
+            longest = longest.max(run);
+        }
+        (changes, longest)
     }
 
     /// The frame the pixel assertions are written against: a top down
@@ -719,6 +747,106 @@ mod tests {
         );
     }
 
+    /// The sun is a node, so what it throws is a colour and a strength rather than a
+    /// given: switched off, the world is lit at ambient alone, and coloured, the light
+    /// it leaves on a white floor is that colour.
+    #[test]
+    fn the_sun_is_a_node_whose_colour_and_strength_the_world_is_lit_by() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = bare();
+        flat(&mut scene);
+        card(
+            &mut scene,
+            "rectangle",
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::ZERO,
+            [1.0, 1.0, 1.0],
+        );
+        let sun = scene.sun().unwrap();
+
+        let lit = renderer.read_pixels(&scene).unwrap();
+        assert_eq!(
+            pixel(&lit, 64, 32, 32),
+            [255, 255, 255],
+            "the floor looks straight into the sun the world was born with"
+        );
+
+        scene.set_brightness(sun, 0.0).unwrap();
+        let dark = renderer.read_pixels(&scene).unwrap();
+        let ambient = pixel(&dark, 64, 32, 32);
+        assert!(
+            (70..=82).contains(&ambient[0]) && ambient[0] == ambient[2],
+            "a switched off sun leaves the scene's ambient: {ambient:?}"
+        );
+
+        scene.set_brightness(sun, 1.0).unwrap();
+        scene
+            .set_vec_field(sun, VecField::Color, Vec3::new(1.0, 0.0, 0.0))
+            .unwrap();
+        let red = renderer.read_pixels(&scene).unwrap();
+        let tinted = pixel(&red, 64, 32, 32);
+        assert_eq!(tinted[0], 255, "the red of a red sun arrives");
+        assert!(
+            (70..=82).contains(&tinted[1]),
+            "and its green is only the ambient: {tinted:?}"
+        );
+    }
+
+    /// A lamp on its own, with the sun switched off: the floor it reaches is bright,
+    /// the floor past its reach is exactly the dark it was before the lamp existed, and
+    /// a longer reach takes in what the short one could not.
+    #[test]
+    fn a_lamp_lights_the_floor_it_reaches_and_nothing_past_it() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = bare();
+        flat(&mut scene);
+        scene.set_brightness(scene.sun().unwrap(), 0.0).unwrap();
+        card(
+            &mut scene,
+            "rectangle",
+            Vec3::new(2.0, 2.0, 1.0),
+            Vec3::ZERO,
+            [1.0, 1.0, 1.0],
+        );
+
+        let alone = renderer.read_pixels(&scene).unwrap();
+        let lamp = scene.create_light(None, None).unwrap();
+        scene.set_reach(lamp, 0.5).unwrap();
+        scene
+            .set_vec_field(lamp, VecField::Position, Vec3::new(0.0, 0.0, 0.2))
+            .unwrap();
+
+        let lit = renderer.read_pixels(&scene).unwrap();
+        let middle = pixel(&lit, 64, 32, 32);
+        let dark = pixel(&alone, 64, 32, 32);
+        assert!(
+            middle[0] as u32 > dark[0] as u32 + 40,
+            "the lamp stands in the middle of the floor it reaches: {middle:?} against {dark:?}"
+        );
+        assert_eq!(
+            pixel(&lit, 64, 4, 32),
+            pixel(&alone, 64, 4, 32),
+            "the far edge stands past the reach, in the same dark"
+        );
+
+        scene.set_reach(lamp, 4.0).unwrap();
+        let wider = renderer.read_pixels(&scene).unwrap();
+        assert!(
+            pixel(&wider, 64, 4, 32)[0] > pixel(&lit, 64, 4, 32)[0],
+            "a longer reach takes in what the short one could not"
+        );
+
+        // A blocky lamp takes its falloff in four steps, so the same place where a
+        // straight lamp is a fifth of the way down a smooth run sits a step lower.
+        scene.set_reach(lamp, 0.5).unwrap();
+        scene.set_light_type_name(lamp, "blocky").unwrap();
+        let stepped = renderer.read_pixels(&scene).unwrap();
+        assert!(
+            pixel(&stepped, 64, 32, 32)[0] < middle[0],
+            "and a stepped falloff is dimmer than the straight one at the same place"
+        );
+    }
+
     #[test]
     fn a_wall_throws_a_shade_only_once_the_light_starts_casting() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();
@@ -730,47 +858,352 @@ mod tests {
         scene.set_camera_mode(CameraMode::Orthographic);
         scene.set_camera_position(Vec3::new(0.0, 0.0, 10.0));
         scene.set_camera_target(Vec3::ZERO);
-        scene.set_camera_view_height(2.0);
+        scene.set_camera_view_height(8.0);
         card(
             &mut scene,
             "rectangle",
-            Vec3::new(2.0, 2.0, 1.0),
+            Vec3::new(10.0, 10.0, 1.0),
             Vec3::ZERO,
             [0.8, 0.8, 0.8],
         );
         card(
             &mut scene,
             "cube",
-            Vec3::new(0.4, 0.4, 1.0),
-            Vec3::new(0.0, 0.0, 0.5),
+            Vec3::new(4.0, 0.4, 6.0),
+            Vec3::new(0.0, -1.0, 3.0),
             [0.8, 0.8, 0.8],
         );
 
-        // Half a metre of floor on the far side of the wall, and the same distance
-        // on the near side where the sun has nothing standing in front of it. Both
-        // are the same floor, the same colour and the same face.
+        // Metres of floor on the far side of the wall, and the same on the near
+        // side where the sun has nothing standing in front of it. Both are the same
+        // floor, the same colour and the same face, and both sit well inside or well
+        // out of the shade so that the blurred edge of it is neither one.
         let mut at = |scene: &Scene, row: u32| {
             let pixels = renderer.read_pixels(scene).unwrap();
             pixel(&pixels, 64, 32, row)
         };
 
-        let bare_shade = at(&scene, 16);
-        let bare_lit = at(&scene, 48);
-        println!("TEMP low: {bare_shade:?} {bare_lit:?}");
-        assert_eq!(bare_shade[0], bare_lit[0], "TEMP");
+        let bare_shade = at(&scene, 20);
+        let bare_lit = at(&scene, 60);
+        assert_eq!(
+            bare_shade, bare_lit,
+            "a rung that casts nothing has no shade to throw"
+        );
 
-        scene.set_light_quality(LightQuality::Medium);
-        let cast_shade = at(&scene, 16);
-        let cast_lit = at(&scene, 48);
+        stepped(&mut scene);
+        let cast_shade = at(&scene, 20);
+        let cast_lit = at(&scene, 60);
 
         assert!(
-            cast_shade[0] + 40 < bare_shade[0],
-            "the floor behind the wall should now be in shade: {cast_shade:?} against {bare_shade:?}"
+            cast_shade[0] + 40 < cast_lit[0],
+            "the same floor beyond the wall should now be in shade: \
+             {cast_shade:?} against {cast_lit:?}"
         );
         assert!(
-            (cast_lit[0] as i32 - bare_lit[0] as i32).abs() <= 16,
-            "the sun that does reach the floor should light it the same way it always did: \
+            cast_lit[0] + 16 >= bare_lit[0],
+            "the sun that still reaches the near floor should not have been lost: \
              {cast_lit:?} against {bare_lit:?}"
+        );
+    }
+
+    #[test]
+    fn the_sky_lends_its_colour_to_the_face_the_sun_leaves_out() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = bare();
+        // A backdrop that is green along the horizon and blue overhead, with no
+        // grain in it, so a pixel that keeps any red at all is the cube and not the
+        // air: the mix of those two colours has none.
+        scene.set_sky_enabled(true);
+        scene.set_sky_noise(0.0);
+        scene.set_sky_zenith(Vec3::Z);
+        scene.set_sky_horizon(Vec3::Y);
+        scene.set_sky_sun(Vec3::X);
+        scene.set_camera_mode(CameraMode::Orthographic);
+        scene.set_camera_position(Vec3::new(0.0, -4.0, 0.0));
+        scene.set_camera_target(Vec3::ZERO);
+        scene.set_camera_view_height(2.0);
+        card(&mut scene, "cube", Vec3::ONE, Vec3::ZERO, [1.0, 1.0, 1.0]);
+
+        let low = renderer.read_pixels(&scene).unwrap();
+        stepped(&mut scene);
+        let cast = renderer.read_pixels(&scene).unwrap();
+        let low = low.as_chunks::<4>().0;
+        let cast = cast.as_chunks::<4>().0;
+
+        // The face square to the eyes is edge on to the sun, so at `low` it is the
+        // scene's flat ambient and nothing else.
+        let face: Vec<usize> = low
+            .iter()
+            .enumerate()
+            .filter(|(_, pixel)| pixel[0] > 60 && pixel[0] < 90 && pixel[1] == pixel[0])
+            .map(|(place, _)| place)
+            .collect();
+        assert!(
+            face.len() > 100,
+            "the white cube should cover a patch of the frame: {}",
+            face.len()
+        );
+
+        // From `medium` up that same face is lit by the sky over it, which at the
+        // horizon is green: no red left, the green it was never given.
+        let filled = face
+            .iter()
+            .filter(|place| cast[**place][0] < 20 && cast[**place][1] > 200)
+            .count();
+        assert_eq!(
+            filled,
+            face.len(),
+            "every pixel of the face the sun leaves out should take the sky's own colour"
+        );
+    }
+
+    #[test]
+    fn the_sun_comes_back_off_a_floor_squared_at_it() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = bare();
+        scene.set_sky_enabled(false);
+        scene.set_sky_sun(Vec3::new(0.0, -1.0, 1.0).normalize());
+        scene.set_camera_position(Vec3::new(0.0, 8.0, 4.0));
+        scene.set_camera_target(Vec3::ZERO);
+        card(
+            &mut scene,
+            "rectangle",
+            Vec3::new(20.0, 20.0, 1.0),
+            Vec3::ZERO,
+            [0.4, 0.4, 0.4],
+        );
+
+        // A flat floor lit by one sun is the same brightness everywhere it shows:
+        // every pixel of it faces the sun the same way, so anything that varies from
+        // the bare lambert answer is the sheen coming back off the air.
+        let low = renderer.read_pixels(&scene).unwrap();
+        stepped(&mut scene);
+        let wet = renderer.read_pixels(&scene).unwrap();
+        let low = low.as_chunks::<4>().0;
+        let wet = wet.as_chunks::<4>().0;
+
+        let floor: Vec<usize> = low
+            .iter()
+            .enumerate()
+            .filter(|(_, pixel)| pixel[0] > 70 && pixel[0] < 90 && pixel[1] == pixel[0])
+            .map(|(place, _)| place)
+            .collect();
+        assert!(
+            floor.len() > 200,
+            "the floor should fill most of the frame: {}",
+            floor.len()
+        );
+        let same: Vec<u8> = floor.iter().map(|place| low[*place][0]).collect();
+        assert!(
+            same.iter().all(|red| *red == same[0]),
+            "a bare lambert floor cannot vary: {:?}",
+            same.iter().collect::<std::collections::HashSet<_>>()
+        );
+
+        let brightest = floor.iter().map(|place| wet[*place][0]).max().unwrap();
+        assert!(
+            brightest > same[0] + 10,
+            "the sun should glare off the place where the floor is squared at it: \
+             {brightest} against {}",
+            same[0]
+        );
+    }
+
+    /// The frame both looks are read at: a floor with a cube standing in a forty five
+    /// degree sun, framed on the far end of the cube's shade. The shade ends about a
+    /// metre and a half past the cube's own side, because the top of a two metre cube
+    /// over a one metre floor is a metre and a half of height to cast with. The view
+    /// height says how much of the world the frame shows, and so how many pixels the
+    /// end of a shade is spread over.
+    fn shade_end(view_height: f32) -> Scene {
+        let mut scene = bare();
+        scene.set_sky_enabled(false);
+        scene.set_sky_sun(Vec3::new(0.0, -1.0, 1.0).normalize());
+        scene.set_camera_mode(CameraMode::Orthographic);
+        scene.set_camera_position(Vec3::new(0.0, 2.0, 10.0));
+        scene.set_camera_target(Vec3::new(0.0, 2.0, 0.0));
+        scene.set_camera_view_height(view_height);
+        card(
+            &mut scene,
+            "rectangle",
+            Vec3::new(40.0, 40.0, 1.0),
+            Vec3::ZERO,
+            [0.8, 0.8, 0.8],
+        );
+        card(
+            &mut scene,
+            "cube",
+            Vec3::new(1.0, 1.0, 2.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            [0.8, 0.8, 0.8],
+        );
+        scene
+    }
+
+    /// The grain a person sees when a shade's edge is drawn straight, counted where it
+    /// can show: the end of the shade, read down three columns of the frame so that no
+    /// one place an edge happens to fall carries the answer. A woven end is a fade, and
+    /// a fade runs one way.
+    #[test]
+    fn a_woven_shade_end_fades_instead_of_speckling() {
+        for rung in [
+            LightQuality::Medium,
+            LightQuality::High,
+            LightQuality::Extra,
+        ] {
+            let mut renderer = Renderer::offscreen(64, 64).unwrap();
+            let mut scene = shade_end(1.6);
+            scene.set_light_quality(rung);
+            scene.set_light_style(LightType::Straight);
+            let pixels = renderer.read_pixels(&scene).unwrap();
+
+            for column in [16, 32, 48] {
+                let lit: Vec<u8> = (0..64)
+                    .map(|row| pixel(&pixels, 64, column, row)[0])
+                    .collect();
+                let end = ending(&lit);
+                assert!(
+                    reversals(end) <= 2,
+                    "{} wove {} levels of brightness back into a shade that should only \
+                     be fading: {end:?}",
+                    rung.name(),
+                    reversals(end),
+                );
+                let rough = roughness(end);
+                assert!(
+                    rough <= 4.0,
+                    "{} lays the end of a shade {} levels rough, which is a zigzag and \
+                     not a fade: {end:?}",
+                    rung.name(),
+                    rough,
+                );
+            }
+        }
+    }
+
+    /// The stretch of a column on which a look can be read at all: the end of the
+    /// shade, from the edge of the umbra to the floor the sun reaches. Anywhere else a
+    /// column is open floor or the shadow of the thing standing on it, and both are
+    /// one brightness whichever way the edge is drawn, so a run measured across a whole
+    /// column mostly counts the floor and not the look.
+    fn ending(column: &[u8]) -> &[u8] {
+        let darkest = *column.iter().min().unwrap();
+        let lightest = *column.iter().max().unwrap();
+        let first = column.iter().position(|value| *value == darkest).unwrap();
+        let last = column.iter().rposition(|value| *value == darkest).unwrap();
+        // The sun reaches the column from whichever end is the brighter one, so the
+        // shade ends on that side of its own darkest run.
+        if column[0] > column[column.len() - 1] {
+            let from = (0..first)
+                .rev()
+                .find(|index| column[*index] + 1 >= lightest)
+                .unwrap_or(0);
+            &column[from..=first]
+        } else {
+            let to = (last + 1..column.len())
+                .find(|index| column[*index] + 1 >= lightest)
+                .unwrap_or(column.len() - 1);
+            &column[last..=to]
+        }
+    }
+
+    /// How much a column changes by more than the shade it lies on asks for: the
+    /// average of its second differences, which a ramp falling at an even rate answers
+    /// with nothing and a saw-tooth of one brightness per pixel answers in full. A
+    /// stepped edge is a staircase and a grainy one is a zigzag, and both are rough;
+    /// a woven edge that a person calls smooth is neither.
+    fn roughness(column: &[u8]) -> f32 {
+        let steps: Vec<f32> = column
+            .windows(3)
+            .map(|three| f32::from(three[0]) - 2.0 * f32::from(three[1]) + f32::from(three[2]))
+            .collect();
+        if steps.is_empty() {
+            0.0
+        } else {
+            steps.iter().map(|step| step.abs()).sum::<f32>() / steps.len() as f32
+        }
+    }
+
+    /// How much brightness a column gives back on its way into the shade. A fade
+    /// answers with nothing; a weave that lays a different handful of readings in
+    /// every pixel climbs again where its neighbour fell, and that swing is the grain
+    /// a person sees. A column only ever gives back less than it was paid, so the
+    /// smaller of its two totals is what it gave back, which way ever it runs.
+    fn reversals(column: &[u8]) -> u32 {
+        let (rises, falls) = column.windows(2).fold((0_u32, 0_u32), |ran, pair| {
+            let (up, down) = ran;
+            if pair[1] > pair[0] {
+                (up + u32::from(pair[1] - pair[0]), down)
+            } else {
+                (up, down + u32::from(pair[0] - pair[1]))
+            }
+        });
+        rises.min(falls)
+    }
+
+    #[test]
+    fn a_straight_edge_weaves_where_a_blocky_one_lays_steps() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        // Framed on the end of the shade, close enough that one texel of the cast is
+        // several pixels across: the distance a staircase has room to show itself at.
+        let mut scene = shade_end(1.6);
+        scene.set_light_quality(LightQuality::Medium);
+
+        let mut down = |scene: &Scene| -> Vec<u8> {
+            let pixels = renderer.read_pixels(scene).unwrap();
+            (0..64).map(|row| pixel(&pixels, 64, 32, row)[0]).collect()
+        };
+
+        scene.set_light_style(LightType::Blocky);
+        let blocky = down(&scene);
+        scene.set_light_style(LightType::Straight);
+        let straight = down(&scene);
+
+        // The look only says how the edge is drawn; a shade is a shade either way.
+        let spread = |column: &[u8]| -> i32 {
+            i32::from(*column.iter().max().unwrap()) - i32::from(*column.iter().min().unwrap())
+        };
+        assert!(
+            spread(&blocky) > 40 && spread(&straight) > 40,
+            "both looks should still lay the same shade: {} against {}",
+            spread(&blocky),
+            spread(&straight)
+        );
+
+        // The look is only drawn on the end of a shade, so that is where it is read:
+        // the umbra and the open floor are one brightness in either look.
+        let (blocky_steps, blocky_plate) = weave(ending(&blocky));
+        let (straight_steps, straight_plate) = weave(ending(&straight));
+        assert!(
+            blocky_plate >= 3,
+            "a texel several pixels across should hold one brightness that long: {blocky_plate}"
+        );
+        assert!(
+            straight_steps > blocky_steps * 2,
+            "a woven edge changes brightness far oftener than a stepped one: \
+             {straight_steps} against {blocky_steps}"
+        );
+        assert!(
+            straight_plate * 2 < blocky_plate,
+            "the same run breaks up once the edge is woven: {straight_plate} against \
+             {blocky_plate}"
+        );
+    }
+
+    #[test]
+    fn the_bare_world_is_the_bare_world_whatever_the_light_type_says() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = bare();
+        flat(&mut scene);
+        card(&mut scene, "cube", Vec3::ONE, Vec3::ZERO, [1.0, 0.0, 0.0]);
+
+        scene.set_light_style(LightType::Straight);
+        let straight = renderer.read_pixels(&scene).unwrap();
+        scene.set_light_style(LightType::Blocky);
+        let blocky = renderer.read_pixels(&scene).unwrap();
+        assert_eq!(
+            straight, blocky,
+            "a rung that draws no edge has no look to draw it with"
         );
     }
 
@@ -913,6 +1346,69 @@ mod tests {
             pixel(&pixels, 64, 32, 2)
         );
         assert_eq!(pixel(&pixels, 64, 32, 62), [255, 255, 255]);
+    }
+
+    /// The dust a fresh backdrop carries, read through a lens narrow enough that one
+    /// blob of it lies across a dozen pixels: an eight degree lens shows five degrees
+    /// of the dome, and the haze is laid a degree and a half wide, so a run down the
+    /// frame is a handful of blobs and not a throw of the dice per pixel.
+    ///
+    /// A static answers a separate question in every pixel: over a run of this reach it
+    /// costs about seven levels of roughness and gives back most of the brightness it
+    /// walked. A haze a pixel shares with its neighbours costs about one and gives back a
+    /// tenth. Being centred, it never tints the backdrop it lies on, and being drawn at
+    /// all, it leaves its mark somewhere on the frame.
+    #[test]
+    fn the_backdrop_carries_its_dust_as_a_haze_and_not_a_static() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = bare();
+        scene.set_camera_mode(CameraMode::Perspective);
+        scene.set_camera_fov(8.0);
+        scene.set_camera_position(Vec3::new(0.0, 0.0, 0.0));
+        scene.set_camera_target(Vec3::new(0.0, -1.0, 0.6));
+
+        scene.set_sky_noise(0.0);
+        let still = renderer.read_pixels(&scene).unwrap();
+        scene.set_sky_noise(Scene::new().sky().noise);
+        let dusty = renderer.read_pixels(&scene).unwrap();
+
+        assert_ne!(
+            still, dusty,
+            "the dust the backdrop is asked to carry is not drawn"
+        );
+
+        let mean =
+            |run: &[u8]| run.iter().map(|level| f32::from(*level)).sum::<f32>() / run.len() as f32;
+
+        for column in [16, 32, 48] {
+            let without: Vec<u8> = (0..64)
+                .map(|row| pixel(&still, 64, column, row)[0])
+                .collect();
+            let with: Vec<u8> = (0..64)
+                .map(|row| pixel(&dusty, 64, column, row)[0])
+                .collect();
+
+            let rough = roughness(&with);
+            assert!(
+                rough <= 2.0,
+                "the backdrop is laid {} levels rough, which is a static and not a haze: \
+                 {with:?}",
+                rough,
+            );
+            let gave_back = reversals(&with);
+            assert!(
+                gave_back <= 24,
+                "the backdrop gives back {gave_back} levels of its own run, which is a \
+                 static and not a haze: {with:?}"
+            );
+            assert!(
+                (mean(&with) - mean(&without)).abs() <= 2.0,
+                "the dust moved the backdrop's colour, so it leans one way: {:?} against \
+                 {:?}",
+                mean(&with),
+                mean(&without),
+            );
+        }
     }
 
     #[test]
