@@ -50,44 +50,44 @@ def test_nothing_collides_until_a_script_says_so():
     box = carbine.new("cube")
     try:
         assert box.collision is False
-        assert box.collisionShape == "box", "the shape the body would be cut as"
+        assert box.collisionType == "box", "the type the body would be cut as"
 
         box.collision = True
         assert box.collision is True
         box.collision = False
         assert box.collision is False
-        assert box.collisionShape == "box", "switching off keeps the shape"
+        assert box.collisionType == "box", "switching off keeps the type"
     finally:
         box.destroy()
 
 
-def test_a_shape_is_cut_from_the_body_it_was_given():
+def test_a_type_is_cut_from_the_body_it_was_given():
     ball = carbine.new("sphere")
     try:
-        assert ball.collisionShape == "sphere", "a ball reads as round"
+        assert ball.collisionType == "sphere", "a ball reads as round"
 
-        for name in carbine.collisionShapes():
-            ball.collisionShape = name
-            assert ball.collisionShape == name
-            assert ball.collision is True, "writing a shape puts the body in the solver"
+        for name in carbine.collisionTypes():
+            ball.collisionType = name
+            assert ball.collisionType == name
+            assert ball.collision is True, "writing a type puts the body in the solver"
     finally:
         ball.destroy()
 
 
-def test_a_shape_is_written_the_way_a_script_types_it():
+def test_a_type_is_written_the_way_a_script_types_it():
     box = carbine.new("cube")
     try:
-        box.collisionShape = "  Ball "
-        assert box.collisionShape == "sphere"
+        box.collisionType = "  Ball "
+        assert box.collisionType == "sphere"
 
-        with pytest.raises(ValueError, match="box, sphere, capsule, mesh"):
-            box.collisionShape = "octahedron"
+        with pytest.raises(ValueError, match="box, sphere, mesh"):
+            box.collisionType = "octahedron"
     finally:
         box.destroy()
 
 
-def test_carbine_lists_the_shapes_it_accepts():
-    assert carbine.collisionShapes() == ["box", "sphere", "capsule", "mesh"]
+def test_carbine_lists_the_types_it_accepts():
+    assert carbine.collisionTypes() == ["box", "sphere", "mesh"]
 
 
 def test_a_ui_element_stays_out_the_solver():

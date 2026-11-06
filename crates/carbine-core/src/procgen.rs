@@ -9,7 +9,7 @@
 //!
 //! Nothing in here draws or spawns anything. It is the dice, not the game.
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 /// A number a world is generated from. Written by a script as an integer or as a
 /// word, which is hashed, so `Seed::of("pine")` is a biome a friend can type in
@@ -225,6 +225,60 @@ pub fn fbm2(x: f32, y: f32, seed: Seed, octaves: u32) -> f32 {
     fbm3(Vec3::new(x, y, 0.0), seed, octaves)
 }
 
+/// The whole number a wrapping coordinate is folded to, on the far side of zero as
+/// well as the near one.
+#[inline]
+fn wrap(value: i64, cells: i64) -> i64 {
+    ((value % cells) + cells) % cells
+}
+
+/// Value noise on a lattice that meets itself at the edges of a tile.
+///
+/// `u` and `v` are the position *across the tile*, 0..1, and the field is laid on
+/// `cells_x` by `cells_y` whole lattice cells inside it, so the last cell's far edge
+/// is the first cell's near edge: a texture painted with this wraps without a seam,
+/// which is the only way it can pave a floor. Uneven cell counts are the stretch that
+/// turns blotches into streaks, which is how blades of grass are made to lie one way.
+pub fn tile(u: f32, v: f32, cells_x: i64, cells_y: i64, seed: Seed) -> f32 {
+    let (cells_x, cells_y) = (cells_x.max(1), cells_y.max(1));
+    let at = Vec2::new(u * cells_x as f32, v * cells_y as f32);
+    let base = Vec2::new(at.x.floor(), at.y.floor());
+    let part = at - base;
+    let (ix, iy) = (base.x as i64, base.y as i64);
+    let (fx, fy) = (smooth(part.x), smooth(part.y));
+
+    let corner =
+        |dx: i64, dy: i64| lattice3(wrap(ix + dx, cells_x), wrap(iy + dy, cells_y), 0, seed);
+
+    let low = blend(corner(0, 0), corner(1, 0), fx);
+    let high = blend(corner(0, 1), corner(1, 1), fx);
+    blend(low, high, fy)
+}
+
+/// The wrapping field again and again at doubling detail. Each octave wraps at double
+/// the cells, which is still a whole number of them across the tile, so the sum meets
+/// its own edges exactly the way one pass does.
+pub fn fbm_tile(u: f32, v: f32, cells_x: i64, cells_y: i64, octaves: u32, seed: Seed) -> f32 {
+    let octaves = octaves.clamp(1, 8);
+    let mut total = 0.0f32;
+    let mut weight = 0.0f32;
+
+    for octave in 0..octaves {
+        let amplitude = 0.5f32.powi(octave as i32);
+        let shift = 1_i64 << octave;
+        total += tile(u, v, cells_x * shift, cells_y * shift, seed) * amplitude;
+        weight += amplitude;
+    }
+
+    total / weight
+}
+
+/// A dice roll keyed to one cell of a wrapping lattice, which is what a generated
+/// picture asks for a per-texel grain or one pebble out of a grid of them.
+pub fn tile_hash(x: i64, y: i64, cells_x: i64, cells_y: i64, seed: Seed) -> f32 {
+    lattice3(wrap(x, cells_x.max(1)), wrap(y, cells_y.max(1)), 0, seed)
+}
+
 /// The dice behind the `index`-th thing a generator lays out from `seed`.
 ///
 /// Rolling each position from its own index, rather than from one shared stream,
@@ -423,5 +477,77 @@ mod tests {
         assert_eq!(hash(at, seed), hash(at, seed));
         assert_ne!(hash(at, seed), hash(at + Vec3::new(0.0, 0.0, 0.001), seed));
         assert!((0.0..1.0).contains(&hash(at, seed)));
+    }
+
+    #[test]
+    fn a_wrapping_field_meets_its_own_edge() {
+        let seed = Seed::of("tile");
+
+        // The last cell's far edge is the first cell's near edge, so the field that
+        // crosses the right of a tile is the field that came in at its left.
+        for v in [0.0, 0.137, 0.5, 0.981] {
+            assert_eq!(
+                tile(0.0, v, 8, 8, seed),
+                tile(1.0, v, 8, 8, seed),
+                "the field did not close at v={v}"
+            );
+            assert_eq!(
+                tile(0.613, 0.0, 8, 8, seed),
+                tile(0.613, 1.0, 8, 8, seed),
+                "nor at the top"
+            );
+        }
+
+        // Stepping over the edge is not a jump: the field on the far side is the field
+        // it was heading for, which is what a seam is. Two unrelated halves of a lattice
+        // would differ by about a third of the field, not by an eighth of a cell's slope.
+        let before = tile(0.995, 0.25, 8, 8, seed);
+        let after = tile(1.005, 0.25, 8, 8, seed);
+        assert!(
+            (after - before).abs() < 0.15,
+            "{before} to {after} across the edge"
+        );
+
+        // A stretched field wraps too, which is how streaks lie along one axis of a tile.
+        assert_eq!(tile(0.0, 0.4, 64, 4, seed), tile(1.0, 0.4, 64, 4, seed));
+        assert_eq!(tile(0.3, 0.0, 64, 4, seed), tile(0.3, 1.0, 64, 4, seed));
+    }
+
+    #[test]
+    fn every_octave_of_a_wrapping_field_closes_at_the_same_place() {
+        let seed = Seed::of("tiled");
+
+        for octave in 1..=8 {
+            for v in [0.0, 0.25, 0.7] {
+                assert_eq!(
+                    fbm_tile(0.0, v, 4, 4, octave, seed),
+                    fbm_tile(1.0, v, 4, 4, octave, seed),
+                    "{octave} octaves did not line up"
+                );
+            }
+            assert!((0.0..=1.0).contains(&fbm_tile(0.31, 0.77, 4, 4, octave, seed)));
+        }
+
+        assert_ne!(
+            fbm_tile(0.31, 0.77, 4, 4, 1, seed),
+            fbm_tile(0.31, 0.77, 4, 4, 5, seed),
+            "an octave that changed nothing is not an octave"
+        );
+    }
+
+    #[test]
+    fn a_wrapping_roll_is_the_same_roll_on_either_side_of_the_tile() {
+        let seed = Seed::of("grain");
+
+        assert_eq!(
+            tile_hash(0, 3, 16, 16, seed),
+            tile_hash(16, 3, 16, 16, seed)
+        );
+        assert_eq!(
+            tile_hash(3, -1, 16, 16, seed),
+            tile_hash(3, 15, 16, 16, seed)
+        );
+        assert_ne!(tile_hash(3, 3, 16, 16, seed), tile_hash(4, 3, 16, 16, seed));
+        assert!((0.0..1.0).contains(&tile_hash(7, 9, 16, 16, seed)));
     }
 }

@@ -22,7 +22,7 @@ use crate::draw::local_matrix;
 use crate::motion::Motion;
 use crate::node::{
     Children, MAX_ALPHA, NodeId, NodeKind, NodeName, NodeTexture, ObjectColor, Opacity, Parent,
-    Scene, SceneError, Transform, Visible,
+    Scene, SceneError, TextureTiling, Transform, Visible,
 };
 
 /// The kind word `carbine.new()` takes for a light. It is not a shape the geometry
@@ -134,6 +134,7 @@ impl Scene {
                 ObjectColor(WHITE),
                 Opacity::default(),
                 NodeTexture::default(),
+                TextureTiling::default(),
                 Visible::default(),
                 Motion::default(),
                 Parent(parent_id),

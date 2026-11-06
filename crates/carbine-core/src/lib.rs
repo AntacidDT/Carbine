@@ -9,6 +9,7 @@ mod geometry;
 mod input;
 mod light;
 mod mesh;
+mod model;
 mod motion;
 mod node;
 mod particles;
@@ -17,6 +18,7 @@ mod player;
 mod primitives;
 mod procgen;
 mod sky;
+mod texture;
 mod ui;
 mod vehicle;
 
@@ -24,7 +26,7 @@ pub use atmosphere::{
     Atmosphere, DeviceKind, Gpu, Light, LightQuality, LightType, Precipitation, auto_quality,
 };
 pub use camera::{Camera, CameraMode, UP};
-pub use collision::ColliderShape;
+pub use collision::CollisionType;
 pub use disaster::{Disaster, DisasterKind};
 pub use draw::DrawItem;
 pub use geometry::{Contact, Solid};
@@ -32,6 +34,7 @@ pub use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 pub use input::{FrameInput, Input, KEYS, Key, MouseButton};
 pub use light::{KIND as LIGHT_KIND, LampItem, LightShape, MAX_LAMPS};
 pub use mesh::{MeshData, MeshHandle};
+pub use model::KIND as MODEL_KIND;
 pub use motion::{EARTH_GRAVITY_PULL, MASS_PER_CUBIC_METRE};
 pub use node::{Axis, DEFAULT_COLOR, MAX_ALPHA, NodeId, Scene, SceneError, Transform, VecField};
 pub use particles::{
@@ -43,6 +46,10 @@ pub use primitives::KINDS as PRIMITIVE_KINDS;
 pub use primitives::UI_KINDS as UI_SHAPE_KINDS;
 pub use procgen::{Rng, Seed, fbm2, fbm3, hash, noise2, noise3, salt, scatter};
 pub use sky::Sky;
+pub use texture::{
+    TextureError, TextureQuality, TextureType, generate as generate_texture,
+    pixels as texture_pixels, save as save_texture, variations as texture_variations,
+};
 pub use ui::UiItem;
 pub use vehicle::{DRIVER_SEAT_KIND, HandlingType, KIND as VEHICLE_KIND, SEAT_KIND};
 

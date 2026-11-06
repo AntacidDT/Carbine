@@ -4,11 +4,12 @@ use pyo3::types::PyAny;
 
 use crate::math::{PyQuat, PyVec3};
 use crate::object::{
-    Object, add_child_on, anchored_of, children_of, collider_shape_of, collision_of, gravity_of,
-    gravity_pull_of, handle_id, kind_of, mass_of, name_of, parent_of, remove_child_on,
-    set_anchored_on, set_children_on, set_collider_shape_on, set_collision_on, set_color_on,
-    set_gravity_on, set_gravity_pull_on, set_mass_on, set_name_on, set_parent_on, set_rotation,
-    set_texture_on, set_vec3, set_visible_on, texture_of, touching_handles, vec3_of, visible_of,
+    Object, add_child_on, anchored_of, children_of, collider_type_of, collision_of, find_under,
+    gravity_of, gravity_pull_of, handle_id, kind_of, mass_of, model_of, name_of, parent_of,
+    remove_child_on, seat_under, set_anchored_on, set_children_on, set_collider_type_on,
+    set_collision_on, set_color_on, set_gravity_on, set_gravity_pull_on, set_mass_on, set_model_on,
+    set_name_on, set_parent_on, set_rotation, set_texture_on, set_tiling_on, set_vec3,
+    set_visible_on, sit_on, stand_on, texture_of, tiling_of, touching_handles, vec3_of, visible_of,
 };
 use crate::with_scene;
 
@@ -167,6 +168,36 @@ impl Entity {
         set_texture_on(self.id, value)
     }
 
+    /// How many metres of this actor's body one tile of its skin covers. `0` writes
+    /// the whole picture across each face instead.
+    #[getter(textureTiling)]
+    fn texture_tiling(&self) -> PyResult<f32> {
+        tiling_of(self.id)
+    }
+
+    #[setter(textureTiling)]
+    fn set_texture_tiling(&self, value: f64) -> PyResult<()> {
+        set_tiling_on(self.id, value as f32)
+    }
+
+    /// The model this actor's body wears, as the path it was asked for. Assigning a
+    /// `.glb` hangs the file's nodes under the actor, so an imported rig is still a
+    /// set of parts a script can reach.
+    #[getter]
+    fn model(&self) -> PyResult<Option<String>> {
+        model_of(self.id)
+    }
+
+    #[setter]
+    fn set_model(&self, value: Option<String>) -> PyResult<()> {
+        set_model_on(self.id, value)
+    }
+
+    /// The first node under this actor carrying the name, searched down the branch.
+    fn find<'py>(&self, py: Python<'py>, name: String) -> PyResult<Option<Bound<'py, PyAny>>> {
+        find_under(py, self.id, &name)
+    }
+
     /// Whether the entity's body is drawn. The actor keeps existing either way.
     #[getter]
     fn visible(&self) -> PyResult<bool> {
@@ -254,16 +285,17 @@ impl Entity {
         set_collision_on(self.id, value)
     }
 
-    /// The collider cut from the body: "box", "sphere", "capsule" or "mesh".
+    /// How the solver reads this body: "box", "sphere" or "mesh". A mesh is the
+    /// body's own surfaces, each one a solid of its own.
     /// Writing a name switches collisions on.
-    #[getter(collisionShape)]
-    fn collision_shape(&self) -> PyResult<String> {
-        collider_shape_of(self.id)
+    #[getter(collisionType)]
+    fn collision_type(&self) -> PyResult<String> {
+        collider_type_of(self.id)
     }
 
-    #[setter(collisionShape)]
-    fn set_collision_shape(&self, name: &str) -> PyResult<()> {
-        set_collider_shape_on(self.id, name)
+    #[setter(collisionType)]
+    fn set_collision_type(&self, name: &str) -> PyResult<()> {
+        set_collider_type_on(self.id, name)
     }
 
     /// Whatever this actor rode into during the last step: an Entity for an
@@ -301,6 +333,26 @@ impl Entity {
     #[setter(stayAfterDeath)]
     fn set_stays_after_death(&self, value: bool) -> PyResult<()> {
         with_scene(|scene| scene.set_stays_after_death(self.id, value))
+    }
+
+    /// Which seat this actor is riding in, or None for one standing on its own feet.
+    #[getter(seatedIn)]
+    fn seated_in<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        seat_under(py, self.id)
+    }
+
+    /// Sits this actor in a seat, and from then the step holds it at the seat's place:
+    /// an actor in a car neither falls nor shoves. Whoever was in that seat before gets
+    /// out.
+    fn sit(&self, seat: &Bound<'_, PyAny>) -> PyResult<()> {
+        sit_on(self.id, seat)
+    }
+
+    /// Gets this actor out of whatever it was sitting in, where the seat had it and
+    /// still carrying the seat's speed. A dying actor is stood out by the engine, with a
+    /// shove, whether or not anybody asks.
+    fn stand(&self) -> PyResult<()> {
+        stand_on(self.id)
     }
 
     /// Bites another actor for this one's `damage` and answers with the hit

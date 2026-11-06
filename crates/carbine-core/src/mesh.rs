@@ -10,6 +10,10 @@ pub struct MeshData {
     pub normals: Vec<Vec3>,
     pub uvs: Vec<Vec2>,
     pub indices: Vec<u32>,
+    /// Whether the mesh's own `u` and `v` wrap the shell lat and long, the way a
+    /// sphere's do, rather than lying flat across faces. A skin laid on a shell has
+    /// to be counted in arcs instead of in the width of a face.
+    pub latlong: bool,
 }
 
 impl MeshData {

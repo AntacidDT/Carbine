@@ -40,9 +40,18 @@ pub fn default_name(kind: &str) -> String {
 /// A one meter cube centred on the origin, so `size = (length, width, height)`
 /// scales it directly. Each face carries its own normal and a full set of UVs.
 pub(crate) fn cube() -> MeshData {
-    // Normal, then four corners in the order that winds counter-clockwise as
-    // seen from outside the face.
+    // Normal, then four corners in the order that winds counter-clockwise as seen
+    // from outside the face, starting at the face's uv `(0, 0)` corner.
+    //
+    // The corners are laid out as one pane of glass, not as six faces each turned to
+    // suit their own maths: on all four sides `v` climbs the height along `+z`, so
+    // courses of brick run level whichever side is showing, and `u` runs the way a
+    // person standing outside that face calls right. The top and the bottom take the
+    // ground's own axes. `carbine-render` measures a face along the two axes its `u`
+    // and `v` actually lie on, so this order is the contract it reads - see
+    // `tests::a_cube_is_unwrapped_as_one_pane` for the axes this table promises.
     const FACES: [(Vec3, [Vec3; 4]); 6] = [
+        // +z: u along +x, v along +y.
         (
             Vec3::Z,
             [
@@ -52,15 +61,17 @@ pub(crate) fn cube() -> MeshData {
                 Vec3::new(-0.5, 0.5, 0.5),
             ],
         ),
+        // -z: u along -x, v along +y.
         (
             Vec3::NEG_Z,
             [
+                Vec3::new(0.5, -0.5, -0.5),
                 Vec3::new(-0.5, -0.5, -0.5),
                 Vec3::new(-0.5, 0.5, -0.5),
                 Vec3::new(0.5, 0.5, -0.5),
-                Vec3::new(0.5, -0.5, -0.5),
             ],
         ),
+        // +x: u along +y, v along +z.
         (
             Vec3::X,
             [
@@ -70,24 +81,27 @@ pub(crate) fn cube() -> MeshData {
                 Vec3::new(0.5, -0.5, 0.5),
             ],
         ),
+        // -x: u along -y, v along +z.
         (
             Vec3::NEG_X,
             [
+                Vec3::new(-0.5, 0.5, -0.5),
                 Vec3::new(-0.5, -0.5, -0.5),
                 Vec3::new(-0.5, -0.5, 0.5),
                 Vec3::new(-0.5, 0.5, 0.5),
-                Vec3::new(-0.5, 0.5, -0.5),
             ],
         ),
+        // +y: u along -x, v along +z.
         (
             Vec3::Y,
             [
+                Vec3::new(0.5, 0.5, -0.5),
                 Vec3::new(-0.5, 0.5, -0.5),
                 Vec3::new(-0.5, 0.5, 0.5),
                 Vec3::new(0.5, 0.5, 0.5),
-                Vec3::new(0.5, 0.5, -0.5),
             ],
         ),
+        // -y: u along +x, v along +z.
         (
             Vec3::NEG_Y,
             [
@@ -111,6 +125,7 @@ pub(crate) fn cube() -> MeshData {
         normals: Vec::with_capacity(24),
         uvs: Vec::with_capacity(24),
         indices: Vec::with_capacity(36),
+        latlong: false,
     };
 
     for (normal, corners) in FACES {
@@ -142,6 +157,7 @@ fn sphere(slices: u32, stacks: u32) -> MeshData {
         normals: Vec::with_capacity((rings * columns) as usize),
         uvs: Vec::with_capacity((rings * columns) as usize),
         indices: Vec::with_capacity((stacks * slices * 6) as usize),
+        latlong: true,
     };
 
     for ring in 0..rings {
@@ -191,6 +207,7 @@ fn quad() -> MeshData {
             Vec2::new(0.0, 1.0),
         ],
         indices: vec![0, 1, 2, 0, 2, 3],
+        latlong: false,
     }
 }
 
@@ -236,6 +253,52 @@ mod tests {
     }
 
     #[test]
+    fn a_cube_is_unwrapped_as_one_pane() {
+        let mesh = build("cube").unwrap();
+
+        // A face's u runs from its uv `(0, 0)` corner to its `(1, 0)` one, and its v to
+        // the `(0, 1)` corner, so the corners say which way the picture lies.
+        let panes: Vec<(Vec3, Vec3, Vec3)> = (0..6)
+            .map(|face| {
+                let base = face * 4;
+                let (here, right, above) = (
+                    mesh.positions[base],
+                    mesh.positions[base + 1],
+                    mesh.positions[base + 3],
+                );
+                (
+                    mesh.normals[base],
+                    (right - here).normalize_or_zero(),
+                    (above - here).normalize_or_zero(),
+                )
+            })
+            .collect();
+
+        let authored = [
+            (Vec3::Z, Vec3::X, Vec3::Y),
+            (Vec3::NEG_Z, Vec3::NEG_X, Vec3::Y),
+            (Vec3::X, Vec3::Y, Vec3::Z),
+            (Vec3::NEG_X, Vec3::NEG_Y, Vec3::Z),
+            (Vec3::Y, Vec3::NEG_X, Vec3::Z),
+            (Vec3::NEG_Y, Vec3::X, Vec3::Z),
+        ];
+        for (found, expected) in panes.iter().zip(authored) {
+            assert_eq!(*found, expected, "the face outward along {}", expected.0);
+        }
+
+        // Every side climbs the height, which is the whole point: courses of brick run
+        // level into each other across a corner instead of one wall's turning up it.
+        for (normal, _, v) in panes.iter().filter(|(normal, _, _)| normal.z == 0.0) {
+            assert_eq!(*v, Vec3::Z, "the wall looking out along {normal} runs v up");
+        }
+        // And each frame stands outward off its own face, which is what makes the
+        // corners wind counter-clockwise as seen from outside.
+        for (normal, u, v) in &panes {
+            assert_eq!(u.cross(*v), *normal, "{normal} is laid the wrong way round");
+        }
+    }
+
+    #[test]
     fn a_sphere_is_one_metre_across_and_round_in_every_direction() {
         let mesh = build("sphere").unwrap();
 
@@ -260,6 +323,23 @@ mod tests {
             "a plane should have no height"
         );
         assert_eq!(mesh.bounds().unwrap().0.z, 0.0);
+    }
+
+    #[test]
+    fn only_a_shell_wraps_its_picture_lat_and_long() {
+        assert!(
+            build("sphere").unwrap().latlong,
+            "a sphere's u runs once around the equator and its v pole to pole"
+        );
+        for kind in ["cube", "plane", "rectangle", "square"] {
+            assert!(
+                !build(kind).unwrap().latlong,
+                "{kind} lays its picture flat across each face"
+            );
+        }
+        for kind in UI_KINDS {
+            assert!(!ui_mesh(kind).unwrap().latlong);
+        }
     }
 
     #[test]

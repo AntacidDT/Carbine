@@ -3,7 +3,9 @@
 //! A vehicle is an object wearing a drive: `carbine.new("Vehicle")` writes one, it is
 //! drawn, collides and falls like any other body, and everything about how it handles
 //! is a knob written on it. The solver moves it the way it moves a crate, which is why
-//! a car can be shoved by a quake and stopped by a wall.
+//! a car can be shoved by a quake and stopped by a wall. Any other node can be given
+//! the same drive by writing `driveable` on it, which is how a loaded model or a horse
+//! ends up answering a wheel - and puts nothing on the node it is written on.
 //!
 //! A seat is a second thing and hangs on the object it belongs to. A `Seat` is simply
 //! somewhere to sit: whoever rides in it rides along and drives nothing. A `DriverSeat`
@@ -18,7 +20,7 @@ use glam::{Mat4, Quat, Vec3};
 use crate::motion::Motion;
 use crate::node::{
     Children, DEFAULT_COLOR, NodeId, NodeKind, NodeName, NodeTexture, ObjectColor, Opacity, Parent,
-    Scene, SceneError, Transform, VecField, Visible,
+    Scene, SceneError, TextureTiling, Transform, VecField, Visible,
 };
 use crate::primitives;
 
@@ -101,7 +103,7 @@ pub fn seat_kind(name: &str) -> Option<bool> {
         .replace([' ', '-', '_', '\'', '.'], "");
     match written.as_str() {
         "seat" | "passenger" | "passengerseat" | "chair" => Some(false),
-        "driverseat" | "driver" | "pilot" | "piloseat" => Some(true),
+        "driverseat" | "driversseat" | "driver" | "pilot" | "pilotseat" => Some(true),
         _ => None,
     }
 }
@@ -250,6 +252,7 @@ impl Scene {
                 ObjectColor(DEFAULT_COLOR),
                 Opacity::default(),
                 NodeTexture::default(),
+                TextureTiling::default(),
                 Visible::default(),
                 Motion::default(),
                 Parent(parent_id),
@@ -266,6 +269,36 @@ impl Scene {
     pub fn is_vehicle(&self, id: NodeId) -> Result<bool, SceneError> {
         let entity = self.entity(id)?;
         Ok(self.world.get::<Vehicle>(entity).is_some())
+    }
+
+    /// Whether this node answers a wheel, which is the whole of what makes it a vehicle.
+    pub fn driveable(&self, id: NodeId) -> Result<bool, SceneError> {
+        self.is_vehicle(id)
+    }
+
+    /// Puts a drive on a node that was not born one, or takes it off again.
+    ///
+    /// Nothing else is touched: `new("Vehicle")` sizes, grounds and collides its box
+    /// because a car with none of those is no use to anyone, but a node arriving here
+    /// already has its own extent, mass and collider - a loaded tank writes its size with
+    /// the file, and a script that switches its wheels on has said so itself.
+    ///
+    /// A drive written where one already stands leaves the handling, the top end and the
+    /// three wishes exactly as they were. Taking one off stops the turning of the wheels;
+    /// whoever sat in a driver seat under it now rides as a passenger.
+    pub fn set_driveable(&mut self, id: NodeId, driveable: bool) -> Result<(), SceneError> {
+        let owner = self.entity(id)?;
+        if driveable {
+            if !self.is_vehicle(id)? {
+                self.world.entity_mut(owner).insert(Vehicle::default());
+            }
+        } else {
+            self.world.entity_mut(owner).remove::<Vehicle>();
+            if let Ok(mut motion) = self.component_mut::<Motion>(id) {
+                motion.spin = 0.0;
+            }
+        }
+        Ok(())
     }
 
     pub fn is_seat(&self, id: NodeId) -> Result<bool, SceneError> {
@@ -812,6 +845,101 @@ mod tests {
     }
 
     #[test]
+    fn a_drive_is_a_component_a_script_can_put_on_any_node() {
+        let mut scene = Scene::new();
+        let crate_box = scene.create("cube", None, None).unwrap();
+
+        assert!(!scene.driveable(crate_box).unwrap());
+        assert_eq!(
+            scene.set_throttle(crate_box, 1.0).unwrap_err(),
+            SceneError::NotAVehicle,
+            "a crate has no wheel to ask"
+        );
+
+        scene.set_driveable(crate_box, true).unwrap();
+        assert!(scene.driveable(crate_box).unwrap());
+        assert_eq!(
+            scene.kind(crate_box).unwrap(),
+            "cube",
+            "the kind word is left alone"
+        );
+        assert_eq!(scene.handling(crate_box).unwrap(), HandlingType::Arcade);
+        assert_eq!(scene.top_speed(crate_box).unwrap(), DEFAULT_TOP_SPEED);
+
+        // A drive asks nothing of the body it is hung on, because the body arrives with
+        // its own extent, weight and collider - unlike a vehicle, which is born a
+        // hatchback for want of anything better to write.
+        assert!(!scene.has_collision(crate_box).unwrap());
+        assert!(!scene.uses_gravity(crate_box).unwrap());
+
+        // Writing it again is not a reset: a script that tuned the car first keeps it.
+        scene.set_top_speed(crate_box, 3.0).unwrap();
+        scene.set_driveable(crate_box, true).unwrap();
+        assert_eq!(scene.top_speed(crate_box).unwrap(), 3.0);
+    }
+
+    #[test]
+    fn a_node_that_was_not_born_a_vehicle_answers_the_wheel() {
+        let mut scene = Scene::new();
+        let id = scene.create("cube", None, None).unwrap();
+        scene.set_driveable(id, true).unwrap();
+        scene.set_collision(id, true).unwrap();
+        scene.set_uses_gravity(id, true).unwrap();
+        for _ in 0..120 {
+            scene.step(1.0 / 60.0);
+        }
+
+        ask(&mut scene, id, 1.0, 0.0, 0.0);
+        for _ in 0..60 {
+            scene.step(1.0 / 60.0);
+        }
+
+        let at = scene.vec_field(id, VecField::Position).unwrap();
+        assert!(at.x > 3.5, "{at} after a second of full throttle");
+        let speed = rolling(&scene, id);
+        assert!(
+            speed.x > 7.5 && speed.x < 8.2,
+            "{speed}: the same drive a car gets, on a box"
+        );
+    }
+
+    #[test]
+    fn a_drive_taken_off_leaves_the_body_to_the_floor() {
+        let mut scene = Scene::new();
+        let id = scene.create("cube", None, None).unwrap();
+        scene.set_driveable(id, true).unwrap();
+        scene.set_collision(id, true).unwrap();
+        scene.set_uses_gravity(id, true).unwrap();
+        ask(&mut scene, id, 1.0, 1.0, 0.0);
+        for _ in 0..120 {
+            scene.step(1.0 / 60.0);
+        }
+
+        scene.set_driveable(id, false).unwrap();
+        assert!(!scene.driveable(id).unwrap());
+        assert_eq!(
+            scene.throttle(id).unwrap_err(),
+            SceneError::NotAVehicle,
+            "the knobs are off it again"
+        );
+        assert_eq!(
+            scene.component::<Motion>(id).unwrap().spin,
+            0.0,
+            "and the wheels stop turning"
+        );
+
+        let coasting = rolling(&scene, id).length();
+        for _ in 0..60 {
+            scene.step(1.0 / 60.0);
+        }
+        let slower = rolling(&scene, id).length();
+        assert!(
+            slower <= coasting,
+            "{slower} after coasting on {coasting}: nothing is asking it for more"
+        );
+    }
+
+    #[test]
     fn a_seat_sits_and_a_driver_seat_drives() {
         let mut scene = Scene::new();
         let car = scene.create("Vehicle", None, None).unwrap();
@@ -835,6 +963,30 @@ mod tests {
 
         // Neither of them draws anything.
         assert!(scene.mesh(driver).is_err(), "a seat is not a shape");
+    }
+
+    #[test]
+    fn a_seat_reads_the_words_a_script_uses_for_one() {
+        let mut scene = Scene::new();
+
+        for (word, drives) in [
+            ("Seat", false),
+            ("chair", false),
+            ("Passenger", false),
+            ("DriverSeat", true),
+            ("  driver's Seat ", true),
+            ("Pilot seat", true),
+        ] {
+            let place = scene.create(word, None, None).unwrap();
+            assert_eq!(scene.seat_drives(place).unwrap(), drives, "{word}");
+            let read = if drives { DRIVER_SEAT_KIND } else { SEAT_KIND };
+            assert_eq!(scene.kind(place).unwrap(), read, "{word}");
+            scene.destroy(place).unwrap();
+        }
+
+        // A word that is neither still refuses, and tells a script what would have read.
+        let error = scene.create("bicycle", None, None).unwrap_err();
+        assert!(format!("{error}").contains("driverSeat"), "{error}");
     }
 
     #[test]

@@ -85,6 +85,28 @@ impl Default for Opacity {
 #[derive(Component, Default)]
 pub(crate) struct NodeTexture(pub(crate) Option<String>);
 
+/// How many metres of the object one tile of its skin covers.
+///
+/// A new object gets a metre, so a picture stays the size it was painted for whether
+/// it lies on a one metre floor tile or on the six metre wall across the room: the
+/// renderer measures how far a face spans along each of its own two axes and lays one
+/// tile per metre of each, so a picture never stretches to fit. Nil is the other
+/// ask: one tile smeared across whatever shape the face happens to have, which is
+/// what a model's own UVs already are.
+///
+/// A face wide enough to hold more than one tile is never stamped, though: each
+/// repeat is nudged off its lattice and worn to a tone of its own, so a long wall
+/// reads as one surface rather than a row of the same picture. A face of exactly one
+/// tile, and everything wearing nil, is left precisely as it was drawn.
+#[derive(Component)]
+pub(crate) struct TextureTiling(pub(crate) f32);
+
+impl Default for TextureTiling {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
 /// Whether the node is drawn at all. A first person player hides its own body
 /// with this, and a script uses it for anything it wants out of the frame.
 #[derive(Component)]
@@ -122,7 +144,7 @@ pub enum SceneError {
     NotASeat,
     SeatCannotSit,
     UiNotCollidable,
-    UnknownShape(String),
+    UnknownCollisionType(String),
     UnknownParticleShape(String),
     BadColor(String),
     UnknownDisaster(String),
@@ -133,6 +155,7 @@ pub enum SceneError {
     UnknownHandling(String),
     BadTime(String),
     BadTexture { path: String, why: String },
+    BadModel { path: String, why: String },
 }
 
 impl fmt::Display for SceneError {
@@ -141,10 +164,13 @@ impl fmt::Display for SceneError {
             Self::NodeDestroyed => write!(formatter, "the object has been destroyed"),
             Self::UnknownKind(kind) => write!(
                 formatter,
-                "unknown object kind \"{kind}\" (available: {}, {}, {})",
+                "unknown object kind \"{kind}\" (available: {}, {}, {}, {}, {}, {})",
                 primitives::KINDS.join(", "),
                 crate::light::KIND,
-                crate::vehicle::KIND
+                crate::model::KIND,
+                crate::vehicle::KIND,
+                crate::vehicle::SEAT_KIND,
+                crate::vehicle::DRIVER_SEAT_KIND
             ),
             Self::CannotDestroyRoot => write!(formatter, "the scene root cannot be destroyed"),
             Self::CannotReparentRoot => write!(formatter, "the scene root cannot be reparented"),
@@ -201,10 +227,10 @@ impl fmt::Display for SceneError {
                     "a UI element is laid out in pixels and never collides"
                 )
             }
-            Self::UnknownShape(shape) => write!(
+            Self::UnknownCollisionType(name) => write!(
                 formatter,
-                "unknown collider shape \"{shape}\" (available: {})",
-                crate::collision::ColliderShape::NAMES.join(", ")
+                "unknown collider type \"{name}\" (available: {})",
+                crate::collision::CollisionType::NAMES.join(", ")
             ),
             Self::UnknownParticleShape(shape) => write!(
                 formatter,
@@ -252,6 +278,11 @@ impl fmt::Display for SceneError {
                  pack it first with carbine.packager.image(\"{path}\") and skin the object with \
                  the path that hands back."
             ),
+            Self::BadModel { path, why } => write!(
+                formatter,
+                "\"{path}\" cannot be a model: {why}. Models come to Carbine as .glb, so a \
+                 shape written in another format goes through the Packager first."
+            ),
         }
     }
 }
@@ -275,6 +306,10 @@ pub struct Scene {
     /// The pairs that rode into each other during the last step. The solver
     /// writes it and the damage pass reads it, so a script can answer a touch.
     pub(crate) contacts: Vec<(NodeId, NodeId)>,
+    /// What each body the solver answers for is made of, kept from the step it was cut
+    /// in so that a parked vehicle's thousands of points are not turned over again while
+    /// it stands still. See `Scene::recut`.
+    pub(crate) cuts: HashMap<NodeId, crate::collision::Cut>,
     /// Weather, in the order a script wrote it. A disaster is a rule the solver
     /// asks about every step, not a node, so it has its own little register.
     pub(crate) disasters: Vec<crate::disaster::Disaster>,
@@ -329,6 +364,7 @@ impl Scene {
             input: crate::input::Input::default(),
             player: crate::player::PlayerController::default(),
             contacts: Vec::new(),
+            cuts: HashMap::new(),
             disasters: Vec::new(),
             next_disaster: 0,
             atmosphere: crate::atmosphere::Atmosphere::default(),
@@ -366,6 +402,9 @@ impl Scene {
         let kind = kind.trim().to_lowercase();
         if kind == crate::light::KIND {
             return self.create_light(name, parent);
+        }
+        if kind == crate::model::KIND {
+            return self.create_model(name, parent);
         }
         if kind == crate::vehicle::KIND {
             return self.create_vehicle(name, parent);
@@ -407,6 +446,7 @@ impl Scene {
                 ObjectColor(DEFAULT_COLOR),
                 Opacity::default(),
                 NodeTexture::default(),
+                TextureTiling::default(),
                 Visible::default(),
                 Motion::default(),
                 Parent(parent_id),
@@ -773,6 +813,22 @@ impl Scene {
         self.spread(id, move |scene, member| scene.skin(member, shared.clone()))
     }
 
+    /// How many metres of this node one tile of its skin covers.
+    pub fn tiling(&self, id: NodeId) -> Result<f32, SceneError> {
+        Ok(self.component::<TextureTiling>(id)?.0)
+    }
+
+    pub(crate) fn tile(&mut self, id: NodeId, metres: f32) -> Result<(), SceneError> {
+        self.component_mut::<TextureTiling>(id)?.0 = metres.max(0.0);
+        Ok(())
+    }
+
+    /// How far a tile reaches, in metres. Nil writes the whole picture across each
+    /// face instead of laying it once per metre.
+    pub fn set_tiling(&mut self, id: NodeId, metres: f32) -> Result<(), SceneError> {
+        self.spread(id, move |scene, member| scene.tile(member, metres))
+    }
+
     pub fn is_visible(&self, id: NodeId) -> Result<bool, SceneError> {
         Ok(self.component::<Visible>(id)?.0)
     }
@@ -788,8 +844,12 @@ impl Scene {
     }
 
     /// The mesh's dimensions in meters at scale one, or one on axes the mesh
-    /// does not extend along.
+    /// does not extend along. A node wearing a model answers with the whole
+    /// model, so `size` is the vehicle rather than whichever surface hung first.
     pub fn natural_extent(&self, id: NodeId) -> Result<Vec3, SceneError> {
+        if let Some(extent) = self.model_extent(id) {
+            return Ok(extent);
+        }
         let entity = self.entity(id)?;
         Ok(self
             .world
@@ -857,7 +917,7 @@ impl Scene {
             .ok_or(SceneError::MissingComponent)
     }
 
-    fn is_ancestor(&self, ancestor: NodeId, node: NodeId) -> Result<bool, SceneError> {
+    pub(crate) fn is_ancestor(&self, ancestor: NodeId, node: NodeId) -> Result<bool, SceneError> {
         let mut current = Some(node);
         while let Some(current_id) = current {
             if current_id == ancestor {
@@ -1278,6 +1338,30 @@ mod tests {
 
         scene.set_texture(crate_, None).unwrap();
         assert_eq!(scene.texture(crate_).unwrap(), None);
+    }
+
+    #[test]
+    fn a_new_node_lays_its_skin_one_metre_across() {
+        let mut scene = Scene::new();
+        let crate_ = scene.create("cube", None, None).unwrap();
+
+        assert_eq!(scene.tiling(crate_).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn a_tile_reaches_as_far_as_the_script_says_and_nil_is_an_answer() {
+        let mut scene = Scene::new();
+        let wall = scene.create("cube", None, None).unwrap();
+
+        scene.set_tiling(wall, 2.5).unwrap();
+        assert_eq!(scene.tiling(wall).unwrap(), 2.5);
+
+        // Nil is what a model's own UVs already are, so a script must be able to ask
+        // for it - and a negative reach is the same ask, not a nonsense one.
+        scene.set_tiling(wall, 0.0).unwrap();
+        assert_eq!(scene.tiling(wall).unwrap(), 0.0);
+        scene.set_tiling(wall, -4.0).unwrap();
+        assert_eq!(scene.tiling(wall).unwrap(), 0.0);
     }
 
     #[test]

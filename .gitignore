@@ -19,3 +19,6 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# Tiles the procedural generator paints while a demo runs
+/examples/generated/

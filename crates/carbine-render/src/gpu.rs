@@ -22,6 +22,7 @@ use wgpu::util::DeviceExt;
 /// at all, and the sun as the world was born with it is exactly white.
 const WORLD_SHADER: &str = r#"
 const LAMP_REGISTER: i32 = 8;
+const PI: f32 = 3.1415927;
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -38,6 +39,10 @@ struct Uniforms {
     tint: vec4<f32>,
     skinned: f32,
     blocky: f32,
+    tile: f32,
+    latlong: f32,
+    extent: vec3<f32>,
+    _pad: f32,
 };
 
 /// The lamps this frame is lit by, nearest the eyes first. A lamp is a place, how
@@ -60,6 +65,9 @@ struct Lights {
 @group(0) @binding(3) var cast_map: texture_depth_2d;
 @group(0) @binding(4) var cast_sampler: sampler_comparison;
 @group(0) @binding(5) var<uniform> lights: Lights;
+/// The same skin, wrapping instead of clamping, for a face measured in more than one
+/// tile of it.
+@group(0) @binding(6) var tiled: sampler;
 
 struct Pixel {
     @builtin(position) clip: vec4<f32>,
@@ -67,7 +75,73 @@ struct Pixel {
     @location(1) uv: vec2<f32>,
     @location(2) world: vec3<f32>,
     @location(3) sunside: vec4<f32>,
+    @location(4) spread: f32,
 };
+
+/// The two local axes a face's authored u and v run along, in that order. It is the
+/// order the primitives' corners are written in, so a tile lies the way the mesh was
+/// authored rather than the way the maths finds easiest.
+///
+/// A face only ever needs its two axes, not which way along them the picture runs: a
+/// tile is a square, so the side of a cube whose u climbs away from the sun and the side
+/// whose u climbs towards it are measured the same way, which is what makes courses of
+/// brick meet at the corner instead of one wall's running up and its neighbour's across.
+fn face_axes(normal: vec3<f32>) -> vec2<u32> {
+    let across = abs(normal);
+    if (across.x > across.y && across.x > across.z) {
+        return vec2<u32>(1u, 2u);
+    }
+    if (across.y > across.z) {
+        return vec2<u32>(0u, 2u);
+    }
+    return vec2<u32>(0u, 1u);
+}
+
+/// How far the mesh reaches along each local axis, in metres: the extent is the shape's
+/// own, the column of the model matrix is what this node made of it.
+fn reach() -> vec3<f32> {
+    return uniforms.extent * vec3<f32>(
+        length(uniforms.model[0].xyz),
+        length(uniforms.model[1].xyz),
+        length(uniforms.model[2].xyz),
+    );
+}
+
+/// How far this face's two axes hold in tiles of picture, which is the only measure of
+/// how much of its skin is laid beside itself.
+fn tiles(normal: vec3<f32>) -> vec2<f32> {
+    let metres = reach();
+    if (uniforms.latlong > 0.5) {
+        // A shell has no faces to measure: its u runs once around the equator and its
+        // v once from pole to pole, so what a tile covers is the arc it lies along.
+        return vec2<f32>(metres.x + metres.y, metres.z) * (PI / 2.0 / uniforms.tile);
+    }
+    let axes = face_axes(normal);
+    return vec2<f32>(metres[axes.x], metres[axes.y]) / uniforms.tile;
+}
+
+/// One tile of the skin covers `tile` metres of the object, so the face is measured
+/// along its own two axes and the tile laid once per metre of each. That is what keeps
+/// a picture the size it was painted for on a wall twice as long as it is tall, instead
+/// of stretching it over the difference. Nil leaves the mesh's own numbers alone,
+/// which is how a model's UVs reach the screen as the file drew them.
+fn laid(uv: vec2<f32>, normal: vec3<f32>) -> vec2<f32> {
+    if (uniforms.tile <= 0.0) {
+        return uv;
+    }
+    return uv * tiles(normal);
+}
+
+/// How much of the running-in a surface is asked to wear: a face that holds one picture
+/// is that picture and needs nothing done to it, and every further tile laid beside it
+/// asks for more, which is all settled by the second one.
+fn spread(normal: vec3<f32>) -> f32 {
+    if (uniforms.tile <= 0.0) {
+        return 0.0;
+    }
+    let across = tiles(normal);
+    return saturate(max(across.x, across.y) - 1.0);
+}
 
 @vertex
 fn versus(
@@ -80,9 +154,59 @@ fn versus(
     pixel.clip = uniforms.view_proj * place;
     pixel.world = place.xyz;
     pixel.normal = normalize((uniforms.model * vec4<f32>(normal, 0.0)).xyz);
-    pixel.uv = uv;
+    pixel.uv = laid(uv, normal);
     pixel.sunside = uniforms.light_view * place;
+    pixel.spread = spread(normal);
     return pixel;
+}
+
+/// A number rolled for a whole-number point, which is what a field is built out of.
+fn rolled(at: vec2<f32>) -> f32 {
+    return fract(sin(dot(at, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+
+/// A number from the four whole-number corners around a point, mixed along a ramp that
+/// flattens at both ends, which is the cheapest picture of a field that wanders.
+fn field(at: vec2<f32>) -> f32 {
+    let cell = floor(at);
+    let inside = at - cell;
+    let ramp = inside * inside * inside * (inside * (inside * 6.0 - 15.0) + 10.0);
+    let low = mix(rolled(cell), rolled(cell + vec2<f32>(1.0, 0.0)), ramp.x);
+    let high = mix(
+        rolled(cell + vec2<f32>(0.0, 1.0)),
+        rolled(cell + vec2<f32>(1.0, 1.0)),
+        ramp.x,
+    );
+    return mix(low, high, ramp.y);
+}
+
+/// A picture laid down again beside itself, unchanged, is the look of a sheet of
+/// stickers rather than a wall. So each repeat is nudged off its lattice and worn to a
+/// different tone, both read out of `field` at periods that are not the tile's own: the
+/// surface only comes back to where it started every several tiles, and by then the
+/// courses have slid against their neighbours enough that nothing lines up. The maths
+/// runs in the mesh's own picture space rather than in the world, so a surface keeps its
+/// look when the thing wearing it moves, and a face of one picture is left exactly as it
+/// was drawn.
+fn repeated(at: vec2<f32>, running_in: f32) -> vec4<f32> {
+    let bent = at + (vec2<f32>(
+        field(at * 0.4 + vec2<f32>(7.3, 2.1)),
+        field(at * 0.33 + vec2<f32>(3.7, 9.4)),
+    ) - 0.5) * 0.18 * running_in;
+    let picture = textureSample(skin, tiled, bent);
+    let worn = mix(1.0, 0.86 + 0.28 * field(at * 0.21 + vec2<f32>(1.6, 5.2)), running_in);
+    return vec4<f32>(picture.rgb * worn, picture.a);
+}
+
+/// A picture that repeats is read through a wrapping sampler, because a `fract` in the
+/// maths would take the choice of mip level away from the card and that is what blurs a
+/// tile lying at an angle. A face of one tile never leaves the picture, so it keeps the
+/// clamp it has always been read with, pixel for pixel.
+fn sampled(at: vec2<f32>, running_in: f32) -> vec4<f32> {
+    if (uniforms.tile > 0.0) {
+        return repeated(at, running_in);
+    }
+    return textureSample(skin, skin_sampler, at);
 }
 
 /// How much of the sun this pixel is standing in. The cast is the world seen from
@@ -209,7 +333,7 @@ fn lamp_light(pixel: Pixel, face: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fragment(pixel: Pixel) -> @location(0) vec4<f32> {
     // Images are stored top row first and mesh v grows upward, so v is flipped.
-    let skin = textureSample(skin, skin_sampler, vec2<f32>(pixel.uv.x, 1.0 - pixel.uv.y));
+    let skin = sampled(vec2<f32>(pixel.uv.x, 1.0 - pixel.uv.y), pixel.spread);
     let base = mix(uniforms.color.rgb, skin.rgb * uniforms.color.rgb, uniforms.skinned);
     let face = normalize(pixel.normal);
     let facing = max(dot(face, uniforms.sun.xyz), 0.0);
@@ -570,8 +694,19 @@ struct Uniforms {
     /// Whether the edge of a shade is laid in blocks instead of woven straight. One or
     /// nil, and a rung that casts nothing never reads it.
     blocky: f32,
-    _pad: [f32; 2],
+    /// How many metres of the object one tile of its skin covers. Nil reads the mesh's
+    /// own numbers, which is a model's UVs exactly as the file drew them.
+    tile: f32,
+    /// Whether the mesh is a shell whose picture wraps lat and long, like a sphere.
+    latlong: f32,
+    /// How far the mesh reaches along each of its own axes, at scale one.
+    extent: [f32; 3],
+    _pad: f32,
 }
+
+/// The world shader mirrors this field for field, and its `extent` is a `vec3` sitting
+/// on a sixteen byte boundary exactly where this one does.
+const _: () = assert!(std::mem::size_of::<Uniforms>() == 368);
 
 /// The shader's own register is eight lamps wide, and no wider than the core's
 /// handful of nearest ones.
@@ -869,6 +1004,10 @@ pub struct Gpu {
     /// machine will say. The core sorts a light rung out of this.
     pub hardware: carbine_core::Gpu,
     sampler: wgpu::Sampler,
+    /// The same skins again, read the way a tiled face needs: a picture that is laid
+    /// once per metre walks off the edge of itself and has to come back on the other
+    /// side, and wrapping is what keeps the card free to pick the mip it likes.
+    tile_sampler: wgpu::Sampler,
     meshes: HashMap<MeshHandle, GpuMesh>,
     /// `None` records a skin that could not be read, so a broken file is opened
     /// once rather than once per frame.
@@ -940,6 +1079,15 @@ impl Gpu {
             ..Default::default()
         });
         let plain = upload_rgba(&device, &queue, "carbine plain skin", 1, 1, &[255; 4]);
+        let tile_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("carbine tiling sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
         let quad = unit_quad(&device);
         let cast_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("carbine cast sampler"),
@@ -966,6 +1114,7 @@ impl Gpu {
             adapter_name: name,
             hardware,
             sampler,
+            tile_sampler,
             meshes: HashMap::new(),
             skins: HashMap::new(),
             plain,
@@ -1293,6 +1442,7 @@ impl Gpu {
                     pipeline.skinned,
                     None,
                     None,
+                    None,
                 );
                 pass.set_bind_group(0, &bind, &[]);
                 pass.set_vertex_buffer(0, mesh.vertex.slice(..));
@@ -1339,6 +1489,7 @@ impl Gpu {
                     pipeline.skinned,
                     None,
                     None,
+                    None,
                 );
                 pass.set_pipeline(&pipeline.pipeline);
                 pass.set_bind_group(0, &bind, &[]);
@@ -1368,6 +1519,7 @@ impl Gpu {
                     world.skinned,
                     Some((&cast, &self.cast_sampler)),
                     Some(&lamp_register),
+                    Some(&self.tile_sampler),
                 );
                 pass.set_pipeline(&world.pipeline);
                 pass.set_bind_group(0, &bind, &[]);
@@ -1402,6 +1554,7 @@ impl Gpu {
                     glass_pipeline.skinned,
                     Some((&cast, &self.cast_sampler)),
                     Some(&lamp_register),
+                    Some(&self.tile_sampler),
                 );
                 pass.set_pipeline(&glass_pipeline.pipeline);
                 pass.set_bind_group(0, &bind, &[]);
@@ -1447,6 +1600,7 @@ impl Gpu {
                         &self.sampler,
                         skin,
                         pipeline.skinned,
+                        None,
                         None,
                         None,
                     );
@@ -1502,6 +1656,7 @@ impl Gpu {
                         &self.sampler,
                         &self.plain,
                         pipeline.skinned,
+                        None,
                         None,
                         None,
                     );
@@ -1716,7 +1871,12 @@ fn world_uniforms(
         tint: [sunlight[0], sunlight[1], sunlight[2], 0.0],
         skinned: f32::from(item.texture.is_some()),
         blocky: f32::from(light.style == LightType::Blocky),
-        _pad: [0.0; 2],
+        // A face is measured in the object's own metres, so the shader needs the
+        // shape's reach along each axis as well as the tile size a script asked for.
+        tile: item.tiling,
+        latlong: f32::from(item.mesh.latlong),
+        extent: item.mesh.natural_extent().to_array(),
+        _pad: 0.0,
     }
 }
 
@@ -1727,7 +1887,9 @@ fn world_uniforms(
 /// The same goes for the cast, which only the world and glass shaders declare. It
 /// is filled on a rung that casts nothing too, because a deduced layout asks for
 /// every binding the shader mentions whether or not this frame reads it. The lamp
-/// register is bound the same way: an empty one is a frame that adds nothing.
+/// register is bound the same way: an empty one is a frame that adds nothing. The
+/// wrapping sampler goes with them, since the world shader reads it whenever a face
+/// is measured in more than one tile, and a drop is never asked to be.
 #[allow(clippy::too_many_arguments)]
 fn bind_group(
     device: &wgpu::Device,
@@ -1738,6 +1900,7 @@ fn bind_group(
     skinned: bool,
     cast: Option<(&wgpu::TextureView, &wgpu::Sampler)>,
     lamps: Option<&wgpu::Buffer>,
+    tiled: Option<&wgpu::Sampler>,
 ) -> wgpu::BindGroup {
     let mut entries = vec![wgpu::BindGroupEntry {
         binding: 0,
@@ -1767,6 +1930,12 @@ fn bind_group(
         entries.push(wgpu::BindGroupEntry {
             binding: 5,
             resource: lamps.as_entire_binding(),
+        });
+    }
+    if let Some(tiled) = tiled {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 6,
+            resource: wgpu::BindingResource::Sampler(tiled),
         });
     }
     device.create_bind_group(&wgpu::BindGroupDescriptor {

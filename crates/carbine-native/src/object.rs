@@ -54,6 +54,41 @@ pub(crate) fn set_texture_on(id: NodeId, value: Option<String>) -> PyResult<()> 
     with_scene(|scene| scene.set_texture(id, value))
 }
 
+/// How many metres of the object one tile of its skin covers. Nil is the whole
+/// picture across the face, which is how a model's own UVs are already laid out.
+pub(crate) fn tiling_of(id: NodeId) -> PyResult<f32> {
+    with_scene(|scene| scene.tiling(id))
+}
+
+pub(crate) fn set_tiling_on(id: NodeId, value: f32) -> PyResult<()> {
+    with_scene(|scene| scene.set_tiling(id, value))
+}
+
+/// The model file a node wears, written back the way it was asked for. `None` is a
+/// node made of Carbine's own shapes.
+pub(crate) fn model_of(id: NodeId) -> PyResult<Option<String>> {
+    with_scene(|scene| scene.model(id))
+}
+
+/// Hangs a `.glb` on the node as children, or takes the branch off again. The file's
+/// own names survive, so `find` reaches the turret inside a tank.
+pub(crate) fn set_model_on(id: NodeId, value: Option<String>) -> PyResult<()> {
+    with_scene(|scene| scene.set_model(id, value))
+}
+
+/// The first node under this one carrying the name, searched down the whole branch.
+pub(crate) fn find_under<'py>(
+    py: Python<'py>,
+    id: NodeId,
+    name: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let found = with_scene(|scene| scene.descendant_named(id, name))?;
+    match found {
+        Some(node) => handle_for(py, node).map(Some),
+        None => Ok(None),
+    }
+}
+
 /// Whether a node is drawn. Hiding a node hides everything under it.
 pub(crate) fn visible_of(id: NodeId) -> PyResult<bool> {
     with_scene(|scene| scene.is_visible(id))
@@ -97,6 +132,47 @@ pub(crate) fn set_mass_on(id: NodeId, value: f32) -> PyResult<()> {
     with_scene(|scene| scene.set_mass(id, value))
 }
 
+/// Sits one node in another. Both handle classes offer it, since a rider is whatever
+/// walks up to the car - an actor with hit points or a plain box with a name.
+pub(crate) fn sit_on(id: NodeId, seat: &Bound<'_, PyAny>) -> PyResult<()> {
+    let seat = crate::node_id_of(seat)?;
+    with_scene(|scene| scene.sit(id, seat))
+}
+
+/// Gets a node out of whatever it was sitting in, leaving it where the seat had it and
+/// carrying the speed the seat was going.
+pub(crate) fn stand_on(id: NodeId) -> PyResult<()> {
+    with_scene(|scene| scene.stand(id))
+}
+
+/// Whoever is riding in this seat, as the class the rider actually is.
+pub(crate) fn rider_of<'py>(py: Python<'py>, id: NodeId) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let seated = with_scene(|scene| scene.seated_in(id))?;
+    match seated {
+        Some(rider) => handle_for(py, rider).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Which seat this node is riding in, or `None` for a node standing on its own feet.
+pub(crate) fn seat_under<'py>(py: Python<'py>, id: NodeId) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let seat = with_scene(|scene| scene.seat_of(id))?;
+    match seat {
+        Some(seat) => handle_for(py, seat).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Whoever is at the wheel of this vehicle - the first of its seats that drives and has
+/// somebody in it.
+pub(crate) fn driver_of<'py>(py: Python<'py>, id: NodeId) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let driver = with_scene(|scene| scene.vehicle_driver(id))?;
+    match driver {
+        Some(driver) => handle_for(py, driver).map(Some),
+        None => Ok(None),
+    }
+}
+
 /// The colour painted on a node, from a `Vec3`, a three tuple, or a hex string
 /// such as `"#eb7a34"`. Both handle classes wear colours the same way.
 pub(crate) fn set_color_on(id: NodeId, value: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -116,13 +192,13 @@ pub(crate) fn set_collision_on(id: NodeId, value: bool) -> PyResult<()> {
     with_scene(|scene| scene.set_collision(id, value))
 }
 
-/// The collider cut from the body, as a name: box, sphere, capsule or mesh.
-pub(crate) fn collider_shape_of(id: NodeId) -> PyResult<String> {
-    with_scene(|scene| Ok(scene.collision_shape(id)?.name().to_owned()))
+/// The way the body is read by the solver, as a name: box, sphere or mesh.
+pub(crate) fn collider_type_of(id: NodeId) -> PyResult<String> {
+    with_scene(|scene| Ok(scene.collision_type(id)?.name().to_owned()))
 }
 
-pub(crate) fn set_collider_shape_on(id: NodeId, name: &str) -> PyResult<()> {
-    with_scene(|scene| scene.set_collision_shape_name(id, name))
+pub(crate) fn set_collider_type_on(id: NodeId, name: &str) -> PyResult<()> {
+    with_scene(|scene| scene.set_collision_type_name(id, name))
 }
 
 /// Whoever this node rode into during the last step, handed back as the class it
@@ -422,16 +498,159 @@ impl Object {
         with_scene(|scene| scene.set_reach(self.id, value))
     }
 
+    /// Whether this node answers a wheel, which is all that makes one a vehicle.
+    /// `new("Vehicle")` reads true from the first moment; anything else - a cube, a
+    /// loaded tank, a horse - writes true to hang a drive on it and false to take it off
+    /// again. A drive asks nothing else of the node it is put on: the size, the collider
+    /// and the gravity a script wrote stay as they were. The knobs below only answer to a
+    /// script once this reads true, and a driver seat only drives from here up.
+    #[getter]
+    fn driveable(&self) -> PyResult<bool> {
+        with_scene(|scene| scene.driveable(self.id))
+    }
+
+    #[setter]
+    fn set_driveable(&self, value: bool) -> PyResult<()> {
+        with_scene(|scene| scene.set_driveable(self.id, value))
+    }
+
     /// How this light lays what it gives: `"straight"` or `"blocky"`. A light nobody
     /// wrote on follows `carbine.lightType`, the world's own answer.
+    ///
+    /// On a vehicle the same word is how it handles: `"arcade"`, where the nose decides
+    /// the line, or `"drift"`, where the tyres can be beaten and the car slides across
+    /// it. `carbine.handlingTypes()` lists those.
     #[getter]
     fn r#type(&self) -> PyResult<String> {
-        with_scene(|scene| Ok(scene.light_type(self.id)?.name().to_owned()))
+        with_scene(|scene| {
+            if scene.is_vehicle(self.id)? {
+                return Ok(scene.handling(self.id)?.name().to_owned());
+            }
+            Ok(scene.light_type(self.id)?.name().to_owned())
+        })
     }
 
     #[setter]
     fn set_type(&self, name: &str) -> PyResult<()> {
-        with_scene(|scene| scene.set_light_type_name(self.id, name))
+        with_scene(|scene| {
+            if scene.is_vehicle(self.id)? {
+                return scene.set_handling_name(self.id, name);
+            }
+            scene.set_light_type_name(self.id, name)
+        })
+    }
+
+    /// Metres per second a full throttle is chasing. Light nodes and world objects
+    /// refuse it; only a vehicle has a top end.
+    #[getter(topSpeed)]
+    fn top_speed(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.top_speed(self.id))
+    }
+
+    #[setter(topSpeed)]
+    fn set_top_speed(&self, value: f64) -> PyResult<()> {
+        with_scene(|scene| scene.set_top_speed(self.id, value as f32))
+    }
+
+    /// Degrees per second the nose turns at full lock.
+    #[getter(turnRate)]
+    fn turn_rate(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.turn_rate(self.id))
+    }
+
+    #[setter(turnRate)]
+    fn set_turn_rate(&self, value: f64) -> PyResult<()> {
+        with_scene(|scene| scene.set_turn_rate(self.id, value as f32))
+    }
+
+    /// How much of a sideways shove the tyres keep hold of, 0 to 1. On a drift car it
+    /// is the difference between ice and gripper tarmac; an arcade car reads it as one.
+    #[getter]
+    fn grip(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.grip(self.id))
+    }
+
+    #[setter]
+    fn set_grip(&self, value: f64) -> PyResult<()> {
+        with_scene(|scene| scene.set_grip(self.id, value as f32))
+    }
+
+    /// What the driver is asking for, all three between -1 and 1 and nothing else: the
+    /// accelerator forwards, the wheel across, the brake down. They are wishes, not
+    /// speeds - the handling works out from them where the car goes - and a script that
+    /// reads the keyboard writes them every frame.
+    #[getter]
+    fn throttle(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.throttle(self.id))
+    }
+
+    #[setter]
+    fn set_throttle(&self, value: f64) -> PyResult<()> {
+        with_scene(|scene| scene.set_throttle(self.id, value as f32))
+    }
+
+    #[getter]
+    fn steer(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.steer(self.id))
+    }
+
+    #[setter]
+    fn set_steer(&self, value: f64) -> PyResult<()> {
+        with_scene(|scene| scene.set_steer(self.id, value as f32))
+    }
+
+    #[getter]
+    fn brake(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.brake(self.id))
+    }
+
+    #[setter]
+    fn set_brake(&self, value: f64) -> PyResult<()> {
+        with_scene(|scene| scene.set_brake(self.id, value as f32))
+    }
+
+    /// Whoever is at the wheel: the first of this vehicle's seats that drives and has
+    /// somebody in it. `None` for a car nobody has sat in; anything that is not a
+    /// vehicle refuses, the way the knobs above do.
+    #[getter]
+    fn driver<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        driver_of(py, self.id)
+    }
+
+    /// Whether this seat drives what it hangs on: true for a `DriverSeat`, false for a
+    /// plain `Seat`. Read, not written - the kind word said it when the node was made.
+    /// A node that is not a seat refuses.
+    #[getter]
+    fn drives(&self) -> PyResult<bool> {
+        with_scene(|scene| scene.seat_drives(self.id))
+    }
+
+    /// Whoever is riding in this seat, as the handle the rider really is. None while it
+    /// is empty; a node that is not a seat refuses, the way `drives` does.
+    #[getter]
+    fn seated<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        rider_of(py, self.id)
+    }
+
+    /// Which seat this node is riding in, or None for a node standing on its own feet.
+    #[getter(seatedIn)]
+    fn seated_in<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        seat_under(py, self.id)
+    }
+
+    /// Sits this node in a seat. The rider stays on its own branch, with its own name
+    /// and children, and the step holds it at the seat's place for as long as it is in;
+    /// nothing is re-parented. Whoever was in that seat before gets out.
+    fn sit(&self, seat: &Bound<'_, PyAny>) -> PyResult<()> {
+        sit_on(self.id, seat)
+    }
+
+    /// Gets this node out of whatever it was sitting in, leaving it exactly where the
+    /// seat had it and keeping the speed the seat was going - so stepping out of a
+    /// moving car is a moment of running. Standing on your own feet is not an error;
+    /// the same key is safe for both ways.
+    fn stand(&self) -> PyResult<()> {
+        stand_on(self.id)
     }
 
     /// How round the corners are, in pixels. UI elements only.
@@ -488,6 +707,40 @@ impl Object {
     #[setter]
     fn set_texture(&self, value: Option<String>) -> PyResult<()> {
         set_texture_on(self.id, value)
+    }
+
+    /// How many metres of this object one tile of its skin covers, so a picture
+    /// stays the size it was painted for instead of stretching over a longer face.
+    /// `0` writes the whole picture across each face instead.
+    #[getter(textureTiling)]
+    fn texture_tiling(&self) -> PyResult<f32> {
+        tiling_of(self.id)
+    }
+
+    #[setter(textureTiling)]
+    fn set_texture_tiling(&self, value: f64) -> PyResult<()> {
+        set_tiling_on(self.id, value as f32)
+    }
+
+    /// The model this object wears, as the path it was asked for. Assign a `.glb`
+    /// to hang the file's own nodes under this one - a whole vehicle, with its
+    /// turrets and seats still separate objects - and `None` to take them off.
+    /// `path#Name` hangs one named branch of a file that holds several models.
+    #[getter]
+    fn model(&self) -> PyResult<Option<String>> {
+        model_of(self.id)
+    }
+
+    #[setter]
+    fn set_model(&self, value: Option<String>) -> PyResult<()> {
+        set_model_on(self.id, value)
+    }
+
+    /// The first node under this one carrying the name, searching the whole branch
+    /// rather than one level. An import names what it holds, so this is how a script
+    /// gets hold of a door, a turret or a seat again.
+    fn find<'py>(&self, py: Python<'py>, name: String) -> PyResult<Option<Bound<'py, PyAny>>> {
+        find_under(py, self.id, &name)
     }
 
     /// Whether the object is drawn at all. False hides it and everything pinned
@@ -559,17 +812,20 @@ impl Object {
         set_collision_on(self.id, value)
     }
 
-    /// The collider cut from the body: "box", "sphere", "capsule" or "mesh".
-    /// Writing a name switches collisions on; the shape it answers with before
-    /// that is the one the body would get.
-    #[getter(collisionShape)]
-    fn collision_shape(&self) -> PyResult<String> {
-        collider_shape_of(self.id)
+    /// How the solver reads this body: "box", "sphere" or "mesh". A box is the
+    /// `size` drawn around it, a sphere a ball as wide as its widest way, and a
+    /// mesh the body's own surfaces, each one a solid the solver asks separately -
+    /// so the room inside a loaded vehicle is empty rather than filled with a brick.
+    /// Writing a name switches collisions on; the type it answers with before that
+    /// is the one the body would get.
+    #[getter(collisionType)]
+    fn collision_type(&self) -> PyResult<String> {
+        collider_type_of(self.id)
     }
 
-    #[setter(collisionShape)]
-    fn set_collision_shape(&self, name: &str) -> PyResult<()> {
-        set_collider_shape_on(self.id, name)
+    #[setter(collisionType)]
+    fn set_collision_type(&self, name: &str) -> PyResult<()> {
+        set_collider_type_on(self.id, name)
     }
 
     /// Whatever this body rode into during the last step, as the handle class it

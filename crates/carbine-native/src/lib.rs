@@ -347,8 +347,11 @@ fn end() -> PyResult<()> {
     Ok(())
 }
 
-/// Creates an object: authored geometry in the world, or a light with
-/// `carbine.new("Light")`, which draws nothing and lights what stands near it.
+/// Creates an object: authored geometry in the world, a light with
+/// `carbine.new("Light")`, which draws nothing and lights what stands near it, a
+/// vehicle with `carbine.new("Vehicle")`, or a seat - `new("Seat")` for a passenger's,
+/// `new("DriverSeat")` for the one that drives what it hangs on. A model anchor -
+/// `new("Model")` - is a node waiting for a `.glb` to be hung on it as children.
 #[pyfunction]
 #[pyo3(signature = (kind, *, name=None, parent=None))]
 fn new<'py>(
@@ -477,14 +480,18 @@ fn get_player() -> PyPlayer {
 fn kinds() -> Vec<&'static str> {
     let mut kinds = carbine_core::PRIMITIVE_KINDS.to_vec();
     kinds.push(carbine_core::LIGHT_KIND);
+    kinds.push(carbine_core::MODEL_KIND);
+    kinds.push(carbine_core::VEHICLE_KIND);
+    kinds.push(carbine_core::SEAT_KIND);
+    kinds.push(carbine_core::DRIVER_SEAT_KIND);
     kinds
 }
 
-/// The collider shapes a body can be cut as, for `obj.collisionShape`.
+/// The ways a body can be read by the solver, for `obj.collisionType`.
 #[pyfunction]
-#[pyo3(name = "collisionShapes")]
-fn collision_shapes() -> Vec<&'static str> {
-    carbine_core::ColliderShape::NAMES.to_vec()
+#[pyo3(name = "collisionTypes")]
+fn collision_types() -> Vec<&'static str> {
+    carbine_core::CollisionType::NAMES.to_vec()
 }
 
 /// How the edge of a shade is laid: `"straight"` weaves the readings of the cast
@@ -510,6 +517,14 @@ fn set_light_type(name: &str) -> PyResult<String> {
 #[pyo3(name = "lightTypes")]
 fn light_types() -> Vec<&'static str> {
     carbine_core::LightType::NAMES.to_vec()
+}
+
+/// The handlings a vehicle's `type` takes: `"arcade"`, where the nose decides the line
+/// the car follows, and `"drift"`, where the tyres have a grip and it can be beaten.
+#[pyfunction]
+#[pyo3(name = "handlingTypes")]
+fn handling_types() -> Vec<&'static str> {
+    carbine_core::HandlingType::NAMES.to_vec()
 }
 
 #[pymodule]
@@ -563,10 +578,11 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(get_packager, module)?)?;
     module.add_function(wrap_pyfunction!(get_player, module)?)?;
     module.add_function(wrap_pyfunction!(kinds, module)?)?;
-    module.add_function(wrap_pyfunction!(collision_shapes, module)?)?;
+    module.add_function(wrap_pyfunction!(collision_types, module)?)?;
     module.add_function(wrap_pyfunction!(light_type, module)?)?;
     module.add_function(wrap_pyfunction!(set_light_type, module)?)?;
     module.add_function(wrap_pyfunction!(light_types, module)?)?;
+    module.add_function(wrap_pyfunction!(handling_types, module)?)?;
     module.add_function(wrap_pyfunction!(input::key, module)?)?;
     module.add_function(wrap_pyfunction!(input::pressed, module)?)?;
     module.add_function(wrap_pyfunction!(input::released, module)?)?;

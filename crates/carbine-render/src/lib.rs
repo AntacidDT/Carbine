@@ -1296,6 +1296,435 @@ mod tests {
         std::fs::remove_dir_all(&directory).ok();
     }
 
+    /// A skin of whole left and right halves, so a face carrying the picture once
+    /// shows one edge between the two halves and a face measured in more than one
+    /// tile of it shows one edge per tile.
+    fn stripes(stem: &str) -> std::path::PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("carbine-tiling-test-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("{stem}.ktx2"));
+        let mut pixels = Vec::new();
+        for _ in 0..8 {
+            for x in 0..8 {
+                pixels.extend_from_slice(if x < 4 {
+                    &[255, 0, 0, 255]
+                } else {
+                    &[0, 0, 255, 255]
+                });
+            }
+        }
+        std::fs::write(&path, carbine_ktx::pack(8, 8, &pixels, true).unwrap()).unwrap();
+        path
+    }
+
+    /// Which half of the striped skin a pixel came from. Shading spends red and blue
+    /// alike, so the ask survives a dark corner of the face.
+    fn half(pixels: &[u8], size: u32, x: u32, y: u32) -> Option<bool> {
+        let [red, _green, blue] = pixel(pixels, size, x, y);
+        match red.cmp(&blue) {
+            std::cmp::Ordering::Greater => Some(true),
+            std::cmp::Ordering::Less => Some(false),
+            std::cmp::Ordering::Equal => None,
+        }
+    }
+
+    /// How often the busiest straight line through the middle of the frame crosses
+    /// from one half of the skin to the other, along or across. The picture only
+    /// changes along one of its own axes, so this counts tiles laid down, whichever
+    /// way the face happens to be turned.
+    fn crossings(pixels: &[u8], size: u32) -> usize {
+        let mut best = 0;
+        for line in size / 4..3 * size / 4 {
+            for along in 0..2 {
+                let mut count = 0;
+                let mut last: Option<bool> = None;
+                for step in size / 8..7 * size / 8 {
+                    let side = if along == 0 {
+                        half(pixels, size, step, line)
+                    } else {
+                        half(pixels, size, line, step)
+                    };
+                    if let Some(side) = side {
+                        count += usize::from(last.is_some_and(|previous| previous != side));
+                        last = Some(side);
+                    }
+                }
+                best = best.max(count);
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn a_wide_face_gets_more_pictures_laid_on_it_instead_of_one_stretched() {
+        let skin = stripes("wide");
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = bare();
+        flat(&mut scene);
+        let floor = card(
+            &mut scene,
+            "plane",
+            Vec3::new(2.0, 2.0, 1.0),
+            Vec3::ZERO,
+            [1.0, 1.0, 1.0],
+        );
+        scene
+            .set_texture(floor, Some(skin.to_str().unwrap().to_owned()))
+            .unwrap();
+
+        // Two metres of world span the 64 pixels, so the middle of the frame is a
+        // clean run down the face with its edges well outside the count.
+        let tiled = crossings(&renderer.read_pixels(&scene).unwrap(), 64);
+
+        scene.set_tiling(floor, 0.0).unwrap();
+        let smeared = crossings(&renderer.read_pixels(&scene).unwrap(), 64);
+
+        assert_eq!(
+            smeared, 1,
+            "one picture smeared across the face should meet its own seam once"
+        );
+        assert!(
+            tiled >= 3,
+            "a two metre face at a metre per tile should carry its picture twice over: {tiled}"
+        );
+
+        // And a tighter tile is the ask a floor tile is measured in.
+        scene.set_tiling(floor, 0.5).unwrap();
+        let close = crossings(&renderer.read_pixels(&scene).unwrap(), 64);
+        assert!(
+            close > tiled,
+            "half a metre per tile should lay the picture closer than a metre: {close} \
+             against {tiled}"
+        );
+
+        std::fs::remove_file(&skin).ok();
+    }
+
+    #[test]
+    fn a_face_exactly_a_metre_across_wears_the_picture_it_always_wore() {
+        let skin = stripes("metre");
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = bare();
+        flat(&mut scene);
+        let tile = card(
+            &mut scene,
+            "plane",
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::ZERO,
+            [1.0, 1.0, 1.0],
+        );
+        scene
+            .set_texture(tile, Some(skin.to_str().unwrap().to_owned()))
+            .unwrap();
+
+        let laid = renderer.read_pixels(&scene).unwrap();
+        scene.set_tiling(tile, 0.0).unwrap();
+        let smeared = renderer.read_pixels(&scene).unwrap();
+
+        // A metre of face is exactly one tile, so measuring the face out moves nothing
+        // a script could see. The one ask a wrapping sampler cannot answer byte for
+        // byte is the half texel blend past a picture's own edge, which takes the
+        // fringe from the far side of the skin instead of the nearest colour, so the
+        // ask is made well inside the four borders: a metre of it here, a texel of the
+        // skin is eight pixels of this frame.
+        let mut apart = Vec::new();
+        for y in 24..40u32 {
+            for x in 24..40u32 {
+                let at = ((y * 64 + x) * 4) as usize;
+                if laid[at..at + 4] != smeared[at..at + 4] {
+                    apart.push([x, y]);
+                }
+            }
+        }
+        assert!(apart.is_empty(), "the two frames part at {apart:?}");
+
+        std::fs::remove_file(&skin).ok();
+    }
+
+    #[test]
+    fn a_shell_is_measured_round_it_rather_than_across_a_face() {
+        let skin = stripes("shell");
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = bare();
+        flat(&mut scene);
+        let ball = card(
+            &mut scene,
+            "sphere",
+            Vec3::splat(2.0),
+            Vec3::ZERO,
+            [1.0, 1.0, 1.0],
+        );
+        // Tip the poles into the plane of the screen so the busiest line runs along
+        // the equator instead of spiralling into a pole.
+        scene
+            .set_vec_field(ball, VecField::RotationEuler, Vec3::new(90.0, 0.0, 0.0))
+            .unwrap();
+        scene
+            .set_texture(ball, Some(skin.to_str().unwrap().to_owned()))
+            .unwrap();
+
+        scene.set_tiling(ball, 0.0).unwrap();
+        let smeared = crossings(&renderer.read_pixels(&scene).unwrap(), 64);
+        scene.set_tiling(ball, 0.5).unwrap();
+        let tiled = crossings(&renderer.read_pixels(&scene).unwrap(), 64);
+
+        // Half a metre of tile round a two metre ball is about six pictures to the
+        // turn, and the near half of the shell shows several of them.
+        assert!(
+            tiled >= 4 && tiled > smeared * 2,
+            "a tiled shell should repeat along its arc, not smear: {smeared} against {tiled}"
+        );
+
+        std::fs::remove_file(&skin).ok();
+    }
+
+    /// The same two metres of world framed side on from wherever the lens stands, with
+    /// the world's own up at the top of the frame and the sun behind it, so a wall is
+    /// measured the way a person standing in front of it sees it.
+    fn seen_from(scene: &mut Scene, from: Vec3) {
+        scene.set_sky_enabled(false);
+        scene.set_sky_sun(from.normalize());
+        scene.set_camera_mode(CameraMode::Orthographic);
+        scene.set_camera_position(from);
+        scene.set_camera_target(Vec3::ZERO);
+        scene.set_camera_view_height(2.0);
+    }
+
+    #[test]
+    fn a_box_wears_its_skin_the_same_way_round_on_every_wall() {
+        let skin = stripes("walls");
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = bare();
+        let block = card(
+            &mut scene,
+            "cube",
+            Vec3::new(4.0, 4.0, 2.0),
+            Vec3::ZERO,
+            [1.0, 1.0, 1.0],
+        );
+        scene
+            .set_texture(block, Some(skin.to_str().unwrap().to_owned()))
+            .unwrap();
+        // The picture laid once across each face, so the line between its two halves is
+        // the mesh's own uv seam and nothing the tiling maths could move.
+        scene.set_tiling(block, 0.0).unwrap();
+
+        for from in [
+            Vec3::new(0.0, -10.0, 0.0),
+            Vec3::new(0.0, 10.0, 0.0),
+            Vec3::new(-10.0, 0.0, 0.0),
+            Vec3::new(10.0, 0.0, 0.0),
+        ] {
+            seen_from(&mut scene, from);
+            let pixels = renderer.read_pixels(&scene).unwrap();
+            let (left, right) = (half(&pixels, 64, 20, 16), half(&pixels, 64, 44, 16));
+            let above = half(&pixels, 64, 20, 48);
+            let under = half(&pixels, 64, 44, 48);
+
+            // A wall's picture runs across it and never up it, whichever of the four
+            // walls the lens is on: two pixels one over the other wear the same half,
+            // and two side by side wear different ones. Every wall is authored with its
+            // u along the ground and its v up the height, which is what makes a pattern
+            // meet itself at a corner instead of one wall's turning it.
+            assert!(
+                left.is_some() && right.is_some(),
+                "the wall looked at from {from} is not wearing the skin at all"
+            );
+            assert_eq!(left, above, "the wall from {from} changes half going down");
+            assert_eq!(right, under, "the wall from {from} changes half going down");
+            assert_ne!(
+                left, right,
+                "the two halves should meet along a vertical line on the wall from {from}"
+            );
+        }
+
+        std::fs::remove_file(&skin).ok();
+    }
+
+    #[test]
+    fn a_tile_covers_the_same_span_of_a_wall_as_of_a_floor() {
+        let skin = stripes("density");
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let path = skin.to_str().unwrap().to_owned();
+
+        // Three faces four metres along the axis their picture runs along: a wall two
+        // metres high, the same wall three times taller, and a floor. The walls are
+        // looked at from the side their picture climbs away on, which is the face the
+        // measurement used to take out of the wall's height instead of its length. Only
+        // a metre and a half of each is on screen, through the same two metre window.
+        let mut faces: Vec<(Scene, NodeId)> = Vec::new();
+        for size in [Vec3::new(4.0, 0.5, 2.0), Vec3::new(4.0, 0.5, 6.0)] {
+            let mut scene = bare();
+            let wall = card(&mut scene, "cube", size, Vec3::ZERO, [1.0, 1.0, 1.0]);
+            scene.set_texture(wall, Some(path.clone())).unwrap();
+            seen_from(&mut scene, Vec3::new(0.0, 10.0, 0.0));
+            faces.push((scene, wall));
+        }
+        let mut floor = bare();
+        flat(&mut floor);
+        let ground = card(
+            &mut floor,
+            "plane",
+            Vec3::new(4.0, 4.0, 1.0),
+            Vec3::ZERO,
+            [1.0, 1.0, 1.0],
+        );
+        floor.set_texture(ground, Some(path)).unwrap();
+        faces.push((floor, ground));
+
+        // A metre per tile is a metre of wall or a metre of floor, and the face's other
+        // dimensions have no say in it: measuring a wall along its thin axis instead of
+        // the long one is exactly the pull that stretches a skin out of shape. The
+        // striped picture turns once to a tile, so a metre and a half of window meets
+        // its seams three times over at a metre apiece - and four times as fine a tile
+        // meets them several times as often, wherever the face happens to be standing.
+        for (metres, least, most) in [(1.0, 2, 4), (0.25, 8, 16)] {
+            let mut found = Vec::new();
+            for (scene, face) in faces.iter_mut() {
+                scene.set_tiling(*face, metres).unwrap();
+                let seams = crossings(&renderer.read_pixels(scene).unwrap(), 64);
+                assert!(
+                    seams >= least && seams <= most,
+                    "a four metre face at {metres} m per tile should meet its seam about \
+                     {} times across the window: {seams}",
+                    most / 2
+                );
+                found.push(seams);
+            }
+            assert!(
+                found.windows(2).all(|pair| pair[0] == pair[1]),
+                "a wall, a taller wall and a floor of the same width should wear the \
+                 same tile the same size: {found:?} at {metres} m per tile"
+            );
+        }
+
+        // And the same three faces, left to lie one picture across the whole of them,
+        // meet that seam once rather than the several times a metre of tile finds it.
+        for (scene, face) in faces.iter_mut() {
+            scene.set_tiling(*face, 0.0).unwrap();
+            assert_eq!(
+                crossings(&renderer.read_pixels(scene).unwrap(), 64),
+                1,
+                "one smeared picture across the face meets its own seam once"
+            );
+        }
+
+        std::fs::remove_file(&skin).ok();
+    }
+
+    /// A tile as the generator would put it in a script's hands - a whole real
+    /// surface, packed to KTX2 with its mip chain - so a test can be about the look of
+    /// a pattern rather than about two flat colours.
+    fn woven(stem: &str, kind: &str) -> std::path::PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("carbine-tiling-test-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("{stem}.ktx2"));
+        let bytes =
+            carbine_core::generate_texture(kind, None, Some("low"), carbine_core::Seed::of(stem))
+                .unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// How far, in eight-bit colour levels, the average pixel of the frame sits from
+    /// the pixel `across` steps further along the skin's run - or up it, whichever of
+    /// the two axes a tile is laid along. Only the band of columns (or rows) named, so
+    /// a caller can keep clear of a frame's borders.
+    fn apart(pixels: &[u8], size: u32, across: u32, from: u32, to: u32, up: bool) -> f32 {
+        let mut total = 0.0f64;
+        let mut count = 0.0f64;
+        for step in 6..size - 6 {
+            for line in from..to {
+                let (x, y) = if up { (step, line) } else { (line, step) };
+                let here = pixel(pixels, size, x, y);
+                let there = if up {
+                    pixel(pixels, size, x, y + across)
+                } else {
+                    pixel(pixels, size, x + across, y)
+                };
+                for channel in 0..3 {
+                    total += here[channel].abs_diff(there[channel]) as f64;
+                    count += 1.0;
+                }
+            }
+        }
+        (total / count) as f32
+    }
+
+    /// The surface's own grain: how far the colour moves over the few pixels a person
+    /// standing in front of it can resolve. This is the yardstick for a tile-to-tile
+    /// step - a grid of copies shows nothing at all a whole tile along, and one surface
+    /// shows its grain there too.
+    fn grain(pixels: &[u8], size: u32, from: u32, to: u32, up: bool) -> f32 {
+        let mut total = 0.0f64;
+        for across in 1..=8u32 {
+            total += apart(pixels, size, across, from, to, up) as f64;
+        }
+        (total / 8.0) as f32
+    }
+
+    #[test]
+    fn a_tiled_floor_reads_as_one_floor_rather_than_a_grid_of_copies() {
+        let skin = woven("grassed", "grass");
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        let mut scene = bare();
+        flat(&mut scene);
+        let ground = card(
+            &mut scene,
+            "plane",
+            Vec3::new(4.0, 4.0, 1.0),
+            Vec3::ZERO,
+            [1.0, 1.0, 1.0],
+        );
+        scene
+            .set_texture(ground, Some(skin.to_str().unwrap().to_owned()))
+            .unwrap();
+
+        let pixels = renderer.read_pixels(&scene).unwrap();
+        // Two tiles of this skin stand in the two metre window, so thirty two pixels of
+        // this frame is one whole tile: the left half of the floor and the right half
+        // are the same picture laid side by side, and so is the top against the bottom.
+        // Stamped over, a pixel and its tile twin wear precisely the same colour and
+        // that distance reads nothing at all - which is the grid of copypasted pictures
+        // a person sees before anything else. Running each copy off its lattice and
+        // wearing it to its own tone spends a fair share of the surface's own grain
+        // there instead, whichever of the skin's two axes it is measured along.
+        for up in [false, true] {
+            let grain = grain(&pixels, 64, 2, 30, up);
+            let tile = apart(&pixels, 64, 32, 2, 30, up);
+            assert!(
+                grain > 1.0,
+                "the floor is wearing a flat colour, so nothing below proves anything: {grain}"
+            );
+            assert!(
+                tile * 3.0 > grain,
+                "a whole tile along the skin should still move the picture about as much \
+                 as the surface does over a few pixels, not a third of it less: {tile} \
+                 against a grain of {grain}"
+            );
+
+            // And the running must not be a jump on the lattice. The line where two
+            // tiles meet is one whole tile from the edge of the frame, so the step
+            // across it is measured against the steps the surface makes everywhere
+            // else: a picture that breaks there would be a new seam, and the ask is a
+            // smoother surface, not a gridded one with the grid painted over.
+            let joined = apart(&pixels, 64, 1, 31, 32, up);
+            let open = (apart(&pixels, 64, 1, 2, 31, up) + apart(&pixels, 64, 1, 34, 62, up)) / 2.0;
+            assert!(
+                joined < open * 2.0,
+                "the line where two tiles meet is harder than the surface's own detail: \
+                 {joined} across it against {open} everywhere else"
+            );
+        }
+
+        // A face of exactly one tile is never run in at all, so it keeps the picture the
+        // file drew it with, byte for byte - see
+        // `a_face_exactly_a_metre_across_wears_the_picture_it_always_wore`.
+        std::fs::remove_file(&skin).ok();
+    }
+
     #[test]
     fn transparency_blends_a_world_object_over_what_is_behind_it() {
         let mut renderer = Renderer::offscreen(64, 64).unwrap();

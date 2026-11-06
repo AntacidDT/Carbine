@@ -23,7 +23,7 @@ use crate::entity::EntityData;
 use crate::motion::Motion;
 use crate::node::{
     Children, NodeId, NodeKind, NodeMesh, NodeName, NodeTexture, ObjectColor, Opacity, Parent,
-    Scene, SceneError, Transform, Visible,
+    Scene, SceneError, TextureTiling, Transform, Visible,
 };
 use crate::ui::Ui;
 
@@ -131,6 +131,7 @@ impl Scene {
         let color = self.component::<ObjectColor>(id)?.0;
         let opacity = self.component::<Opacity>(id)?.0;
         let texture = self.component::<NodeTexture>(id)?.0.clone();
+        let tiling = self.component::<TextureTiling>(id)?.0;
         let visible = self.component::<Visible>(id)?.0;
         let motion = {
             let source = self.component::<Motion>(id)?;
@@ -160,6 +161,10 @@ impl Scene {
             stay_after_death: data.stay_after_death,
         });
         let lamp = self.world.get::<crate::light::Lamp>(source).copied();
+        // A copy of a model node wears the same file, and its children come along as the
+        // branch they are: the copy measures as the model rather than as an empty anchor.
+        let worn = self.world.get::<crate::model::ModelSource>(source).cloned();
+        let adopted = self.world.get::<crate::model::Adopted>(source).copied();
         let driven = self.world.get::<crate::vehicle::Vehicle>(source).copied();
         let seat =
             self.world
@@ -180,6 +185,7 @@ impl Scene {
             ObjectColor(color),
             Opacity(opacity),
             NodeTexture(texture),
+            TextureTiling(tiling),
             Visible(visible),
             motion,
             Parent(parent_id),
@@ -205,6 +211,12 @@ impl Scene {
         }
         if let Some(place) = seat {
             spawned.insert(place);
+        }
+        if let Some(worn) = worn {
+            spawned.insert(worn);
+        }
+        if let Some(adopted) = adopted {
+            spawned.insert(adopted);
         }
         if let Some(group) = group {
             spawned.insert(Link(group));
@@ -302,11 +314,12 @@ mod tests {
             .unwrap();
         scene.set_color_hex(original, "#8b93a6").unwrap();
         scene.set_opacity(original, 200.0).unwrap();
+        scene.set_tiling(original, 2.5).unwrap();
         scene.set_uses_gravity(original, true).unwrap();
         scene.set_anchored(original, true).unwrap();
         scene.set_gravity_pull(original, 1.6).unwrap();
         scene
-            .set_collision_shape(original, crate::collision::ColliderShape::Capsule)
+            .set_collision_type(original, crate::collision::CollisionType::Mesh)
             .unwrap();
 
         let copies = scene.duplicate(original, 3).unwrap();
@@ -324,13 +337,14 @@ mod tests {
             );
             assert_eq!(scene.color_hex(*copy).unwrap(), "#8b93a6");
             assert_eq!(scene.opacity(*copy).unwrap(), 200.0);
+            assert_eq!(scene.tiling(*copy).unwrap(), 2.5);
             assert!(scene.uses_gravity(*copy).unwrap());
             assert!(scene.is_anchored(*copy).unwrap());
             assert_eq!(scene.gravity_pull(*copy).unwrap(), 1.6);
             assert!(scene.has_collision(*copy).unwrap());
             assert_eq!(
-                scene.collision_shape(*copy).unwrap(),
-                crate::collision::ColliderShape::Capsule
+                scene.collision_type(*copy).unwrap(),
+                crate::collision::CollisionType::Mesh
             );
         }
 
@@ -408,6 +422,14 @@ mod tests {
         for twin in &twins {
             assert_eq!(scene.opacity(*twin).unwrap(), 40.0);
         }
+
+        // How far a tile reaches is part of what the thing is made of, so a crowd of
+        // them laid on a floor changes its scale of pattern all at once.
+        scene.set_tiling(twins[2], 2.0).unwrap();
+        assert_eq!(scene.tiling(original).unwrap(), 2.0);
+        for twin in &twins {
+            assert_eq!(scene.tiling(*twin).unwrap(), 2.0);
+        }
     }
 
     #[test]
@@ -443,12 +465,12 @@ mod tests {
         let original = crate_(&mut scene);
         let twins = scene.link_duplicate(original, 2).unwrap();
 
-        scene.set_collision_shape_name(original, "sphere").unwrap();
+        scene.set_collision_type_name(original, "sphere").unwrap();
         for twin in &twins {
             assert!(scene.has_collision(*twin).unwrap());
             assert_eq!(
-                scene.collision_shape(*twin).unwrap(),
-                crate::collision::ColliderShape::Sphere
+                scene.collision_type(*twin).unwrap(),
+                crate::collision::CollisionType::Sphere
             );
         }
 

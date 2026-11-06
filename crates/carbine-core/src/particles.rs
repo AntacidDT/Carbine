@@ -28,7 +28,7 @@ use crate::geometry::{self, Solid};
 use crate::motion::Motion;
 use crate::node::{
     Children, DEFAULT_COLOR, MAX_ALPHA, NodeId, NodeKind, NodeName, NodeTexture, ObjectColor,
-    Opacity, Parent, Scene, SceneError, Transform, Visible,
+    Opacity, Parent, Scene, SceneError, TextureTiling, Transform, Visible,
 };
 use crate::player::GROUND_HEIGHT;
 use crate::procgen::{Rng, Seed, salt};
@@ -231,6 +231,7 @@ impl Scene {
                 ObjectColor(DEFAULT_COLOR),
                 Opacity::default(),
                 NodeTexture::default(),
+                TextureTiling::default(),
                 Visible::default(),
                 Motion::default(),
                 Parent(parent_id),
@@ -597,11 +598,15 @@ impl Scene {
     }
 
     /// The bodies a drop can be stopped by. UI is measured in pixels, so it is
-    /// never one of them, and a body with no collider has nothing to hit.
+    /// never one of them, and a body with no collider has nothing to hit. A body cut
+    /// from several surfaces stops a drop with each of them separately, which is the
+    /// point: a drop that falls through the gap under a tank's hull fell through a
+    /// gap the box around the whole vehicle did not have.
     fn blockers(&self) -> Vec<Blocker> {
         self.colliders()
             .into_iter()
-            .map(|(_, solid)| {
+            .flat_map(|(_, pieces)| pieces)
+            .map(|solid| {
                 let (min, max) = solid.aabb();
                 Blocker { min, max, solid }
             })

@@ -48,7 +48,7 @@ def test_a_copy_starts_where_the_original_stands_and_then_goes_its_own_way():
         original.gravity = True
         original.gravityPull = 1.6
         original.mass = 500.0
-        original.collisionShape = "capsule"
+        original.collisionType = "mesh"
 
         copy = carbine.duplicate(original)[0]
         assert copy.position.toTuple() == (2.0, 3.0, 4.0)
@@ -60,7 +60,7 @@ def test_a_copy_starts_where_the_original_stands_and_then_goes_its_own_way():
         assert copy.gravityPull == pytest.approx(1.6)
         assert copy.mass == pytest.approx(500.0)
         assert copy.collision is True
-        assert copy.collisionShape == "capsule"
+        assert copy.collisionType == "mesh"
 
         copy.position = (0.0, 0.0, 0.0)
         assert original.position.toTuple() == (2.0, 3.0, 4.0)
@@ -138,10 +138,16 @@ def test_linkDuplicate_spreads_one_write_over_the_whole_group():
         assert [twin.transparent for twin in twins] == [40.0] * 4
 
         twins[2].gravity = True
-        twins[2].collisionShape = "sphere"
+        twins[2].collisionType = "sphere"
         assert original.gravity is True
         assert original.collision is True
-        assert [twin.collisionShape for twin in twins] == ["sphere"] * 4
+        assert [twin.collisionType for twin in twins] == ["sphere"] * 4
+
+        # How far a tile reaches is part of what the thing is made of, so a crowd laid
+        # on a floor changes its scale of pattern all at once.
+        twins[3].textureTiling = 2.0
+        assert original.textureTiling == 2.0
+        assert [twin.textureTiling for twin in twins] == [2.0] * 4
     finally:
         carbine.destroy("all")
 

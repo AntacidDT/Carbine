@@ -444,7 +444,15 @@ name = "carbine-core"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "carbine-glb",
  "carbine-ktx",
+ "glam 0.34.1",
+]
+
+[[package]]
+name = "carbine-glb"
+version = "0.1.0"
+dependencies = [
  "glam 0.34.1",
 ]
 

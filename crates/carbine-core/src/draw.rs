@@ -2,7 +2,8 @@ use glam::{Mat4, Vec3};
 
 use crate::mesh::{MeshData, MeshHandle};
 use crate::node::{
-    Children, MAX_ALPHA, NodeId, NodeMesh, NodeTexture, ObjectColor, Opacity, Scene, Transform,
+    Children, MAX_ALPHA, NodeId, NodeMesh, NodeTexture, ObjectColor, Opacity, Scene, TextureTiling,
+    Transform,
 };
 use crate::ui::Ui;
 
@@ -17,6 +18,9 @@ pub struct DrawItem<'a> {
     pub alpha: f32,
     /// The image the renderer should skin this object with, by path.
     pub texture: Option<&'a str>,
+    /// How many metres of this object one tile of its skin covers. Nil is the whole
+    /// picture across the face, which is what a model's own UVs already are.
+    pub tiling: f32,
 }
 
 impl Scene {
@@ -57,6 +61,11 @@ impl Scene {
                     .world
                     .get::<NodeTexture>(entity)
                     .and_then(|texture| texture.0.as_deref());
+                let tiling = self
+                    .world
+                    .get::<TextureTiling>(entity)
+                    .map(|tiling| tiling.0)
+                    .unwrap_or(1.0);
                 items.push(DrawItem {
                     node: id,
                     handle: mesh.handle,
@@ -65,6 +74,7 @@ impl Scene {
                     color: color.to_array(),
                     alpha: alpha / MAX_ALPHA,
                     texture,
+                    tiling,
                 });
             }
 
@@ -165,6 +175,7 @@ mod tests {
             .set_vec_field(first, VecField::Color, Vec3::new(1.0, 0.0, 0.0))
             .unwrap();
         scene.set_opacity(first, 128.0).unwrap();
+        scene.set_tiling(first, 3.0).unwrap();
         let wood = crate::test_skin("draw-wood");
         scene.set_texture(first, Some(wood.clone())).unwrap();
 
@@ -172,7 +183,12 @@ mod tests {
         assert_ne!(items[0].handle, items[1].handle);
         assert_eq!(items[0].color, [1.0, 0.0, 0.0]);
         assert_eq!(items[0].texture, Some(wood.as_str()));
+        assert_eq!(items[0].tiling, 3.0);
         assert_eq!(second, items[1].node);
+        assert_eq!(
+            items[1].tiling, 1.0,
+            "a body nobody scaled the skin of still lies one metre across"
+        );
 
         let alpha = 128.0 / crate::node::MAX_ALPHA;
         assert!((items[0].alpha - alpha).abs() < 1e-6, "{}", items[0].alpha);

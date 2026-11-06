@@ -6,13 +6,21 @@
 //! falls, what it splashes into - is the core's business, so an editor and a script
 //! get the same weather.
 //!
+//! The second is the texture generator. It takes a surface - grass, sand, rock, brick -
+//! with something gone wrong with it and a quality to paint it at, and writes the
+//! `.ktx2` an object is skinned with. Nothing is fetched, nothing is licensed and no
+//! picture is looked for on disk: the tile comes out of a seed, so two people who type
+//! the same word stand on the same lawn.
+//!
 //! A system is a node, which is why `particles()` hands back a `Particle` and not a
 //! register: it can hang on a chimney and fly from its top, or stand on its own in
 //! the middle of the sky. Because it is a node, it is parented, moved, coloured and
 //! destroyed the way any other object is, and because it has no body, the knobs it
 //! adds are about its crowd rather than about a shape.
 
-use pyo3::exceptions::PyTypeError;
+use std::path::PathBuf;
+
+use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
@@ -144,8 +152,82 @@ impl PyProcedural {
         carbine_core::ParticleShape::NAMES.to_vec()
     }
 
+    /// Paints a surface and writes it as a `.ktx2`, answering with the path it wrote,
+    /// which is the picture an object wants:
+    /// `ground.texture = carbine.procedural.texture("grass", variation="moss")`.
+    ///
+    /// `surface` is what the thing is made of and `variation` what has gone wrong with
+    /// it - `textureTypes()` and `textureVariations()` are the lists it may choose from,
+    /// and a name off either list is refused rather than walked past. `quality` is one
+    /// word for both how large the tile is and how far its detail is summed: `low` is
+    /// 256 texels over three doublings, `high` is 1024 over seven. The pattern itself is
+    /// counted rather than measured, so six courses of brick are six courses at any
+    /// quality and a finer tile is the same wall seen closer.
+    ///
+    /// The picture comes out of `seed`, so the same word paints the same surface for
+    /// anybody. The file is named for everything asked for, which leaves a rerun
+    /// overwriting its own picture instead of adding a second one to the folder. An
+    /// `out` that names a folder writes into it and anything else is the exact file;
+    /// left alone the tile lands beside the folder the game is run from. A
+    /// `pathlib.Path` is as good as a string for it.
+    #[pyo3(name = "texture")]
+    #[pyo3(signature = (surface, *, variation = None, quality = None, seed = None,
+                        out = None))]
+    fn create_texture(
+        &self,
+        surface: &str,
+        variation: Option<&str>,
+        quality: Option<&str>,
+        seed: Option<Bound<'_, PyAny>>,
+        out: Option<PathBuf>,
+    ) -> PyResult<String> {
+        let seed = seed
+            .as_ref()
+            .map(wanted_seed)
+            .transpose()?
+            .unwrap_or_default();
+        let written = carbine_core::save_texture(surface, variation, quality, seed, out.as_deref())
+            .map_err(paint_error)?;
+
+        Ok(written.display().to_string())
+    }
+
+    /// The surfaces the generator paints.
+    #[pyo3(name = "textureTypes")]
+    fn texture_types(&self) -> Vec<&'static str> {
+        carbine_core::TextureType::NAMES.to_vec()
+    }
+
+    /// The ways one surface can be ruined, which is what a `variation` may be named for
+    /// it. A surface that is not one of the four is refused the way a picture of it is.
+    #[pyo3(name = "textureVariations")]
+    fn texture_variations(&self, surface: &str) -> PyResult<Vec<&'static str>> {
+        Ok(carbine_core::texture_variations(surface)
+            .map_err(paint_error)?
+            .to_vec())
+    }
+
+    /// The qualities, from the smallest tile to the largest.
+    #[pyo3(name = "textureQualities")]
+    fn texture_qualities(&self) -> Vec<&'static str> {
+        carbine_core::TextureQuality::NAMES.to_vec()
+    }
+
     fn __repr__(&self) -> &'static str {
         "<Procedural generators>"
+    }
+}
+
+/// What a generator refused, in the shape a script catches. An authoring name that is
+/// not one, or a finished picture the encoder would not take, is a `ValueError`; a
+/// folder the file could not be written into is an `OSError`.
+fn paint_error(error: carbine_core::TextureError) -> PyErr {
+    match error {
+        carbine_core::TextureError::Write { .. } => PyOSError::new_err(error.to_string()),
+        carbine_core::TextureError::Type { .. }
+        | carbine_core::TextureError::Variation { .. }
+        | carbine_core::TextureError::Quality { .. }
+        | carbine_core::TextureError::Encoder { .. } => PyValueError::new_err(error.to_string()),
     }
 }
 

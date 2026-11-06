@@ -53,8 +53,10 @@ class Mesh:
 
 class Object:
     """A body in the world. Reads give the values back as `Vec3`; every vector
-    write below also takes an `(x, y, z)` tuple, in which `...` or None keeps the
-    axis as it already is. The world is z-up: `size` is (length, width, height)."""
+    write below takes one of those, or an `(x, y, z)` tuple in which `...` or None
+    keeps the axis as it already is. A `Vec3` read off a node is that node's own value,
+    so it follows the node it came from rather than the moment it was read.
+    The world is z-up: `size` is (length, width, height)."""
 
     id: int
     name: str
@@ -98,11 +100,83 @@ class Object:
     reach: float
     # How this light lays what it gives: "straight" or "blocky". A light nobody wrote
     # on follows `carbine.lightType`, the world's own answer.
+    # On a vehicle the same word is how it handles instead: "arcade", where the nose
+    # decides the line, or "drift", where the tyres can be beaten and the car slides
+    # across its old line. `carbine.handlingTypes()` lists those.
     type: str
+    # Vehicle knobs. `new("Vehicle")` is one from the first moment - a hatchback 4.4 by 2
+    # by 1.2 metres, in the solver and held by gravity - and anything else becomes one by
+    # writing `driveable`, which hangs a drive on the node and asks nothing else of it: a
+    # loaded tank keeps the size, mass and collider it arrived with. The rest below is
+    # refused on a node that is not a vehicle, the way it refuses the light knobs above.
+    driveable: bool
+    # Metres per second a full throttle is chasing.
+    topSpeed: float
+    # Degrees per second the nose turns at full lock.
+    turnRate: float
+    # How much of a sideways shove the tyres keep hold of, 0 for ice to 1 for gripper
+    # tarmac. An arcade car reads it as 1 and never lets the car slide at all.
+    grip: float
+    # The three things a driver asks for, each between -1 and 1: the accelerator
+    # forwards, the wheel across, the brake down. They are wishes rather than speeds -
+    # the handling works out from them where the car goes - and a script that reads the
+    # keyboard writes them every frame. Unlike the three above they are one car's own
+    # business, so a write does not travel through a `linkDuplicate` group.
+    throttle: float
+    steer: float
+    brake: float
+    # Whoever is at the wheel: the first of this car's seats that drives and has
+    # somebody in it. None for a car nobody has sat in; anything that is not a vehicle
+    # refuses, the way the knobs above do.
+    @property
+    def driver(self) -> Object | Entity | Particle | None: ...
+    # Seat knobs. True for a `new("DriverSeat")`, which drives whatever vehicle it hangs
+    # on, and false for a plain `new("Seat")`, which only rides along. Read, not written:
+    # the kind word said it when the node was made. A node that is not a seat refuses.
+    drives: bool
+    # Whoever is riding in this seat, as the handle the rider really is. None while it
+    # is empty; a node that is not a seat refuses, the way `drives` does.
+    @property
+    def seated(self) -> Object | Entity | Particle | None: ...
+    # Which seat this node is riding in, or None for one standing on its own feet.
+    @property
+    def seatedIn(self) -> Object | Entity | Particle | None: ...
+    # Sits this node in a seat. It stays on its own branch, with its own name and
+    # children, and the step holds it at the seat's place for as long as it is in;
+    # nothing is re-parented. Whoever was in that seat before gets out.
+    def sit(self, seat: Object) -> None: ...
+
+    # Gets out of whatever this node was sitting in, left exactly where the seat had it
+    # and keeping the speed the seat was going - so stepping out of a moving car is a
+    # moment of running. Asking while on your own feet is not an error, which makes the
+    # same key safe for both ways.
+    def stand(self) -> None: ...
     # The packed image (`.ktx2`) painted over the object's colour, as a path. None
     # paints it flat, and an image in any other format is refused - pack it with
     # `carbine.packager.image(...)` and use the path that answers.
     texture: str | None
+    # How many metres of the object one tile of its skin covers. A tile stays the size
+    # it was painted for: the same picture is as big on the six metre wall as on the
+    # floor tile beside it, because every face is measured along its own two axes and
+    # laid once per metre of each, so nothing stretches to fit a longer face. One metre
+    # left alone; `0` smears one whole picture across each face instead, which is how a
+    # model's own UVs already reach the screen. A face holding more than one tile is run
+    # in rather than stamped - each repeat nudged off its lattice and worn to a tone of
+    # its own - so a long wall reads as one surface instead of a row of copies.
+    textureTiling: float
+    # The model file worn here, as the path it was asked for. Assign a `.glb` and the
+    # file's own nodes come in as children of this one - a whole vehicle, with every
+    # turret, door and seat still a node of its own, named what the file named it -
+    # and `None` takes that branch off again, leaving whatever the script hung here
+    # itself in place. `path#Name` hangs one named branch out of a file holding a
+    # whole hangar. Carbine reads `.glb` alone, so a model written in another format
+    # is refused until it has been turned into one.
+    model: str | None
+    # The first node under this one carrying the name, searched down the whole branch
+    # rather than one level at a time. An import names what it brings, so this is how
+    # a script gets hold of a turret, a door or a seat again. None if nothing is named
+    # that, here or below.
+    def find(self, name: str) -> Object | Entity | Particle | None: ...
     # False leaves the object, and everything pinned under it, out of the frame.
     visible: bool
     # How the object takes part in `step`. Gravity is off by default.
@@ -117,10 +191,13 @@ class Object:
     # In the solver, or out of it. Nothing collides until a script says so, and a
     # body that never asked falls straight through everything.
     collision: bool
-    # The collider cut from the body: "box", "sphere", "capsule" or "mesh". A
-    # write switches collisions on; a read before that gives the shape the body
-    # would be cut as. `carbine.collisionShapes()` lists them.
-    collisionShape: str
+    # How the solver reads the body: "box", "sphere" or "mesh". A box is the `size`
+    # drawn around it, a sphere a ball as wide as its widest way, and a mesh the
+    # body's own surfaces, each one a solid the solver asks about on its own - so
+    # the room inside a loaded vehicle stays empty instead of filled in by a brick.
+    # A write switches collisions on; a read before that gives the type the body
+    # would be cut as. `carbine.collisionTypes()` lists them.
+    collisionType: str
     # UI overlay knobs; a world object raises on them. Sizes are pixels.
     corner: float
     polygon: int
@@ -159,6 +236,15 @@ class Entity:
     color: Vec3 | str
     # A packed `.ktx2` path, or None for the actor's own colour.
     texture: str | None
+    # Metres of the actor's body one tile of its skin covers, as on `Object`; `0` lays
+    # one whole picture across each face.
+    textureTiling: float
+    # The `.glb` this actor's body wears. Its nodes come in as children of the actor,
+    # named what the file names them, so an imported rig is still a set of parts a
+    # script can reach; None takes them off. Same rules as `Object.model`.
+    model: str | None
+    # The first node under this actor carrying the name, anywhere down the branch.
+    def find(self, name: str) -> Object | Entity | Particle | None: ...
     visible: bool
     anchored: bool
     gravity: bool
@@ -166,7 +252,7 @@ class Entity:
     # Kilograms, or what the actor's box weighs unwritten.
     mass: float
     collision: bool
-    collisionShape: str
+    collisionType: str
     # Whether there is any health left. A corpse answers false, takes no more
     # hits, and cannot hurt anything.
     @property
@@ -177,6 +263,16 @@ class Entity:
     # falling. False removes the node, and everything pinned under it.
     stayAfterDeath: bool
     def touching(self) -> list[Object | Entity]: ...
+    # Which seat this actor is riding in, or None standing on its own feet.
+    @property
+    def seatedIn(self) -> Object | Entity | Particle | None: ...
+    # Sits this actor in a seat, and the step holds it there: an actor in a car neither
+    # falls nor shoves. Whoever was in that seat before gets out.
+    def sit(self, seat: Object) -> None: ...
+
+    # Gets out, where the seat had this actor and still carrying the seat's speed. A
+    # dying actor is stood out by the engine, with a shove, whether or not anybody asks.
+    def stand(self) -> None: ...
     # Bites `other` for this actor's `damage` and answers with the hit points that
     # actually landed: zero when the target was already dead or still hurting, or
     # when this actor is a corpse with nothing to give.
@@ -538,7 +634,8 @@ class Particle:
 class Procedural:
     """The content generators, `carbine.procedural`. These make things rather than
     asking for them: the particle generator takes a shape, a colour or an image and
-    turns it into a crowd flying through the world."""
+    turns it into a crowd flying through the world, and the texture generator paints
+    a surface and writes it as the `.ktx2` an object is skinned with."""
 
     # Writes a system into the world and hands back its handle. Every knob is
     # optional; one left out keeps the value the engine gives a fresh system, so
@@ -566,6 +663,37 @@ class Procedural:
     ) -> Particle: ...
     # The shapes a `Particle.shape` accepts.
     def shapes(self) -> list[str]: ...
+
+    # Paints a surface and writes it as a `.ktx2`, answering with the path it wrote,
+    # which is the picture an object wants:
+    # `ground.texture = carbine.procedural.texture("grass", variation="moss")`.
+    # `surface` is what the thing is made of, from `textureTypes()`; `variation` is
+    # what has gone wrong with it, from `textureVariations(surface)`; `quality` is one
+    # word for both the size of the tile and how far its detail is summed, off
+    # `textureQualities()`, and is `medium` left alone. The three names are read
+    # forgivingly - `lawn`, `hi`, `small` all land somewhere - and a name the engine
+    # does not recognise raises ValueError, which says what it does offer. The picture
+    # comes out of `seed`, so the same word paints the same surface for anybody. An
+    # `out` that names a folder writes into it and anything else is the exact file;
+    # left alone the tile lands in the folder the game is run from, named for
+    # everything asked for so a rerun overwrites its own picture instead of adding a
+    # second one. A folder that cannot be made raises OSError.
+    def texture(
+        self,
+        surface: str,
+        *,
+        variation: str | None = None,
+        quality: str | None = None,
+        seed: int | str | None = None,
+        out: str | os.PathLike[str] | None = None,
+    ) -> str: ...
+    # The surfaces the generator paints.
+    def textureTypes(self) -> list[str]: ...
+    # The ways one surface can be ruined, which is what a `variation` may be named for
+    # it. A surface that is not one of the four raises ValueError.
+    def textureVariations(self, surface: str) -> list[str]: ...
+    # The qualities, from the smallest tile to the largest.
+    def textureQualities(self) -> list[str]: ...
 
 class Packager:
     """The importer, `carbine.packager`. Carbine loads one format per class of
@@ -660,11 +788,13 @@ def duplicate(
 
 # Like `duplicate`, and the copies tied to the original in one configuration, the way
 # Blender's linked duplicates share a data block. A write about what the thing *is*
-# lands on every member - colour, `transparent`, `texture`, `gravity`, `gravityPull`,
-# `mass`, `anchored`, `collision`, `collisionShape`, an actor's `hitPause` and
-# `stayAfterDeath`, a UI element's `corner`, `polygon` and `outline`, and every
-# particle knob except `active`. A write about where a member is or how much of it is
-# left stays with that member: `position`, `rotation`, `size`, `scale`, `health`,
+# lands on every member - colour, `transparent`, `texture`, `textureTiling`, `gravity`,
+# `gravityPull`, `mass`, `anchored`, `collision`, `collisionType`, an actor's
+# `hitPause` and `stayAfterDeath`, a UI element's `corner`, `polygon` and `outline`, a
+# vehicle's `type`, `topSpeed`, `turnRate` and `grip`, and every particle knob except
+# `active`.
+# A write about where a member is, or how much of it is left, stays with that member:
+# `position`, `rotation`, `size`, `scale`, `health`,
 # `damage`, `visible`, a crowd's `restart()` - so twins can stand at fifty different
 # windows and die one at a time. A copy of a member joins the group it was copied
 # from; `duplicate` of one leaves the group, and the original only picks up a group
@@ -688,11 +818,16 @@ def killEntity(entity: Entity) -> None: ...
 def camera() -> Camera: ...
 def player() -> Player: ...
 def mouse() -> Mouse: ...
-# What `new` accepts: the geometry kinds, plus "light", which makes a light node
-# rather than a body.
+# What `new` accepts: the geometry kinds, plus "light", which lights rather than fills,
+# "vehicle", which is a body wearing a drive, and the two seats - "seat" to ride along
+# in and "driverSeat", which drives the vehicle it hangs on. A seat reads whatever a
+# script feels like calling it: "chair", "passenger" and "Driver's Seat" all work.
 def kinds() -> list[str]: ...
-def collisionShapes() -> list[str]: ...
+# How the solver reads a body: "box", "sphere" and "mesh".
+def collisionTypes() -> list[str]: ...
 def lightTypes() -> list[str]: ...
+# What a vehicle's `type` takes: "arcade" and "drift".
+def handlingTypes() -> list[str]: ...
 def dt() -> float: ...
 def step(seconds: float) -> None: ...
 

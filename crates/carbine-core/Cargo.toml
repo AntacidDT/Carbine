@@ -7,5 +7,6 @@ repository.workspace = true
 
 [dependencies]
 bevy_ecs.workspace = true
+carbine-glb = { path = "../carbine-glb" }
 carbine-ktx = { path = "../carbine-ktx" }
 glam.workspace = true

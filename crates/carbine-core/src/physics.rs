@@ -8,7 +8,7 @@
 
 use glam::{Quat, Vec3};
 
-use crate::geometry::{self, Solid};
+use crate::geometry::{self, Contact, Solid};
 use crate::motion::Motion;
 use crate::node::{NodeId, Scene, VecField};
 use crate::player::{GROUND_HEIGHT, PlayerController};
@@ -39,7 +39,13 @@ struct Body {
     /// The node the collider belongs to. For the player this is the object drawn
     /// as its body, which may be none at all.
     node: Option<NodeId>,
-    solid: Solid,
+    /// The convex pieces of the body, in world meters. A box or a ball is one
+    /// piece; a mesh is one per surface it is drawn from, because a hull around
+    /// the whole of a vehicle is a brick with the room inside it filled in.
+    pieces: Vec<Solid>,
+    /// Meters per second, as of this pass. A pair that rides into each other trades
+    /// it, and the answer is only worth anything if the body is left reporting it.
+    velocity: Vec3,
     /// Whether a push may move it. Scenery holds its ground.
     movable: bool,
     /// Kilograms. Two bodies that may both move divide the push by it.
@@ -67,6 +73,11 @@ impl Scene {
         for id in self.node_tree() {
             self.integrate(id, dt);
         }
+
+        // Every body is cut to where it now stands before anything is asked to shove
+        // it, so a mesh of thousands of points is carried into world metres once a step
+        // rather than at each of the passes below - and not at all while it stands still.
+        self.recut();
 
         self.push_apart();
         self.hurt_by_contacts();
@@ -120,14 +131,17 @@ impl Scene {
         velocity.z -= pull * dt;
         let mut position = transform.position + velocity * dt;
 
-        let size = self.vec_field(id, VecField::Size).unwrap_or(Vec3::ONE);
+        let scale = self.vec_field(id, VecField::Scale).unwrap_or(Vec3::ONE);
+        // The lowest point of the body as it is drawn, in the node's own metres and then
+        // stretched by the scale it is wearing. A body with no surface of its own but a
+        // model under it has to be measured from the model: an import hangs its geometry
+        // wherever the file stood it, which for a real vehicle is most of a metre below
+        // the pivot, so parking the pivot on the floor buries the wheels under it.
         let bottom = self
-            .mesh(id)
-            .ok()
-            .and_then(|mesh| mesh.bounds())
-            .map(|(min, _)| min.z)
+            .local_bounds(id)
+            .map(|(min, _)| min.z * scale.z)
             .unwrap_or(0.0);
-        let rest = position.z + bottom * size.z;
+        let rest = position.z + bottom;
 
         if rest <= GROUND_HEIGHT {
             position.z += GROUND_HEIGHT - rest;
@@ -159,30 +173,32 @@ impl Scene {
     }
 
     /// Pulls every overlapping pair of colliders apart, scenery holding its
-    /// ground. A pair whose answer cannot be checked — the maths went wrong, or
-    /// the two bodies are too flat to say which way out is shortest — is left
-    /// alone for this step rather than pushed somewhere worse.
+    /// ground, and trades the pace the pair arrived with between them. A pair whose
+    /// answer cannot be checked — the maths went wrong, or the two bodies are too
+    /// flat to say which way out is shortest — is left alone for this step rather
+    /// than pushed somewhere worse.
     fn push_apart(&mut self) {
         for _ in 0..PUSH_PASSES {
-            let bodies = self.bodies();
+            let mut bodies = self.bodies();
             let mut moves = vec![Vec3::ZERO; bodies.len()];
             let mut pushed = false;
 
             for index in 0..bodies.len() {
                 for other in index + 1..bodies.len() {
                     let (a, b) = (&bodies[index], &bodies[other]);
-                    if !Solid::in_boxes(&a.solid, &b.solid) {
+                    // Two bodies hung one under the other are one shape to the
+                    // person who wrote them: a turret that shoves its own hull
+                    // spends the step digging itself out of the thing it rides on.
+                    if self.in_the_same_branch(a.node, b.node) {
                         continue;
                     }
-                    let Some(hit) = geometry::contact(&a.solid, &b.solid) else {
+                    let Some(hit) = contact_between(&a.pieces, &b.pieces) else {
                         continue;
                     };
-                    if !geometry::separates(&a.solid, &b.solid, &hit) {
-                        continue;
-                    }
                     let Some((a_share, b_share)) = gives_way(a, b) else {
                         continue;
                     };
+                    let (a_node, b_node) = (a.node, b.node);
 
                     // The normal runs out of the first body and into the second,
                     // so the first goes back along it and the second on with it.
@@ -194,7 +210,11 @@ impl Scene {
                         moves[other] += hit.normal * (hit.depth * b_share);
                         pushed = true;
                     }
-                    self.remember(a.node, b.node);
+                    // The two bodies are the pair's only two entries, and the first
+                    // is always the earlier one, so the split gives each its own.
+                    let (head, tail) = bodies.split_at_mut(other);
+                    trade(&mut head[index], &mut tail[0], hit.normal, a_share, b_share);
+                    self.remember(a_node, b_node);
                 }
             }
 
@@ -202,6 +222,7 @@ impl Scene {
                 break;
             }
             for (body, push) in bodies.iter().zip(moves) {
+                self.keep_pace(body);
                 if push.length_squared() > 0.0 {
                     self.settle(body, push);
                 }
@@ -224,16 +245,18 @@ impl Scene {
         {
             bodies.push(Body {
                 node: player.body,
-                solid,
+                pieces: vec![solid],
+                velocity: player.velocity,
                 movable: true,
-                // A person's share of a push is settled by the rule below, not by
-                // their weight, so this figure is never asked.
+                // A person is the one body whose weight is never asked: the rule
+                // below refuses to let a crate shove them off their feet, which the
+                // pace trade reads as standing on something heavier than anything.
                 mass: 0.0,
                 player: true,
             });
         }
 
-        for (id, solid) in self.colliders() {
+        for (id, pieces) in self.colliders() {
             // The player's own body is already in the walk above, as a person and
             // not as whatever object it happens to wear.
             if player.enabled && player.body == Some(id) {
@@ -244,10 +267,21 @@ impl Scene {
             if self.rides_a_seat(id) {
                 continue;
             }
+            let movable = self.is_dynamic(id).unwrap_or(false);
+            // A body that holds its ground is read as standing still, whatever its own
+            // motion says, so a pair is traded against the ground it stands on.
+            let velocity = match movable {
+                true => self
+                    .component::<Motion>(id)
+                    .map(|motion| motion.velocity)
+                    .unwrap_or(Vec3::ZERO),
+                false => Vec3::ZERO,
+            };
             bodies.push(Body {
                 node: Some(id),
-                solid,
-                movable: self.is_dynamic(id).unwrap_or(false),
+                pieces,
+                velocity,
+                movable,
                 mass: self.mass_of(id),
                 player: false,
             });
@@ -255,8 +289,23 @@ impl Scene {
         bodies
     }
 
-    /// Moves one body out of what it was riding through, and takes away the speed
-    /// that drove it in. What is left slides along the surface.
+    /// Whether one of these two nodes is the other hung under it. Such a pair is one
+    /// body to whoever wrote it, so the solver is asked to leave it alone: a part
+    /// that shoves the thing it rides on can only dig itself out of it, and a model
+    /// already counts its own parts once.
+    fn in_the_same_branch(&self, a: Option<NodeId>, b: Option<NodeId>) -> bool {
+        let (Some(a), Some(b)) = (a, b) else {
+            return false;
+        };
+        self.is_ancestor(a, b).unwrap_or(false) || self.is_ancestor(b, a).unwrap_or(false)
+    }
+
+    /// Moves one body out of what it was riding through. That is only the part a
+    /// step cannot do with speed alone: a body arrives wherever it arrived, and the
+    /// meters it already shares with another have to be given back before the next
+    /// one is taken. The pace of the pair is traded where the touch is found, so a
+    /// shoved body goes off along its own way rather than standing still and being
+    /// dragged a little further every step.
     fn settle(&mut self, body: &Body, world_move: Vec3) {
         let direction = world_move.normalize_or_zero();
         if body.player {
@@ -265,10 +314,6 @@ impl Scene {
             // Being lifted is standing on something, and a jump from there is a
             // jump the script can ask for.
             player.grounded |= direction.z > 0.5;
-            let into = player.velocity.dot(direction);
-            if into < 0.0 {
-                player.velocity -= direction * into;
-            }
             self.player = player;
             return;
         }
@@ -277,22 +322,30 @@ impl Scene {
         let Ok(transform) = self.transform(node) else {
             return;
         };
-        if self
-            .set_vec_field(
-                node,
-                VecField::Position,
-                transform.position + self.local_delta(node, world_move),
-            )
-            .is_err()
-        {
+        let _ = self.set_vec_field(
+            node,
+            VecField::Position,
+            transform.position + self.local_delta(node, world_move),
+        );
+    }
+
+    /// Leaves a body reporting the pace its touches gave it, so that the next pass —
+    /// and every step after it — travels at that pace instead of being shoved again
+    /// from a standstill. A body that holds its ground was offered none of it, and the
+    /// node it belongs to keeps whatever its own motion says.
+    fn keep_pace(&mut self, body: &Body) {
+        if !body.movable {
             return;
         }
-        let Ok(mut motion) = self.component_mut::<Motion>(node) else {
+        if body.player {
+            let mut player = self.player;
+            player.velocity = body.velocity;
+            self.player = player;
             return;
-        };
-        let into = motion.velocity.dot(direction);
-        if into < 0.0 {
-            motion.velocity -= direction * into;
+        }
+        let Some(node) = body.node else { return };
+        if let Ok(mut motion) = self.component_mut::<Motion>(node) {
+            motion.velocity = body.velocity;
         }
     }
 
@@ -367,6 +420,48 @@ fn player_hull(player: &PlayerController) -> Option<Solid> {
     let feet = player.position + UP * radius;
     let head = player.position + UP * radius.max(player.eye_height);
     Solid::capsule([feet, head], radius)
+}
+
+/// The shallowest way the two bodies are through each other, asked of every pair of
+/// their pieces. A box or a ball has one piece, so this is the one test it always
+/// was; a mesh has one per surface, and only the surfaces that actually ride into
+/// something answer for it. The space between them is left empty rather than
+/// filled in by the brick around the whole body.
+fn contact_between(a: &[Solid], b: &[Solid]) -> Option<Contact> {
+    let mut shallowest: Option<Contact> = None;
+
+    for first in a {
+        for second in b {
+            let Some(hit) = geometry::contact(first, second) else {
+                continue;
+            };
+            if !geometry::separates(first, second, &hit) {
+                continue;
+            }
+            if shallowest.is_none_or(|past| hit.depth < past.depth) {
+                shallowest = Some(hit);
+            }
+        }
+    }
+    shallowest
+}
+
+/// What a touch does to the pace of the pair. The gap between them is divided by
+/// `gives_way`, and the speed they arrived with is divided exactly the same way,
+/// because the body made to close most of the meters is the one that owes most of
+/// its own way for them. So a pair that rides into each other leaves at one speed
+/// along the line they met on: two crates of a weight both go off at the middle of
+/// what they came with, a heavy one hardly changes and a light one goes with it,
+/// and a body that runs into something holding its ground loses its way entirely.
+/// Only a pair still arriving trades; one already pulling apart has nothing left to
+/// give, and the way a body slides along a surface is nobody's business here.
+fn trade(a: &mut Body, b: &mut Body, normal: Vec3, a_share: f32, b_share: f32) {
+    let closing = a.velocity.dot(normal) - b.velocity.dot(normal);
+    if !closing.is_finite() || closing <= 0.0 {
+        return;
+    }
+    a.velocity -= normal * (closing * a_share);
+    b.velocity += normal * (closing * b_share);
 }
 
 /// How a pair divides the push. Scenery keeps its ground and whatever ran into it
@@ -693,6 +788,80 @@ mod tests {
         assert!(scene.touches(upper).contains(&lower));
     }
 
+    /// A two metre hull with a one metre part overlapping its side by sixty-five
+    /// centimetres, hung under the hull or set down beside it as `under` says. Both
+    /// bodies collide and both fall.
+    fn pair(scene: &mut Scene, under: bool) -> (NodeId, NodeId) {
+        let hull = scene.create("cube", Some("Hull".into()), None).unwrap();
+        scene
+            .set_vec_field(hull, VecField::Size, Vec3::splat(2.0))
+            .unwrap();
+        scene
+            .set_vec_field(hull, VecField::Position, Vec3::new(0.0, 0.0, 10.0))
+            .unwrap();
+        scene.set_uses_gravity(hull, true).unwrap();
+        scene.set_collision(hull, true).unwrap();
+
+        // The parent's size carries the child's own metres into the world, so the part
+        // written under it is half as big and half as far out to end up in the same
+        // place as the one stood beside it.
+        let part = scene
+            .create("cube", Some("Part".into()), under.then_some(hull))
+            .unwrap();
+        scene
+            .set_vec_field(
+                part,
+                VecField::Size,
+                Vec3::splat(if under { 0.5 } else { 1.0 }),
+            )
+            .unwrap();
+        scene
+            .set_vec_field(
+                part,
+                VecField::Position,
+                Vec3::new(
+                    if under { 0.425 } else { 0.85 },
+                    0.0,
+                    if under { 0.0 } else { 10.0 },
+                ),
+            )
+            .unwrap();
+        scene.set_uses_gravity(part, true).unwrap();
+        scene.set_collision(part, true).unwrap();
+        (hull, part)
+    }
+
+    #[test]
+    fn a_part_hung_on_a_body_does_not_dig_itself_out_of_it() {
+        let mut scene = Scene::new();
+        let (hull, part) = pair(&mut scene, true);
+
+        scene.step(1.0 / 60.0);
+
+        // A part shoved out of the thing it rides on spends the step clawing its way
+        // free of its own body, so the solver is told a pair hung one under the other
+        // is one body and left where the script put it.
+        let at = scene.vec_field(part, VecField::Position).unwrap();
+        assert_eq!(at.x, 0.425, "the part kept its place on the hull: {at}");
+        assert!(
+            !scene.touches(part).contains(&hull),
+            "and owes it no contact either"
+        );
+    }
+
+    #[test]
+    fn the_same_two_bodies_beside_each_other_are_pulled_apart() {
+        let mut scene = Scene::new();
+        let (_, part) = pair(&mut scene, false);
+
+        scene.step(1.0 / 60.0);
+
+        // The proof that it is the branch, not the overlap, that holds the test above
+        // still: the same two boxes with nothing hanging them together separate.
+        let at = scene.vec_field(part, VecField::Position).unwrap();
+        assert!(at.x > 0.85, "the part is pushed clear of the hull: {at}");
+    }
+
     #[test]
     fn an_anvil_barely_gives_way_to_a_bolt() {
         let mut scene = Scene::new();
@@ -708,6 +877,156 @@ mod tests {
         let bolt = scene.vec_field(bolt, VecField::Position).unwrap().x - 0.8;
         assert!(bolt > 0.19, "the bolt takes nearly all of it: {bolt}");
         assert!(anvil.abs() < 1e-3, "and the anvil the rest: {anvil}");
+    }
+
+    /// A box already on the floor and already moving at `pace` meters a second,
+    /// with `kg` of weight behind it.
+    fn sliding(scene: &mut Scene, size: Vec3, at: Vec3, kg: f32, pace: f32) -> NodeId {
+        let id = scene.create("cube", Some("Runner".into()), None).unwrap();
+        scene.set_vec_field(id, VecField::Size, size).unwrap();
+        scene.set_vec_field(id, VecField::Position, at).unwrap();
+        scene.set_uses_gravity(id, true).unwrap();
+        scene.set_collision(id, true).unwrap();
+        scene.set_mass(id, kg).unwrap();
+        scene.component_mut::<Motion>(id).unwrap().velocity = Vec3::X * pace;
+        id
+    }
+
+    fn run(scene: &Scene, id: NodeId) -> f32 {
+        scene.component::<Motion>(id).unwrap().velocity.x
+    }
+
+    #[test]
+    fn a_heavy_body_that_barely_yields_keeps_most_of_its_way() {
+        let mut scene = Scene::new();
+        let anvil = sliding(
+            &mut scene,
+            Vec3::splat(1.0),
+            Vec3::new(0.0, 0.0, 0.5),
+            2_000.0,
+            5.0,
+        );
+        let bolt = sliding(
+            &mut scene,
+            Vec3::splat(0.2),
+            Vec3::new(0.55, 0.0, 0.1),
+            0.05,
+            0.0,
+        );
+
+        scene.step(1.0 / 60.0);
+
+        // The floor eats a little of the anvil's pace, as it does of anything it
+        // holds, but the bolt it rode into takes none of it: two thousand kilograms
+        // gives way over a twenty thousandth of the gap, and owes only that much of
+        // its own way.
+        let kept = run(&scene, anvil);
+        assert!(kept > 4.6, "an anvil does not stop at a bolt: {kept}");
+        let bolt_at = scene.vec_field(bolt, VecField::Position).unwrap().x;
+        assert!(bolt_at > 0.62, "and the bolt took the gap: {bolt_at}");
+    }
+
+    #[test]
+    fn a_body_that_yields_fully_loses_the_speed_it_came_with() {
+        let mut scene = Scene::new();
+        let anvil = sliding(
+            &mut scene,
+            Vec3::splat(1.0),
+            Vec3::new(0.0, 0.0, 0.5),
+            2_000.0,
+            5.0,
+        );
+        scenery(
+            &mut scene,
+            Vec3::new(0.2, 1.0, 1.0),
+            Vec3::new(0.55, 0.0, 0.5),
+        );
+
+        scene.step(1.0 / 60.0);
+        let stopped = run(&scene, anvil);
+        assert!(
+            stopped.abs() < 0.1,
+            "scenery keeps its ground, so the anvil gives way all of it: {stopped}"
+        );
+    }
+
+    #[test]
+    fn a_shoved_body_leaves_at_the_pace_it_was_given() {
+        let mut scene = Scene::new();
+        let pusher = sliding(
+            &mut scene,
+            Vec3::splat(1.0),
+            Vec3::new(0.0, 0.0, 0.5),
+            200.0,
+            5.0,
+        );
+        let shoved = sliding(
+            &mut scene,
+            Vec3::splat(1.0),
+            Vec3::new(0.5, 0.0, 0.5),
+            200.0,
+            0.0,
+        );
+
+        scene.step(1.0 / 60.0);
+
+        // Two bodies of a weight leave a ride-in at the middle of what they came
+        // with, so the one that stood still now has a way of its own to travel by.
+        // A shove is a push, not the solver dragging a body through the meters they
+        // happened to share and leaving it exactly as still as it was.
+        let from = run(&scene, pusher);
+        let into = run(&scene, shoved);
+        assert!(
+            (2.2..2.8).contains(&into),
+            "half the pace went into the shoved body: {into}"
+        );
+        assert!(
+            (2.2..2.8).contains(&from),
+            "and the pusher kept the other half: {from}"
+        );
+    }
+
+    #[test]
+    fn an_anchored_body_refuses_a_shove_from_a_moving_one() {
+        let mut scene = Scene::new();
+        let anvil = sliding(
+            &mut scene,
+            Vec3::splat(1.0),
+            Vec3::new(0.0, 0.0, 0.5),
+            4_000.0,
+            5.0,
+        );
+        let bollard = scene.create("cube", Some("Bollard".into()), None).unwrap();
+        scene
+            .set_vec_field(bollard, VecField::Size, Vec3::new(0.2, 1.0, 1.0))
+            .unwrap();
+        scene
+            .set_vec_field(bollard, VecField::Position, Vec3::new(0.55, 0.0, 0.5))
+            .unwrap();
+        scene.set_collision(bollard, true).unwrap();
+        scene.set_anchored(bollard, true).unwrap();
+        scene.component_mut::<Motion>(bollard).unwrap().velocity = Vec3::X * 3.0;
+
+        for _ in 0..4 {
+            scene.step(1.0 / 60.0);
+        }
+
+        let where_it_was = scene.vec_field(bollard, VecField::Position).unwrap();
+        let held = (where_it_was - Vec3::new(0.55, 0.0, 0.5)).length();
+        assert!(
+            held < 1e-3,
+            "nothing an anchored body touches may move it: {held}"
+        );
+        let pace = scene.component::<Motion>(bollard).unwrap().velocity;
+        assert!(
+            (pace - Vec3::X * 3.0).length() < 1e-3,
+            "and nobody's speed is written onto it either: {pace}"
+        );
+        let stopped = run(&scene, anvil);
+        assert!(
+            stopped.abs() < 0.1,
+            "the anvil is left to give way all of it: {stopped}"
+        );
     }
 
     #[test]

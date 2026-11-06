@@ -9,9 +9,21 @@ def test_version():
 
 
 def test_kinds_are_advertised():
-    # The shapes the geometry knows, and the one kind it does not: a light is a node
-    # `new` writes like any other, and draws nothing.
-    assert carbine.kinds() == ["cube", "plane", "sphere", "rectangle", "square", "light"]
+    # The shapes the geometry knows, and the kinds it does not: a light is a node `new`
+    # writes like any other and draws nothing, a model is an anchor a `.glb` hangs on, a
+    # vehicle is a box wearing a drive, and the two seats are somewhere a node can sit.
+    assert carbine.kinds() == [
+        "cube",
+        "plane",
+        "sphere",
+        "rectangle",
+        "square",
+        "light",
+        "model",
+        "vehicle",
+        "seat",
+        "driverSeat",
+    ]
 
 
 def test_new_rectangle_defaults():
@@ -50,6 +62,35 @@ def test_transform_handles_write_through():
         card.rotation = carbine.Quat.fromEuler(0.0, 0.0, 45.0)
         assert math.isclose(card.rotationEuler.z, 45.0, abs_tol=1e-4)
     finally:
+        card.destroy()
+
+
+def test_a_vec3_written_on_is_the_value_the_node_holds():
+    card = carbine.new("cube", name="Card")
+    copy = carbine.new("cube", name="Copy")
+    try:
+        card.position = (1.0, 2.0, 3.0)
+
+        copy.position = card.position
+        assert copy.position.toTuple() == (1.0, 2.0, 3.0), "a Vec3 writes like a tuple"
+
+        # A Vec3 read off a node is that node's own value rather than a photograph of
+        # the moment it was read, which is what makes copying one across mean anything.
+        moved = card.position
+        card.position = (9.0, ..., ...)
+        copy.position = moved
+        assert copy.position.toTuple() == (9.0, 2.0, 3.0)
+
+        copy.size = carbine.Vec3(2.0, 3.0, 4.0)
+        assert copy.size.toTuple() == (2.0, 3.0, 4.0)
+
+        copy.color = card.color
+        assert copy.color == card.color
+
+        copy.rotationEuler = card.rotationEuler
+        assert tuple(copy.rotationEuler) == pytest.approx((0.0, 0.0, 0.0), abs=1e-4)
+    finally:
+        copy.destroy()
         card.destroy()
 
 
@@ -135,6 +176,27 @@ def test_a_skin_is_remembered_as_a_path(skin):
 
         card.texture = None
         assert card.texture is None
+    finally:
+        card.destroy()
+
+
+def test_a_skin_lies_one_metre_across_until_a_script_says_otherwise():
+    """A tile is measured in metres of the object, so a picture keeps its size from a
+    floor tile to a six metre wall instead of being pulled to fit each face."""
+    card = carbine.new("cube")
+    try:
+        assert card.textureTiling == 1.0
+
+        card.textureTiling = 2.5
+        assert card.textureTiling == 2.5
+
+        # Nil is the other ask: the whole picture smeared across each face, which is
+        # how a model's own UVs already lie.
+        card.textureTiling = 0.0
+        assert card.textureTiling == 0.0
+
+        card.textureTiling = -4.0
+        assert card.textureTiling == 0.0, "a negative reach is no reach at all"
     finally:
         card.destroy()
 

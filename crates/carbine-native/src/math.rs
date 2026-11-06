@@ -81,9 +81,14 @@ fn extract_axis(value: &Bound<'_, PyAny>) -> PyResult<Option<f32>> {
         .map_err(|_| PyTypeError::new_err("an axis is a number, ... or None"))
 }
 
-/// The three axes of a vector argument, in order. A `Vec3` works here as well as
-/// a tuple, because it iterates as three numbers.
+/// The three axes of a vector argument, in order. A `Vec3` is asked for before the
+/// tuple is, because iterating one reads the node it came from and a list of three
+/// numbers is only what a `Vec3` looks like from the outside.
 pub(crate) fn extract_axes(value: &Bound<'_, PyAny>) -> PyResult<[Option<f32>; 3]> {
+    if let Ok(given) = value.extract::<PyRef<'_, PyVec3>>() {
+        let at = given.current()?;
+        return Ok([Some(at.x), Some(at.y), Some(at.z)]);
+    }
     let given = value.extract::<Vec<Bound<'_, PyAny>>>().map_err(|_| {
         PyTypeError::new_err("expected a Vec3 or an (x, y, z) tuple; use ... to skip an axis")
     })?;
