@@ -52,7 +52,7 @@ def build():
     lamp = carbine.spawnEntity("cube", name="Lamp", health=40.0)
     lamp.size = (0.35, 0.35, POST_HEIGHT)
     lamp.color = STEEL
-    lamp.collisionShape = "box"
+    lamp.collisionType = "box"
     lamp.position = ALONG[0]
 
     # The bulb hangs off the post before the post is copied, so the branch comes
@@ -71,7 +71,7 @@ def build():
     crate.size = (0.9, 0.9, 0.9)
     crate.color = "#8a6d3b"
     crate.gravity = True
-    crate.collisionShape = "box"
+    crate.collisionType = "box"
     crate.position = SPOTS[0]
     crates = [crate, *carbine.duplicate(crate, len(SPOTS) - 1)]
     for box, at in zip(crates, SPOTS):

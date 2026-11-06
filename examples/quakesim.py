@@ -257,7 +257,7 @@ def main() -> None:
                 # as a box so a toppled tower leans on its neighbour instead of
                 # through it.
                 node.gravity = True
-                node.collisionShape = "box"
+                node.collisionType = "box"
                 block["node"] = node
                 blocks.append(block)
 

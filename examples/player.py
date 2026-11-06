@@ -8,9 +8,9 @@ The script only says who the player is and how fast they may go.
 
 Everything with a collider switched on is solid, so the pillars, the wall, the
 boulder and the barrel stop the player dead. The barrel is drawn as a box but
-collides as a capsule, because the shape is the solver's business and not the
-picture's. The lava plate and the two actors hurt on contact, and `E` lands a
-scripted hit on whichever actor is closest. Health running out is the engine's
+rolls to the solver as a ball, because how a body is read is the solver's business
+and not the picture's. The lava plate and the two actors hurt on contact, and `E`
+lands a scripted hit on whichever actor is closest. Health running out is the engine's
 ending to write: the Golem is left as a corpse that falls and stops blocking
 anything, the Wisp is asked to leave nothing behind. When it is the body the player
 wears that runs out, the engine only takes it off and leaves it on the floor - that
@@ -35,12 +35,12 @@ LAVA = "#c93b2b"
 HEALTH = 30.0
 SPEED = 5.0
 
-# kind, name, where its centre sits, how big, and the shape the solver cuts it as.
+# kind, name, where its centre sits, how big, and how the solver reads it.
 SCENERY = [
     ("cube", "Pillar", (-4.0, 3.5, 1.2), (1.2, 1.2, 2.4), "box"),
     ("cube", "Wall", (2.5, 6.0, 1.5), (5.0, 0.6, 3.0), "box"),
     ("sphere", "Boulder", (7.0, -2.0, 1.0), (2.0, 2.0, 2.0), "sphere"),
-    ("cube", "Barrel", (-6.5, -5.0, 0.7), (1.0, 1.0, 1.4), "capsule"),
+    ("cube", "Barrel", (-6.5, -5.0, 0.7), (1.0, 1.0, 1.4), "sphere"),
 ]
 
 
@@ -90,21 +90,21 @@ def main() -> None:
         "V trades the frame cap for the monitor's own rate - close the window to quit\n"
         "ESC releases the mouse"
     )
-    print("shapes a collider can be cut as:", ", ".join(carbine.collisionShapes()))
+    print("ways a body can be read by the solver:", ", ".join(carbine.collisionTypes()))
 
     ground = carbine.new("plane", name="Ground")
     ground.size = (48.0, 48.0, 1.0)
     ground.color = "#3d4a3a"
 
     scenery = []
-    for index, (kind, label, where, across, shape) in enumerate(SCENERY):
+    for index, (kind, label, where, across, cut_as) in enumerate(SCENERY):
         block = carbine.new(kind, name=f"{label} {index}")
         block.position = where
         block.size = across
         block.color = NAVY if index % 2 else "#6b7280"
         # The invitation to the solver, and the only reason the player cannot
-        # stroll through any of these. Asking for a shape switches it on.
-        block.collisionShape = shape
+        # stroll through any of these. Asking for a type switches it on.
+        block.collisionType = cut_as
         scenery.append(block)
 
     # A crate the solver actually owns: gravity is on, so each frame drops it and
