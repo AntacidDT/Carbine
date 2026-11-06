@@ -1,6 +1,6 @@
 use carbine_core::{NodeId, VecField};
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
@@ -20,6 +20,14 @@ pub(crate) fn set_name_on(id: NodeId, value: String) -> PyResult<()> {
 
 pub(crate) fn kind_of(id: NodeId) -> PyResult<String> {
     with_scene(|scene| scene.kind(id).map(str::to_owned))
+}
+
+fn finite_text_number(value: f64) -> PyResult<f32> {
+    let value = value as f32;
+    if !value.is_finite() {
+        return Err(PyValueError::new_err("Text numbers must be finite"));
+    }
+    Ok(value)
 }
 
 pub(crate) fn vec3_of(id: NodeId, field: VecField) -> PyResult<PyVec3> {
@@ -173,8 +181,7 @@ pub(crate) fn driver_of<'py>(py: Python<'py>, id: NodeId) -> PyResult<Option<Bou
     }
 }
 
-/// The colour painted on a node, from a `Vec3`, a three tuple, or a hex string
-/// such as `"#eb7a34"`. Both handle classes wear colours the same way.
+/// Node colour from a Vec3, RGB tuple, named colour or hex string.
 pub(crate) fn set_color_on(id: NodeId, value: &Bound<'_, PyAny>) -> PyResult<()> {
     if let Ok(hex) = value.extract::<String>() {
         return with_scene(|scene| scene.set_color_hex(id, &hex));
@@ -400,17 +407,24 @@ impl Object {
         set_vec3(self.id, VecField::Position, &value)
     }
 
-    /// The object's dimensions in meters at rotation identity, as
-    /// `(length, width, height)`; `z` is the vertical size. Any axis may be
-    /// `...` to leave it as it is.
+    /// Text font size in pixels (1..400), otherwise live (length, width, height).
     #[getter]
-    fn size(&self) -> PyResult<PyVec3> {
-        vec3_of(self.id, VecField::Size)
+    fn size<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if with_scene(|scene| scene.is_text(self.id))? {
+            with_scene(|scene| scene.text_size(self.id))?.into_bound_py_any(py)
+        } else {
+            vec3_of(self.id, VecField::Size)?.into_bound_py_any(py)
+        }
     }
 
     #[setter]
     fn set_size(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
-        set_vec3(self.id, VecField::Size, &value)
+        if with_scene(|scene| scene.is_text(self.id))? {
+            let size = finite_text_number(value.extract::<f64>()?)?;
+            with_scene(|scene| scene.set_text_size(self.id, size))
+        } else {
+            set_vec3(self.id, VecField::Size, &value)
+        }
     }
 
     #[getter]
@@ -453,9 +467,7 @@ impl Object {
         vec3_of(self.id, VecField::Color)
     }
 
-    /// Accepts a `Vec3`, a three tuple, or a hex string such as `"#eb7a34"`. A
-    /// trailing alpha in the hex, like `"#eb7a3480"`, only means anything on a UI
-    /// element.
+    /// Accepts Vec3, RGB tuples, named colours or hex strings with optional alpha.
     #[setter]
     fn set_color(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
         set_color_on(self.id, &value)
@@ -675,15 +687,71 @@ impl Object {
         with_scene(|scene| scene.set_polygon_sides(self.id, sides))
     }
 
-    /// Outline thickness in pixels; 0 leaves the element filled solid.
+    /// Text's black outline toggle, otherwise shape outline thickness in pixels.
     #[getter]
-    fn outline(&self) -> PyResult<f32> {
-        with_scene(|scene| scene.outline(self.id))
+    fn outline<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if with_scene(|scene| scene.is_text(self.id))? {
+            with_scene(|scene| scene.text_outline(self.id))?.into_bound_py_any(py)
+        } else {
+            with_scene(|scene| scene.outline(self.id))?.into_bound_py_any(py)
+        }
     }
 
     #[setter]
-    fn set_outline(&self, thickness: f32) -> PyResult<()> {
-        with_scene(|scene| scene.set_outline(self.id, thickness))
+    fn set_outline(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
+        if with_scene(|scene| scene.is_text(self.id))? {
+            let enabled = value.extract::<bool>()?;
+            with_scene(|scene| scene.set_text_outline(self.id, enabled))
+        } else {
+            let thickness = value.extract::<f32>()?;
+            with_scene(|scene| scene.set_outline(self.id, thickness))
+        }
+    }
+
+    /// The displayed string; Text nodes only.
+    #[getter]
+    fn content(&self) -> PyResult<String> {
+        with_scene(|scene| scene.text_content(self.id).map(str::to_owned))
+    }
+
+    #[setter]
+    fn set_content(&self, value: String) -> PyResult<()> {
+        with_scene(|scene| scene.set_text_content(self.id, value))
+    }
+
+    /// Whether Text wraps at its width.
+    #[getter(wordWrap)]
+    fn word_wrap(&self) -> PyResult<bool> {
+        with_scene(|scene| scene.text_word_wrap(self.id))
+    }
+
+    #[setter(wordWrap)]
+    fn set_word_wrap(&self, value: bool) -> PyResult<()> {
+        with_scene(|scene| scene.set_text_word_wrap(self.id, value))
+    }
+
+    /// Text wrapping width in pixels, clamped to 1..16384.
+    #[getter]
+    fn width(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.text_width(self.id))
+    }
+
+    #[setter]
+    fn set_width(&self, value: f64) -> PyResult<()> {
+        let width = finite_text_number(value)?;
+        with_scene(|scene| scene.set_text_width(self.id, width))
+    }
+
+    /// Text outline thickness in pixels, clamped to 0..32.
+    #[getter(outlineWidth)]
+    fn outline_width(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.text_outline_width(self.id))
+    }
+
+    #[setter(outlineWidth)]
+    fn set_outline_width(&self, value: f64) -> PyResult<()> {
+        let width = finite_text_number(value)?;
+        with_scene(|scene| scene.set_text_outline_width(self.id, width))
     }
 
     /// Opacity from 0 (invisible) to 255 (opaque).
@@ -693,7 +761,12 @@ impl Object {
     }
 
     #[setter]
-    fn set_transparent(&self, alpha: f32) -> PyResult<()> {
+    fn set_transparent(&self, alpha: f64) -> PyResult<()> {
+        let alpha = if with_scene(|scene| scene.is_text(self.id))? {
+            finite_text_number(alpha)?
+        } else {
+            alpha as f32
+        };
         with_scene(|scene| scene.set_alpha(self.id, alpha))
     }
 

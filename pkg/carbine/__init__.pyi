@@ -52,11 +52,7 @@ class Mesh:
     def bounds(self) -> tuple[Vec3, Vec3] | None: ...
 
 class Object:
-    """A body in the world. Reads give the values back as `Vec3`; every vector
-    write below takes one of those, or an `(x, y, z)` tuple in which `...` or None
-    keeps the axis as it already is. A `Vec3` read off a node is that node's own value,
-    so it follows the node it came from rather than the moment it was read.
-    The world is z-up: `size` is (length, width, height)."""
+    """A world or UI node; Text has scalar size and boolean outline, other sizes are live Vec3 values."""
 
     id: int
     name: str
@@ -78,12 +74,16 @@ class Object:
     # Takes a child off this node and hangs it on the scene root. It leaves the
     # branch, not the world - `destroy` is the call that means that.
     def removeChild(self, child: Object | Entity | Particle) -> None: ...
+    # Vector writes accept Vec3 or (x, y, z); None or ... preserves an axis.
     position: Vec3
-    size: Vec3
+    # Text font size is 1..400 pixels; other nodes return live (length, width, height) Vec3.
+    size: Vec3 | float
     scale: Vec3
     # Read as a Quat, written as a Quat or as euler degrees (x, y, z).
     rotation: Quat
     rotationEuler: Vec3
+    # Colours accept Vec3, RGB tuples, named colours or hex strings with optional alpha.
+    # Presets include red, light blue, dark green, banana, skin color, cream, navy and gold.
     color: Vec3 | str
     @property
     def colorHex(self) -> str: ...
@@ -201,8 +201,17 @@ class Object:
     # UI overlay knobs; a world object raises on them. Sizes are pixels.
     corner: float
     polygon: int
-    outline: float
+    # Text takes a bool for its black outline; shapes take pixel thickness as a float.
+    outline: bool | float
     transparent: float
+    # Text-only properties; numeric Text inputs reject NaN and infinity with ValueError.
+    # The bundled font covers ASCII and Latin-1; unsupported characters display '?'.
+    content: str
+    wordWrap: bool
+    # Wrapping width in pixels, clamped to 1..16384.
+    width: float
+    # Outline pixels, stored in 0..32 and drawn up to 0.6 times the font size.
+    outlineWidth: float
     @property
     def mesh(self) -> Mesh: ...
     def touching(self) -> list[Object | Entity]: ...
@@ -232,7 +241,7 @@ class Entity:
     size: Vec3
     rotation: Quat
     rotationEuler: Vec3
-    # Reads as a `Vec3`, written as a `Vec3`, a tuple, or hex like `Object`'s.
+    # Reads as Vec3; accepts Vec3, RGB tuples, named colours or hex strings.
     color: Vec3 | str
     # A packed `.ktx2` path, or None for the actor's own colour.
     texture: str | None
@@ -296,8 +305,7 @@ class Camera:
     def lookAt(self, target: Vec3 | tuple[float, float, float]) -> None: ...
 
 class Sky:
-    """The backdrop behind the world and the one light every object is shaded by.
-    Colours read back as `Vec3` and are written as a `Vec3`, a tuple, or hex."""
+    """Backdrop colours read as Vec3; writes accept Vec3, RGB tuples, named colours or hex strings."""
 
     enabled: bool
     zenith: Vec3 | str
@@ -440,9 +448,9 @@ class Scene:
     def entityCount(self) -> int: ...
 
 class Ui:
-    """Screen overlay elements. Their position and size are pixels measured from
-    the viewport's top left corner, not meters."""
+    """Pixel overlay; Text uses top-left position and scalar font size, shapes use size vectors."""
 
+    # Presets: square, rectangle, triangle, hexagon, circle, Text (case-insensitive).
     def new(
         self,
         kind: str = "square",
@@ -537,7 +545,7 @@ class Atmosphere:
     # How far the air lets you see, 0 (a bright day) to 100 (not seeing your hand).
     # Fog is the air, not a crowd, so there is nothing to start or stop.
     fog: float
-    # The colour the distance is lost in, from a Vec3, a tuple or hex like "#eb7a34".
+    # Fog colour accepts Vec3, RGB tuples, named colours or hex strings.
     fogColor: Vec3 | str
 
     # Writes one of the weathers the engine knows and hands back its handle, already
@@ -608,7 +616,7 @@ class Particle:
     # Whether the crowd is hung on the sky. On, its box rides with the eyes rather
     # than with the node, which is what makes a weather veil.
     onSky: bool
-    # The colour the drops are painted, from a Vec3, a tuple or hex like "#eb7a34".
+    # Drop colour accepts Vec3, RGB tuples, named colours or hex strings.
     # Each drop keeps a random part of it, which stops a thousand drops reading as
     # one flat sheet.
     color: Vec3 | str
@@ -734,6 +742,8 @@ fpsCap: int | None
 monitorSync: bool
 monitorHz: int
 fpsLimit: int | None
+# Read-only measured FPS, refreshed every 0.25s; zero until sampled and after init/end.
+fps: float
 
 # How the edge of a shade is laid over the ground. `carbine.lightType = "blocky"`
 # keeps the steps a single cast texel per pixel makes, which is a look of its own;
@@ -799,6 +809,7 @@ def duplicate(
 # windows and die one at a time. A copy of a member joins the group it was copied
 # from; `duplicate` of one leaves the group, and the original only picks up a group
 # when it is first copied by link.
+# Text content, font size, wrapping and outline are shared; position and scale stay local.
 def linkDuplicate(
     target: Object | Entity | Particle,
     count: int = 1,

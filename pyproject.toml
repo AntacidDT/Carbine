@@ -13,3 +13,4 @@ manifest-path = "crates/carbine-native/Cargo.toml"
 module-name = "carbine._native"
 python-source = "pkg"
 features = ["extension-module"]
+include = [{ path = "crates/carbine-render/assets/LICENSE-DejaVu.txt", format = "wheel" }]

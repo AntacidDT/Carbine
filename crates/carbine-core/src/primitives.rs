@@ -11,7 +11,14 @@ pub const KINDS: &[&str] = &["cube", "plane", "sphere", "rectangle", "square"];
 /// The shapes a UI element can take. Every one of them is the same quad: the UI
 /// pass decides how it is filled, so `polygon` and `corner` turn a square into a
 /// circle without a second mesh.
-pub const UI_KINDS: &[&str] = &["square", "rectangle", "triangle", "hexagon", "circle"];
+pub const UI_KINDS: &[&str] = &[
+    "square",
+    "rectangle",
+    "triangle",
+    "hexagon",
+    "circle",
+    "text",
+];
 
 /// Geometry for a world kind, or `None` when the kind belongs to the UI overlay.
 pub fn build(kind: &str) -> Option<MeshData> {
@@ -375,6 +382,9 @@ mod tests {
             let mesh = ui_mesh(kind).unwrap();
             assert_eq!(mesh.vertex_count(), 4, "{kind} should be the plain quad");
         }
+        assert!(UI_KINDS.contains(&"text"));
+        assert!(build("text").is_none());
+        assert_eq!(ui_mesh("text").unwrap().positions, quad().positions);
 
         assert!(
             build("triangle").is_none(),

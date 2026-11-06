@@ -234,6 +234,111 @@ def test_colour_defaults_to_carbine_orange():
         card.destroy()
 
 
+@pytest.mark.parametrize(
+    "make, has_alpha",
+    [
+        pytest.param(lambda: carbine.new("cube"), True, id="world"),
+        pytest.param(lambda: carbine.ui.new("square"), True, id="ui"),
+        pytest.param(lambda: carbine.spawnEntity("cube"), False, id="entity"),
+        pytest.param(lambda: carbine.procedural.particles(count=1), True, id="particle"),
+    ],
+)
+def test_named_colours_on_nodes_preserve_rgb_and_alpha(make, has_alpha):
+    node = make()
+    try:
+        node.color = "#1234"
+        for name, hex_value, rgb in [
+            ("Red", "#ff0000", (255, 0, 0)),
+            (" dArK\t RED ", "#8b0000", (139, 0, 0)),
+            ("Light   Orange", "#ffb366", (255, 179, 102)),
+            ("Banana", "#ffe135", (255, 225, 53)),
+            ("\u2003Skin\u00a0color\n", "#f1c27d", (241, 194, 125)),
+            ("LIGHT GRAY", "#d3d3d3", (211, 211, 211)),
+        ]:
+            node.color = name
+            assert tuple(node.color) == pytest.approx(tuple(c / 255 for c in rgb))
+            if has_alpha:
+                assert node.colorHex == hex_value
+                assert node.transparent == 68
+
+        node.color = (0.1, 0.2, 0.3)
+        assert tuple(node.color) == pytest.approx((0.1, 0.2, 0.3))
+        node.color = (..., 0.4, ...)
+        assert tuple(node.color) == pytest.approx((0.1, 0.4, 0.3))
+        node.color = carbine.Vec3(0.25, 0.5, 0.75)
+        assert tuple(node.color) == pytest.approx((0.25, 0.5, 0.75))
+        if has_alpha:
+            assert node.transparent == 68
+
+        node.color = "12AbCd40"
+        assert tuple(node.color) == pytest.approx((18 / 255, 171 / 255, 205 / 255))
+        node.color = "Blue"
+        assert tuple(node.color) == (0.0, 0.0, 1.0)
+        if has_alpha:
+            assert node.transparent == 64
+
+        for invalid in ("reddish", "light red extra", "light-red", "", " \t "):
+            with pytest.raises(ValueError, match="not a colour"):
+                node.color = invalid
+            assert tuple(node.color) == (0.0, 0.0, 1.0)
+            if has_alpha:
+                assert node.transparent == 64
+    finally:
+        node.destroy()
+
+
+def test_a_particle_accepts_a_named_colour_at_creation():
+    particle = carbine.procedural.particles(count=1, color=" Light Red ")
+    try:
+        assert particle.colorHex == "#ff7f7f"
+        assert particle.transparent == 255
+    finally:
+        particle.destroy()
+
+
+@pytest.mark.parametrize("field", ["zenith", "horizon", "fogColor"])
+def test_named_sky_and_fog_colours_preserve_rgb_and_ignore_alpha(field):
+    target = carbine.atmosphere if field == "fogColor" else carbine.atmosphere.sky()
+    before = tuple(getattr(target, field))
+    fog = carbine.atmosphere.fog
+    try:
+        for written, rgb in [
+            ("  dArK\tBlue ", (0.0, 0.0, 139 / 255)),
+            ("Light Yellow", (1.0, 1.0, 224 / 255)),
+            ("#1230", (17 / 255, 34 / 255, 51 / 255)),
+            ("aBcDeF00", (171 / 255, 205 / 255, 239 / 255)),
+            ((0.1, 0.2, 0.3), (0.1, 0.2, 0.3)),
+            (carbine.Vec3(0.25, 0.5, 0.75), (0.25, 0.5, 0.75)),
+        ]:
+            setattr(target, field, written)
+            assert tuple(getattr(target, field)) == pytest.approx(rgb)
+            assert carbine.atmosphere.fog == fog
+
+        for invalid in ("bluish", "dark blue extra", " \t "):
+            with pytest.raises(ValueError, match="not a colour"):
+                setattr(target, field, invalid)
+            assert tuple(getattr(target, field)) == (0.25, 0.5, 0.75)
+    finally:
+        setattr(target, field, before)
+
+
+def test_named_sky_colour_pairs_reject_unknown_names_atomically():
+    sky = carbine.atmosphere.sky()
+    before = (tuple(sky.zenith), tuple(sky.horizon))
+    try:
+        sky.colors(" Navy ", "Light  Orange")
+        expected = ((0.0, 0.0, 128 / 255), (1.0, 179 / 255, 102 / 255))
+        assert tuple(sky.zenith) == pytest.approx(expected[0])
+        assert tuple(sky.horizon) == pytest.approx(expected[1])
+        for zenith, horizon in (("reddish", "Red"), ("Red", "reddish")):
+            with pytest.raises(ValueError, match="not a colour"):
+                sky.colors(zenith, horizon)
+            assert tuple(sky.zenith) == pytest.approx(expected[0])
+            assert tuple(sky.horizon) == pytest.approx(expected[1])
+    finally:
+        sky.zenith, sky.horizon = before
+
+
 def test_hierarchy():
     parent = carbine.new("rectangle", name="Parent")
     child = carbine.new("square", parent=parent, name="Child")

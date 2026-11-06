@@ -65,8 +65,7 @@ impl Scene {
         self.sky.horizon = color;
     }
 
-    /// The two backdrop colours from `#rrggbb` style strings, the same forms an
-    /// object colour accepts.
+    /// The two backdrop colours from names or hex strings; any alpha is ignored.
     pub fn set_sky_colors_hex(&mut self, zenith: &str, horizon: &str) -> Result<(), SceneError> {
         let zenith = sky_color(zenith)?;
         let horizon = sky_color(horizon)?;
@@ -185,6 +184,32 @@ mod tests {
             scene.set_sky_colors_hex("not a colour", "#000000"),
             Err(SceneError::BadColor(_))
         ));
+    }
+
+    #[test]
+    fn named_sky_colours_share_the_parser_and_ignore_alpha() {
+        let mut scene = Scene::new();
+        scene.set_sky_colors_hex(" Navy ", "Light  Yellow").unwrap();
+        assert_eq!(scene.sky().zenith, sky_color("#000080").unwrap());
+        assert_eq!(scene.sky().horizon, sky_color("#ffffe0").unwrap());
+
+        let before = scene.sky();
+        for (zenith, horizon) in [("reddish", "Red"), ("Red", "reddish")] {
+            assert!(matches!(
+                scene.set_sky_colors_hex(zenith, horizon),
+                Err(SceneError::BadColor(_))
+            ));
+            assert_eq!(scene.sky(), before);
+        }
+
+        scene.set_sky_zenith_hex(" dArK\tBlue ").unwrap();
+        scene.set_sky_horizon_hex("Skin color").unwrap();
+        assert_eq!(scene.sky().zenith, sky_color("#00008b").unwrap());
+        assert_eq!(scene.sky().horizon, sky_color("#f1c27d").unwrap());
+        scene.set_sky_zenith_hex("#1230").unwrap();
+        scene.set_sky_horizon_hex("#abcdef00").unwrap();
+        assert_eq!(scene.sky().zenith, sky_color("#112233").unwrap());
+        assert_eq!(scene.sky().horizon, sky_color("#abcdef").unwrap());
     }
 
     #[test]

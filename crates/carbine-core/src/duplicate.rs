@@ -25,7 +25,7 @@ use crate::node::{
     Children, NodeId, NodeKind, NodeMesh, NodeName, NodeTexture, ObjectColor, Opacity, Parent,
     Scene, SceneError, TextureTiling, Transform, Visible,
 };
-use crate::ui::Ui;
+use crate::ui::{Ui, UiText};
 
 /// Which link group a node belongs to. Only a linked copy carries it, and the
 /// original picks one up the first time it is copied by link, so the first twin and
@@ -153,6 +153,7 @@ impl Scene {
         });
         let collider = self.world.get::<Collider>(source).copied();
         let ui = self.world.get::<Ui>(source).copied();
+        let text = self.world.get::<UiText>(source).cloned();
         let actor = self.world.get::<EntityData>(source).map(|data| EntityData {
             health: data.health,
             damage: data.damage,
@@ -199,6 +200,9 @@ impl Scene {
         }
         if let Some(ui) = ui {
             spawned.insert(ui);
+        }
+        if let Some(text) = text {
+            spawned.insert(text);
         }
         if let Some(actor) = actor {
             spawned.insert(actor);
@@ -586,6 +590,148 @@ mod tests {
             12.0,
             "the plain copy never joined in"
         );
+    }
+
+    #[test]
+    fn text_copies_clone_all_configuration_and_only_linked_copies_share_writes() {
+        let mut scene = Scene::new();
+        let original = scene.create_ui("text", None, None).unwrap();
+        scene
+            .set_text_content(original, "Original\n世界".into())
+            .unwrap();
+        scene.set_text_size(original, 36.0).unwrap();
+        scene.set_text_word_wrap(original, true).unwrap();
+        scene.set_text_width(original, 200.0).unwrap();
+        scene.set_text_outline(original, true).unwrap();
+        scene.set_text_outline_width(original, 3.0).unwrap();
+        scene
+            .set_text_outline_color(original, Vec3::new(0.2, 0.3, 0.4))
+            .unwrap();
+        let plain = scene.duplicate(original, 1).unwrap()[0];
+        let twin = scene.link_duplicate(original, 1).unwrap()[0];
+        let other = scene.link_duplicate(twin, 1).unwrap()[0];
+        let plain_from_twin = scene.duplicate(twin, 1).unwrap()[0];
+        let before = scene.text(original).unwrap().clone();
+        let assert_text = |scene: &Scene, id: NodeId, expected: &UiText| {
+            assert!(scene.is_ui(id).unwrap());
+            assert!(scene.is_text(id).unwrap());
+            assert_eq!(scene.kind(id).unwrap(), "text");
+            assert_eq!(scene.text_content(id).unwrap(), expected.content);
+            assert_eq!(scene.text_size(id).unwrap(), expected.font_size);
+            assert_eq!(scene.text_word_wrap(id).unwrap(), expected.word_wrap);
+            assert_eq!(scene.text_width(id).unwrap(), expected.width);
+            assert_eq!(scene.text_outline(id).unwrap(), expected.outline);
+            assert_eq!(
+                scene.text_outline_width(id).unwrap(),
+                expected.outline_width
+            );
+            assert_eq!(
+                scene.text_outline_color(id).unwrap(),
+                expected.outline_color
+            );
+        };
+        for id in [plain, twin, other, plain_from_twin] {
+            assert_text(&scene, id, &before);
+        }
+        assert!(!scene.is_linked(plain).unwrap());
+        assert!(!scene.is_linked(plain_from_twin).unwrap());
+        assert!(scene.is_linked(twin).unwrap());
+
+        scene.set_text_content(twin, "Shared".into()).unwrap();
+        scene.set_text_size(twin, 48.0).unwrap();
+        scene.set_text_word_wrap(twin, false).unwrap();
+        scene.set_text_width(twin, 800.0).unwrap();
+        scene.set_text_outline(twin, false).unwrap();
+        scene.set_text_outline_width(twin, 6.0).unwrap();
+        scene.set_text_outline_color(twin, Vec3::ONE).unwrap();
+        let after = UiText {
+            content: "Shared".into(),
+            font_size: 48.0,
+            word_wrap: false,
+            width: 800.0,
+            outline: false,
+            outline_width: 6.0,
+            outline_color: Vec3::ONE,
+        };
+        for id in [original, twin, other] {
+            assert_text(&scene, id, &after);
+        }
+        for id in [plain, plain_from_twin] {
+            assert_text(&scene, id, &before);
+        }
+        scene.set_text_content(plain, "Independent".into()).unwrap();
+        assert_text(&scene, original, &after);
+        assert_eq!(scene.text_content(plain).unwrap(), "Independent");
+
+        place(&mut scene, twin, Vec3::new(20.0, 30.0, 0.0));
+        scene
+            .set_vec_field(twin, VecField::Scale, Vec3::new(2.0, 3.0, 1.0))
+            .unwrap();
+        scene
+            .set_vec_field_axis(twin, VecField::RotationEuler, Axis::Z, 45.0)
+            .unwrap();
+        assert_eq!(
+            field(&scene, twin, VecField::Position),
+            Vec3::new(20.0, 30.0, 0.0)
+        );
+        assert_eq!(
+            field(&scene, twin, VecField::Scale),
+            Vec3::new(2.0, 3.0, 1.0)
+        );
+        assert!((field(&scene, twin, VecField::RotationEuler).z - 45.0).abs() < 1e-4);
+        for id in [original, other, plain, plain_from_twin] {
+            assert_eq!(field(&scene, id, VecField::Position), Vec3::ZERO);
+            assert_eq!(field(&scene, id, VecField::Scale), Vec3::ONE);
+            assert!(field(&scene, id, VecField::RotationEuler).length() < 1e-4);
+        }
+        scene.destroy(other).unwrap();
+        scene.set_text_size(original, f32::INFINITY).unwrap();
+        scene.set_text_width(original, f32::NAN).unwrap();
+        scene
+            .set_text_outline_width(original, f32::NEG_INFINITY)
+            .unwrap();
+        assert_eq!(scene.text_size(twin).unwrap(), 400.0);
+        assert_eq!(scene.text_width(twin).unwrap(), 1.0);
+        assert_eq!(scene.text_outline_width(twin).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn text_in_a_copied_branch_keeps_its_configuration_and_placement() {
+        let mut scene = Scene::new();
+        let panel = scene.create_ui("rectangle", None, None).unwrap();
+        let label = scene
+            .create_ui("text", Some("Label".into()), Some(panel))
+            .unwrap();
+        scene.set_text_content(label, "Child".into()).unwrap();
+        scene.set_text_size(label, 32.0).unwrap();
+        scene.set_text_width(label, 256.0).unwrap();
+        scene.set_visible(label, false).unwrap();
+        place(&mut scene, label, Vec3::new(10.0, 20.0, 0.0));
+        let plain = scene.duplicate(panel, 1).unwrap()[0];
+        let linked = scene.link_duplicate(panel, 1).unwrap()[0];
+        for parent in [plain, linked] {
+            let children = scene.children(parent).unwrap();
+            assert_eq!(children.len(), 1);
+            let child = children[0];
+            assert_ne!(child, label);
+            assert_eq!(scene.name(child).unwrap(), "Label");
+            assert_eq!(scene.parent(child).unwrap(), Some(parent));
+            assert_eq!(scene.text_content(child).unwrap(), "Child");
+            assert_eq!(scene.text_size(child).unwrap(), 32.0);
+            assert_eq!(scene.text_width(child).unwrap(), 256.0);
+            assert_eq!(
+                field(&scene, child, VecField::Position),
+                Vec3::new(10.0, 20.0, 0.0)
+            );
+            assert!(!scene.is_visible(child).unwrap());
+            assert!(!scene.is_linked(child).unwrap());
+            scene
+                .set_text_content(child, "Copied child".into())
+                .unwrap();
+            assert_eq!(scene.text_content(label).unwrap(), "Child");
+        }
+        assert!(scene.ui_items().iter().all(|item| item.text.is_none()));
+        assert!(scene.draw_items().is_empty());
     }
 
     #[test]

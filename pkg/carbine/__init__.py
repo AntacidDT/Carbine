@@ -109,6 +109,11 @@ class _Carbine(ModuleType):
         return _native.fpsLimit()
 
     @property
+    def fps(self) -> float:
+        """Measured frames per second, refreshed by the native clock every 0.25s."""
+        return _native.fps()
+
+    @property
     def lightType(self) -> str:
         return _native.lightType()
 
@@ -148,6 +153,7 @@ __all__ = [
     "dt",
     "duplicate",
     "end",
+    "fps",
     "fpsCap",
     "fpsLimit",
     "grabMouse",

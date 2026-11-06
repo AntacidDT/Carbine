@@ -15,29 +15,58 @@ pub(crate) struct Ui {
     pub(crate) outline: f32,
 }
 
+/// Text configuration; glyph layout and font data belong to the renderer.
+#[derive(Clone, Component)]
+pub struct UiText {
+    pub content: String,
+    pub font_size: f32,
+    pub word_wrap: bool,
+    pub width: f32,
+    pub outline: bool,
+    pub outline_width: f32,
+    pub outline_color: Vec3,
+}
+
+impl Default for UiText {
+    fn default() -> Self {
+        Self {
+            content: String::new(),
+            font_size: 24.0,
+            word_wrap: false,
+            width: 400.0,
+            outline: false,
+            outline_width: 1.0,
+            outline_color: Vec3::ZERO,
+        }
+    }
+}
+
 impl Scene {
-    /// Creates a UI element. The kind picks a default polygon; every shape is
-    /// still overridable through `set_polygon_sides`.
+    /// Creates a UI element from a case-insensitive shape or text kind.
     pub fn create_ui(
         &mut self,
         kind: &str,
         name: Option<String>,
         parent: Option<NodeId>,
     ) -> Result<NodeId, SceneError> {
+        let kind = kind.trim().to_lowercase();
         let data =
-            primitives::ui_mesh(kind).ok_or_else(|| SceneError::UnknownKind(kind.to_owned()))?;
+            primitives::ui_mesh(&kind).ok_or_else(|| SceneError::UnknownKind(kind.clone()))?;
         if let Some(parent) = parent {
             self.entity(parent)?;
             self.branch_allows(parent, true)?;
         }
 
-        let id = self.spawn(kind, name, parent, data);
+        let id = self.spawn(&kind, name, parent, data);
         let entity = self.entity(id)?;
         self.world.entity_mut(entity).insert(Ui {
             corner: 0.0,
-            sides: default_sides(kind),
+            sides: default_sides(&kind),
             outline: 0.0,
         });
+        if kind == "text" {
+            self.world.entity_mut(entity).insert(UiText::default());
+        }
         // A UI element is pinned to the screen; gravity has nothing to do with it.
         self.set_anchored(id, true)?;
         Ok(id)
@@ -46,6 +75,107 @@ impl Scene {
     pub fn is_ui(&self, id: NodeId) -> Result<bool, SceneError> {
         let entity = self.entity(id)?;
         Ok(self.world.get::<Ui>(entity).is_some())
+    }
+
+    pub fn is_text(&self, id: NodeId) -> Result<bool, SceneError> {
+        let entity = self.entity(id)?;
+        Ok(self.world.get::<UiText>(entity).is_some())
+    }
+
+    pub fn text(&self, id: NodeId) -> Result<&UiText, SceneError> {
+        let entity = self.entity(id)?;
+        self.world.get::<UiText>(entity).ok_or(SceneError::NotAUi)
+    }
+
+    pub fn text_content(&self, id: NodeId) -> Result<&str, SceneError> {
+        Ok(&self.text(id)?.content)
+    }
+
+    pub fn set_text_content(&mut self, id: NodeId, content: String) -> Result<(), SceneError> {
+        self.spread(id, move |scene, member| {
+            scene.text_mut(member)?.content.clone_from(&content);
+            Ok(())
+        })
+    }
+
+    pub fn text_size(&self, id: NodeId) -> Result<f32, SceneError> {
+        Ok(self.text(id)?.font_size)
+    }
+
+    pub fn set_text_size(&mut self, id: NodeId, size: f32) -> Result<(), SceneError> {
+        let size = finite_clamp(size, 1.0, 400.0);
+        self.spread(id, move |scene, member| {
+            scene.text_mut(member)?.font_size = size;
+            Ok(())
+        })
+    }
+
+    pub fn text_word_wrap(&self, id: NodeId) -> Result<bool, SceneError> {
+        Ok(self.text(id)?.word_wrap)
+    }
+
+    pub fn set_text_word_wrap(&mut self, id: NodeId, word_wrap: bool) -> Result<(), SceneError> {
+        self.spread(id, move |scene, member| {
+            scene.text_mut(member)?.word_wrap = word_wrap;
+            Ok(())
+        })
+    }
+
+    pub fn text_width(&self, id: NodeId) -> Result<f32, SceneError> {
+        Ok(self.text(id)?.width)
+    }
+
+    pub fn set_text_width(&mut self, id: NodeId, width: f32) -> Result<(), SceneError> {
+        let width = finite_clamp(width, 1.0, 16384.0);
+        self.spread(id, move |scene, member| {
+            scene.text_mut(member)?.width = width;
+            Ok(())
+        })
+    }
+
+    pub fn text_outline(&self, id: NodeId) -> Result<bool, SceneError> {
+        Ok(self.text(id)?.outline)
+    }
+
+    pub fn set_text_outline(&mut self, id: NodeId, outline: bool) -> Result<(), SceneError> {
+        self.spread(id, move |scene, member| {
+            scene.text_mut(member)?.outline = outline;
+            Ok(())
+        })
+    }
+
+    pub fn text_outline_width(&self, id: NodeId) -> Result<f32, SceneError> {
+        Ok(self.text(id)?.outline_width)
+    }
+
+    pub fn set_text_outline_width(&mut self, id: NodeId, width: f32) -> Result<(), SceneError> {
+        let width = finite_clamp(width, 0.0, 32.0);
+        self.spread(id, move |scene, member| {
+            scene.text_mut(member)?.outline_width = width;
+            Ok(())
+        })
+    }
+
+    pub fn text_outline_color(&self, id: NodeId) -> Result<Vec3, SceneError> {
+        Ok(self.text(id)?.outline_color)
+    }
+
+    pub fn set_text_outline_color(&mut self, id: NodeId, color: Vec3) -> Result<(), SceneError> {
+        self.text(id)?;
+        if !color.is_finite() {
+            return Err(SceneError::BadColor(color.to_string()));
+        }
+        self.spread(id, move |scene, member| {
+            scene.text_mut(member)?.outline_color = color;
+            Ok(())
+        })
+    }
+
+    fn text_mut(&mut self, id: NodeId) -> Result<Mut<'_, UiText>, SceneError> {
+        let entity = self.entity(id)?;
+        self.world
+            .get_mut::<UiText>(entity)
+            .ok_or(SceneError::NotAUi)
     }
 
     /// How round the corners are, in pixels. Kept exactly as given: a shape too
@@ -156,6 +286,7 @@ impl Scene {
                     corner: ui.corner,
                     sides: ui.sides.max(3) as f32,
                     outline: ui.outline,
+                    text: self.world.get::<UiText>(entity),
                 });
             }
 
@@ -180,14 +311,25 @@ pub struct UiItem<'a> {
     pub node: NodeId,
     pub handle: MeshHandle,
     pub mesh: &'a MeshData,
+    /// Text uses the local origin as its top-left, with local scale applied to glyphs.
     pub model: Mat4,
     /// sRGB colour and alpha in 0..1.
     pub color: [f32; 4],
-    /// Width and height in pixels.
+    /// Quad width and height in pixels; text layout uses its separate text width.
     pub size: [f32; 2],
     pub corner: f32,
     pub sides: f32,
     pub outline: f32,
+    pub text: Option<&'a UiText>,
+}
+
+fn finite_clamp(value: f32, min: f32, max: f32) -> f32 {
+    // NaN takes the minimum; infinities take their respective bounds.
+    if value.is_nan() {
+        min
+    } else {
+        value.clamp(min, max)
+    }
 }
 
 fn default_sides(kind: &str) -> u32 {
@@ -203,7 +345,278 @@ fn default_sides(kind: &str) -> u32 {
 mod tests {
     use super::*;
     use crate::node::VecField;
-    use glam::Vec4;
+    use glam::{Quat, Vec4};
+
+    #[test]
+    fn text_creation_normalizes_kinds_and_keeps_shape_components_separate() {
+        let mut scene = Scene::new();
+        for kind in ["text", "Text", " TEXT ", "\tTeXt\n"] {
+            let id = scene.create_ui(kind, None, None).unwrap();
+            assert!(scene.is_ui(id).unwrap());
+            assert!(scene.is_text(id).unwrap());
+            assert_eq!(scene.kind(id).unwrap(), "text");
+            assert_eq!(scene.name(id).unwrap(), "Text");
+            assert_eq!(scene.parent(id).unwrap(), Some(scene.root()));
+            assert!(scene.is_anchored(id).unwrap());
+            assert_eq!(scene.transform(id).unwrap().scale, Vec3::ONE);
+            let text = scene.text(id).unwrap();
+            assert_eq!(text.content, "");
+            assert_eq!(text.font_size, 24.0);
+            assert!(!text.word_wrap);
+            assert_eq!(text.width, 400.0);
+            assert!(!text.outline);
+            assert_eq!(text.outline_width, 1.0);
+            assert_eq!(text.outline_color, Vec3::ZERO);
+        }
+        for kind in primitives::UI_KINDS.iter().filter(|kind| **kind != "text") {
+            let id = scene
+                .create_ui(&format!(" {} ", kind.to_uppercase()), None, None)
+                .unwrap();
+            assert!(!scene.is_text(id).unwrap());
+            assert_eq!(scene.kind(id).unwrap(), *kind);
+            assert_eq!(scene.polygon_sides(id).unwrap(), default_sides(kind));
+        }
+        assert!(matches!(
+            scene.create_ui(" unknown ", None, None),
+            Err(SceneError::UnknownKind(kind)) if kind == "unknown"
+        ));
+        assert!(matches!(
+            scene.create("Text", None, None),
+            Err(SceneError::UnknownKind(_))
+        ));
+    }
+
+    #[test]
+    fn text_properties_round_trip_without_changing_placement_or_shape_state() {
+        let mut scene = Scene::new();
+        let id = scene.create_ui("text", Some("Label".into()), None).unwrap();
+        scene
+            .set_vec_field(id, VecField::Position, Vec3::new(32.0, 48.0, 0.0))
+            .unwrap();
+        scene
+            .set_vec_field(id, VecField::Scale, Vec3::new(2.0, 3.0, 1.0))
+            .unwrap();
+        let before = scene.transform(id).unwrap();
+        scene
+            .set_text_content(id, "Hello, 世界\nSecond line".into())
+            .unwrap();
+        scene.set_text_size(id, 36.5).unwrap();
+        scene.set_text_word_wrap(id, true).unwrap();
+        scene.set_text_width(id, 512.5).unwrap();
+        scene.set_text_outline(id, true).unwrap();
+        scene.set_text_outline_width(id, 2.5).unwrap();
+        scene
+            .set_text_outline_color(id, Vec3::new(0.2, 0.4, 0.6))
+            .unwrap();
+
+        assert_eq!(scene.name(id).unwrap(), "Label");
+        assert_eq!(scene.text_content(id).unwrap(), "Hello, 世界\nSecond line");
+        assert_eq!(scene.text_size(id).unwrap(), 36.5);
+        assert!(scene.text_word_wrap(id).unwrap());
+        assert_eq!(scene.text_width(id).unwrap(), 512.5);
+        assert!(scene.text_outline(id).unwrap());
+        assert_eq!(scene.text_outline_width(id).unwrap(), 2.5);
+        assert_eq!(
+            scene.text_outline_color(id).unwrap(),
+            Vec3::new(0.2, 0.4, 0.6)
+        );
+        assert_eq!(scene.outline(id).unwrap(), 0.0);
+        assert_eq!(scene.polygon_sides(id).unwrap(), 4);
+        let after = scene.transform(id).unwrap();
+        assert_eq!(after.position, before.position);
+        assert_eq!(after.rotation, before.rotation);
+        assert_eq!(after.scale, before.scale);
+
+        scene.set_text_content(id, String::new()).unwrap();
+        scene.set_text_word_wrap(id, false).unwrap();
+        scene.set_text_outline(id, false).unwrap();
+        assert_eq!(scene.text_content(id).unwrap(), "");
+        assert!(!scene.text_word_wrap(id).unwrap());
+        assert!(!scene.text_outline(id).unwrap());
+    }
+
+    #[test]
+    fn text_numeric_properties_have_finite_bounds() {
+        let mut scene = Scene::new();
+        let id = scene.create_ui("text", None, None).unwrap();
+        for (input, size, width, outline) in [
+            (-100.0, 1.0, 1.0, 0.0),
+            (0.0, 1.0, 1.0, 0.0),
+            (1.0, 1.0, 1.0, 1.0),
+            (12.5, 12.5, 12.5, 12.5),
+            (32.0, 32.0, 32.0, 32.0),
+            (400.0, 400.0, 400.0, 32.0),
+            (16384.0, 400.0, 16384.0, 32.0),
+            (100000.0, 400.0, 16384.0, 32.0),
+            (f32::NAN, 1.0, 1.0, 0.0),
+            (f32::NEG_INFINITY, 1.0, 1.0, 0.0),
+            (f32::INFINITY, 400.0, 16384.0, 32.0),
+        ] {
+            scene.set_text_size(id, input).unwrap();
+            scene.set_text_width(id, input).unwrap();
+            scene.set_text_outline_width(id, input).unwrap();
+            assert_eq!(scene.text_size(id).unwrap(), size);
+            assert_eq!(scene.text_width(id).unwrap(), width);
+            assert_eq!(scene.text_outline_width(id).unwrap(), outline);
+        }
+    }
+
+    #[test]
+    fn text_outline_rejects_nonfinite_colors_without_changing_linked_state() {
+        let mut scene = Scene::new();
+        let id = scene.create_ui("text", None, None).unwrap();
+        scene.set_text_outline_color(id, Vec3::ONE).unwrap();
+        let twin = scene.link_duplicate(id, 1).unwrap()[0];
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for color in [
+                Vec3::new(invalid, 0.0, 0.0),
+                Vec3::new(0.0, invalid, 0.0),
+                Vec3::new(0.0, 0.0, invalid),
+            ] {
+                assert!(matches!(
+                    scene.set_text_outline_color(twin, color),
+                    Err(SceneError::BadColor(_))
+                ));
+                assert_eq!(scene.text_outline_color(id).unwrap(), Vec3::ONE);
+                assert_eq!(scene.text_outline_color(twin).unwrap(), Vec3::ONE);
+            }
+        }
+    }
+
+    #[test]
+    fn text_accessors_distinguish_nontext_from_destroyed_nodes() {
+        let mut scene = Scene::new();
+        let world = scene.create("cube", None, None).unwrap();
+        let shape = scene.create_ui("square", None, None).unwrap();
+        let destroyed = scene.create_ui("text", None, None).unwrap();
+        scene.destroy(destroyed).unwrap();
+        for id in [scene.root(), world, shape, destroyed] {
+            if id == destroyed {
+                assert!(matches!(scene.is_text(id), Err(SceneError::NodeDestroyed)));
+            } else {
+                assert!(!scene.is_text(id).unwrap());
+            }
+            for result in [
+                scene.text(id).map(|_| ()),
+                scene.text_content(id).map(|_| ()),
+                scene.text_size(id).map(|_| ()),
+                scene.text_word_wrap(id).map(|_| ()),
+                scene.text_width(id).map(|_| ()),
+                scene.text_outline(id).map(|_| ()),
+                scene.text_outline_width(id).map(|_| ()),
+                scene.text_outline_color(id).map(|_| ()),
+                scene.set_text_content(id, "ignored".into()),
+                scene.set_text_size(id, f32::NAN),
+                scene.set_text_word_wrap(id, true),
+                scene.set_text_width(id, f32::INFINITY),
+                scene.set_text_outline(id, true),
+                scene.set_text_outline_width(id, f32::NEG_INFINITY),
+                scene.set_text_outline_color(id, Vec3::ONE),
+                scene.set_text_outline_color(id, Vec3::splat(f32::NAN)),
+            ] {
+                if id == destroyed {
+                    assert!(matches!(result, Err(SceneError::NodeDestroyed)));
+                } else {
+                    assert!(matches!(result, Err(SceneError::NotAUi)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn text_items_keep_top_left_layout_and_local_scale_without_world_geometry() {
+        let mut scene = Scene::new();
+        let world = scene.create("cube", None, None).unwrap();
+        let panel = scene.create_ui("rectangle", None, None).unwrap();
+        let label = scene.create_ui("Text", None, Some(panel)).unwrap();
+        scene.set_text_content(label, "Label".into()).unwrap();
+        scene.set_text_width(label, 800.0).unwrap();
+        scene.set_alpha(label, 128.0).unwrap();
+        scene.set_color(label, Vec3::new(0.2, 0.4, 0.6)).unwrap();
+        let position = Vec3::new(100.0, 200.0, 0.0);
+        let offset = Vec3::new(10.0, 20.0, 0.0);
+        let scale = Vec3::new(2.0, 3.0, 1.0);
+        let parent_rotation = Quat::from_rotation_z(0.5);
+        let rotation = Quat::from_rotation_z(-0.25);
+        scene
+            .set_vec_field(panel, VecField::Position, position)
+            .unwrap();
+        scene
+            .set_vec_field(panel, VecField::Size, Vec3::new(640.0, 480.0, 1.0))
+            .unwrap();
+        scene.set_rotation(panel, parent_rotation).unwrap();
+        scene
+            .set_vec_field(label, VecField::Position, offset)
+            .unwrap();
+        scene.set_vec_field(label, VecField::Scale, scale).unwrap();
+        scene.set_rotation(label, rotation).unwrap();
+
+        let items = scene.ui_items();
+        assert_eq!(items.len(), 2);
+        assert!(items[0].text.is_none());
+        assert_eq!(items[0].size, [640.0, 480.0]);
+        let item = &items[1];
+        assert_eq!(item.node, label);
+        assert!(std::ptr::eq(item.text.unwrap(), scene.text(label).unwrap()));
+        assert_eq!(item.text.unwrap().content, "Label");
+        assert_eq!(item.text.unwrap().width, 800.0);
+        assert_eq!(item.color, [0.2, 0.4, 0.6, 128.0 / MAX_ALPHA]);
+        let expected = Mat4::from_translation(position)
+            * Mat4::from_quat(parent_rotation)
+            * Mat4::from_translation(offset)
+            * Mat4::from_quat(rotation)
+            * Mat4::from_scale(scale);
+        assert!(item.model.abs_diff_eq(expected, 1e-5));
+        assert!(
+            item.model
+                .transform_point3(Vec3::ZERO)
+                .abs_diff_eq(position + parent_rotation * offset, 1e-5,)
+        );
+        assert_eq!(
+            scene
+                .draw_items()
+                .iter()
+                .map(|item| item.node)
+                .collect::<Vec<_>>(),
+            vec![world]
+        );
+        assert!(matches!(
+            scene.create_ui("text", None, Some(world)),
+            Err(SceneError::CrossedTree)
+        ));
+        assert!(matches!(
+            scene.create("cube", None, Some(label)),
+            Err(SceneError::CrossedTree)
+        ));
+    }
+
+    #[test]
+    fn hidden_text_and_ancestors_hide_their_whole_ui_branch() {
+        let mut scene = Scene::new();
+        let panel = scene.create_ui("rectangle", None, None).unwrap();
+        let label = scene.create_ui("text", None, Some(panel)).unwrap();
+        let child = scene.create_ui("text", None, Some(label)).unwrap();
+        let sibling = scene.create_ui("text", None, None).unwrap();
+        let nodes = |scene: &Scene| {
+            scene
+                .ui_items()
+                .iter()
+                .map(|item| item.node)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(nodes(&scene), vec![panel, label, child, sibling]);
+        scene.set_visible(label, false).unwrap();
+        assert_eq!(nodes(&scene), vec![panel, sibling]);
+        scene.set_visible(panel, false).unwrap();
+        scene.set_visible(label, true).unwrap();
+        assert_eq!(nodes(&scene), vec![sibling]);
+        scene.set_visible(panel, true).unwrap();
+        assert_eq!(nodes(&scene), vec![panel, label, child, sibling]);
+        scene.destroy(panel).unwrap();
+        assert_eq!(nodes(&scene), vec![sibling]);
+        assert!(matches!(scene.text(child), Err(SceneError::NodeDestroyed)));
+        assert!(scene.draw_items().is_empty());
+    }
 
     #[test]
     fn a_ui_element_is_a_node_with_overlay_state() {

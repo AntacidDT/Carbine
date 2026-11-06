@@ -7,6 +7,7 @@ mod device;
 mod gpu;
 mod input;
 mod pacing;
+mod text;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -2232,5 +2233,413 @@ mod tests {
         let pixels = renderer.read_pixels(&scene).unwrap();
         assert_eq!(pixel(&pixels, 64, 32, 32), [0, 0, 255], "overlay on top");
         assert_eq!(pixel(&pixels, 64, 20, 32), [255, 0, 0], "world behind");
+    }
+
+    fn ui_pixel_mask(
+        pixels: &[u8],
+        width: u32,
+        accepts: impl Fn([u8; 3]) -> bool,
+    ) -> Vec<(u32, u32)> {
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .enumerate()
+            .filter(|(_, rgba)| accepts([rgba[0], rgba[1], rgba[2]]))
+            .map(|(index, _)| (index as u32 % width, index as u32 / width))
+            .collect()
+    }
+
+    fn text_fill_mask(pixels: &[u8], width: u32) -> Vec<(u32, u32)> {
+        ui_pixel_mask(pixels, width, |rgb| {
+            rgb.into_iter().all(|channel| channel > 128)
+        })
+    }
+
+    fn mask_bounds(mask: &[(u32, u32)]) -> [u32; 4] {
+        assert!(!mask.is_empty(), "the glyph mask must not be empty");
+        mask.iter().fold(
+            [u32::MAX, u32::MAX, 0, 0],
+            |[left, top, right, bottom], &(x, y)| {
+                [left.min(x), top.min(y), right.max(x), bottom.max(y)]
+            },
+        )
+    }
+
+    fn mask_row_bands(mask: &[(u32, u32)]) -> Vec<(u32, u32)> {
+        let mut bands: Vec<(u32, u32)> = Vec::new();
+        for &(_, y) in mask {
+            match bands.last_mut() {
+                Some((_, last)) if y <= *last + 1 => *last = y,
+                _ => bands.push((y, y)),
+            }
+        }
+        bands
+    }
+
+    fn text_label(
+        scene: &mut Scene,
+        content: &str,
+        position: Vec3,
+        parent: Option<NodeId>,
+    ) -> NodeId {
+        let label = scene.create_ui("Text", None, parent).unwrap();
+        scene.set_text_content(label, content.to_owned()).unwrap();
+        scene
+            .set_vec_field(label, VecField::Position, position)
+            .unwrap();
+        scene.set_color_hex(label, "#ffffff").unwrap();
+        label
+    }
+
+    #[test]
+    fn ui_text_rasterizes_glyphs_and_invalidates_changed_content() {
+        let mut renderer = Renderer::offscreen(256, 96).unwrap();
+        let mut scene = bare();
+        scene.set_sky_enabled(false);
+        let label = scene.create_ui("Text", None, None).unwrap();
+        scene
+            .set_vec_field(label, VecField::Position, Vec3::new(16.0, 12.0, 0.0))
+            .unwrap();
+        scene.set_color_hex(label, "#ffffff").unwrap();
+        assert_eq!(painted(&renderer.read_pixels(&scene).unwrap()), 0);
+
+        scene.set_text_content(label, "OOOO".into()).unwrap();
+        let round_pixels = renderer.read_pixels(&scene).unwrap();
+        let round = text_fill_mask(&round_pixels, 256);
+        let [left, top, right, bottom] = mask_bounds(&round);
+        let area = ((right - left + 1) * (bottom - top + 1)) as usize;
+        assert!(round.len() > 100, "only {} glyph pixels", round.len());
+        assert!(
+            round.len() * 2 < area,
+            "text must not fill its bounding quad"
+        );
+        assert!(
+            left >= 16 && top >= 12,
+            "text starts at its line-box origin"
+        );
+        assert!(
+            right < 136 && bottom < 48,
+            "unexpected bounds: {:?}",
+            mask_bounds(&round)
+        );
+        assert!((12..=26).contains(&(bottom - top + 1)));
+        assert_eq!(pixel(&round_pixels, 256, 8, 12), [22, 21, 20]);
+
+        scene.set_text_content(label, "HHHH".into()).unwrap();
+        let changed_pixels = renderer.read_pixels(&scene).unwrap();
+        let changed = text_fill_mask(&changed_pixels, 256);
+        let difference = round_pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(changed_pixels.as_chunks::<4>().0)
+            .filter(|(before, after)| before != after)
+            .count();
+        assert!(
+            difference > 100,
+            "same-length content retained stale glyphs"
+        );
+        assert!(changed.len() > 100);
+
+        scene.set_text_content(label, "H".into()).unwrap();
+        let short_pixels = renderer.read_pixels(&scene).unwrap();
+        let short = text_fill_mask(&short_pixels, 256);
+        let short_bounds = mask_bounds(&short);
+        assert!(short.len() > 30 && short.len() * 2 < changed.len());
+        assert!(short_bounds[2] + 30 < mask_bounds(&changed)[2]);
+        let stale = changed
+            .iter()
+            .filter(|&&(x, y)| {
+                x > short_bounds[2] + 2 && pixel(&short_pixels, 256, x, y) != [22, 21, 20]
+            })
+            .count();
+        assert_eq!(
+            stale, 0,
+            "shorter content left old glyphs in the draw buffer"
+        );
+
+        scene.set_text_content(label, String::new()).unwrap();
+        assert_eq!(painted(&renderer.read_pixels(&scene).unwrap()), 0);
+        scene.set_text_content(label, "OOOO".into()).unwrap();
+        assert!(renderer.read_pixels(&scene).unwrap() == round_pixels);
+
+        scene.set_text_content(label, "?".into()).unwrap();
+        let fallback = renderer.read_pixels(&scene).unwrap();
+        assert!(text_fill_mask(&fallback, 256).len() > 20);
+        scene.set_text_content(label, "界".into()).unwrap();
+        assert!(renderer.read_pixels(&scene).unwrap() == fallback);
+        scene.set_text_content(label, "é".into()).unwrap();
+        let latin = renderer.read_pixels(&scene).unwrap();
+        assert!(text_fill_mask(&latin, 256).len() > 30);
+        assert!(latin != fallback, "Latin-1 must use its own glyph");
+    }
+
+    #[test]
+    fn ui_text_font_size_wrap_and_newlines_change_pixel_layout() {
+        let mut renderer = Renderer::offscreen(256, 192).unwrap();
+        let mut scene = bare();
+        scene.set_sky_enabled(false);
+        let label = text_label(&mut scene, "HH", Vec3::new(12.0, 8.0, 0.0), None);
+        let default_pixels = renderer.read_pixels(&scene).unwrap();
+        let small = text_fill_mask(&default_pixels, 256);
+        let small_bounds = mask_bounds(&small);
+        assert!(small.len() > 60);
+        scene.set_text_size(label, 24.0).unwrap();
+        assert!(renderer.read_pixels(&scene).unwrap() == default_pixels);
+
+        scene.set_text_size(label, 48.0).unwrap();
+        let large = text_fill_mask(&renderer.read_pixels(&scene).unwrap(), 256);
+        let large_bounds = mask_bounds(&large);
+        assert!(large.len() > small.len() * 2 && large.len() < small.len() * 5);
+        for axis in 0..2 {
+            let small_span = small_bounds[axis + 2] - small_bounds[axis] + 1;
+            let large_span = large_bounds[axis + 2] - large_bounds[axis] + 1;
+            assert!(large_span.abs_diff(small_span * 2) <= 4);
+        }
+
+        scene.set_text_size(label, 24.0).unwrap();
+        scene.set_text_content(label, "HH HH".into()).unwrap();
+        let single_pixels = renderer.read_pixels(&scene).unwrap();
+        let single = text_fill_mask(&single_pixels, 256);
+        assert_eq!(mask_row_bands(&single).len(), 1);
+        scene.set_text_width(label, 50.0).unwrap();
+        assert!(
+            renderer.read_pixels(&scene).unwrap() == single_pixels,
+            "width alone must not wrap or clip"
+        );
+
+        scene.set_text_word_wrap(label, true).unwrap();
+        let wrapped_pixels = renderer.read_pixels(&scene).unwrap();
+        let wrapped = text_fill_mask(&wrapped_pixels, 256);
+        let bands = mask_row_bands(&wrapped);
+        assert_eq!(bands.len(), 2, "wrapped row bands: {bands:?}");
+        assert!((26..=31).contains(&(bands[1].0 - bands[0].0)));
+        assert!(mask_bounds(&wrapped)[2] < mask_bounds(&single)[2]);
+        assert!(wrapped.len() * 5 > single.len() * 4 && wrapped.len() * 5 < single.len() * 6);
+
+        scene.set_text_width(label, 200.0).unwrap();
+        assert!(
+            renderer.read_pixels(&scene).unwrap() == single_pixels,
+            "changing width must invalidate cached layout"
+        );
+        scene.set_text_width(label, 50.0).unwrap();
+        assert!(renderer.read_pixels(&scene).unwrap() == wrapped_pixels);
+        scene.set_text_word_wrap(label, false).unwrap();
+        assert!(renderer.read_pixels(&scene).unwrap() == single_pixels);
+        scene.set_text_content(label, "HH\nHH".into()).unwrap();
+        assert!(
+            renderer.read_pixels(&scene).unwrap() == wrapped_pixels,
+            "explicit newlines work without word wrap"
+        );
+
+        scene.set_text_content(label, "HH\n\nHH".into()).unwrap();
+        let spaced = text_fill_mask(&renderer.read_pixels(&scene).unwrap(), 256);
+        let bands = mask_row_bands(&spaced);
+        assert_eq!(bands.len(), 2);
+        assert!(
+            (54..=60).contains(&(bands[1].0 - bands[0].0)),
+            "empty lines retain their line height: {bands:?}"
+        );
+    }
+
+    #[test]
+    fn ui_text_outline_preserves_fill_and_opacity_fades_the_whole_glyph() {
+        let mut renderer = Renderer::offscreen(160, 96).unwrap();
+        let mut scene = bare();
+        scene.set_sky_enabled(false);
+        let label = text_label(&mut scene, "OH", Vec3::new(20.0, 12.0, 0.0), None);
+        scene.set_text_size(label, 48.0).unwrap();
+        let plain = renderer.read_pixels(&scene).unwrap();
+        let fill = ui_pixel_mask(&plain, 160, |rgb| rgb.into_iter().all(|c| c > 245));
+        let dark = |pixels: &[u8]| ui_pixel_mask(pixels, 160, |rgb| rgb.into_iter().all(|c| c < 8));
+        assert!(fill.len() > 100);
+        assert!(dark(&plain).is_empty());
+
+        scene.set_text_outline(label, true).unwrap();
+        scene.set_text_outline_width(label, 1.5).unwrap();
+        scene.set_text_outline_color(label, Vec3::ZERO).unwrap();
+        let thin = renderer.read_pixels(&scene).unwrap();
+        let thin_dark = dark(&thin).len();
+        assert!(thin_dark > 30, "outline drew only {thin_dark} dark pixels");
+        assert!(painted(&thin) > painted(&plain));
+        scene.set_text_outline_width(label, 3.0).unwrap();
+        let thick = renderer.read_pixels(&scene).unwrap();
+        assert!(
+            dark(&thick).len() * 4 > thin_dark * 5,
+            "a wider outline must expand the dark footprint"
+        );
+        assert!(painted(&thick) > painted(&thin));
+        for outlined in [&thin, &thick] {
+            let kept = fill
+                .iter()
+                .filter(|&&(x, y)| pixel(outlined, 160, x, y).into_iter().all(|c| c > 240))
+                .count();
+            assert!(
+                kept * 10 >= fill.len() * 9,
+                "the outline replaced the fill: {kept}/{}",
+                fill.len()
+            );
+        }
+
+        scene.set_alpha(label, 128.0).unwrap();
+        let faded = renderer.read_pixels(&scene).unwrap();
+        let mut worst_error = 0.0_f32;
+        for (opaque, translucent) in thick
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(faded.as_chunks::<4>().0)
+        {
+            for (channel, background) in [22.0, 21.0, 20.0].into_iter().enumerate() {
+                let expected =
+                    background + (f32::from(opaque[channel]) - background) * (128.0 / 255.0);
+                worst_error = worst_error.max((f32::from(translucent[channel]) - expected).abs());
+            }
+        }
+        assert!(
+            worst_error <= 2.0,
+            "fill and outline must share opacity, worst blend error: {worst_error}"
+        );
+        scene.set_alpha(label, 0.0).unwrap();
+        assert_eq!(
+            painted(&renderer.read_pixels(&scene).unwrap()),
+            0,
+            "zero alpha must also remove the outline"
+        );
+        scene.set_alpha(label, 255.0).unwrap();
+        scene.set_text_outline(label, false).unwrap();
+        assert!(renderer.read_pixels(&scene).unwrap() == plain);
+    }
+
+    #[test]
+    fn ui_text_obeys_hierarchy_visibility_and_local_transforms() {
+        let mut renderer = Renderer::offscreen(256, 192).unwrap();
+        let mut scene = bare();
+        scene.set_sky_enabled(false);
+        let parent = scene.create_ui("square", None, None).unwrap();
+        scene.set_alpha(parent, 0.0).unwrap();
+        scene
+            .set_vec_field(parent, VecField::Size, Vec3::new(120.0, 80.0, 1.0))
+            .unwrap();
+        let label = text_label(&mut scene, "HH", Vec3::new(10.0, 8.0, 0.0), Some(parent));
+        let original = text_fill_mask(&renderer.read_pixels(&scene).unwrap(), 256);
+        let original_bounds = mask_bounds(&original);
+        assert!(
+            original.len() > 60,
+            "a transparent parent must not hide its child"
+        );
+
+        scene
+            .set_vec_field(parent, VecField::Position, Vec3::new(40.0, 24.0, 0.0))
+            .unwrap();
+        let moved_pixels = renderer.read_pixels(&scene).unwrap();
+        let moved = text_fill_mask(&moved_pixels, 256);
+        let moved_bounds = mask_bounds(&moved);
+        for (axis, delta) in [40, 24, 40, 24].into_iter().enumerate() {
+            assert!(moved_bounds[axis].abs_diff(original_bounds[axis] + delta) <= 1);
+        }
+        let aligned = original
+            .iter()
+            .filter(|&&(x, y)| pixel(&moved_pixels, 256, x + 40, y + 24)[0] > 128)
+            .count();
+        assert!(aligned * 100 >= original.len() * 95);
+        assert!(moved.len().abs_diff(original.len()) <= original.len() / 20 + 2);
+        scene
+            .set_vec_field(parent, VecField::Size, Vec3::new(240.0, 160.0, 1.0))
+            .unwrap();
+        assert!(
+            renderer.read_pixels(&scene).unwrap() == moved_pixels,
+            "parent size must not scale child glyphs"
+        );
+
+        scene.set_visible(parent, false).unwrap();
+        assert_eq!(painted(&renderer.read_pixels(&scene).unwrap()), 0);
+        scene.set_visible(parent, true).unwrap();
+        scene.set_visible(label, false).unwrap();
+        assert_eq!(painted(&renderer.read_pixels(&scene).unwrap()), 0);
+        scene.set_visible(label, true).unwrap();
+        assert!(renderer.read_pixels(&scene).unwrap() == moved_pixels);
+
+        scene
+            .set_vec_field(label, VecField::Scale, Vec3::new(2.0, 2.0, 1.0))
+            .unwrap();
+        let scaled = text_fill_mask(&renderer.read_pixels(&scene).unwrap(), 256);
+        let scaled_bounds = mask_bounds(&scaled);
+        assert!(scaled.len() > moved.len() * 2 && scaled.len() < moved.len() * 5);
+        for axis in 0..2 {
+            let before = moved_bounds[axis + 2] - moved_bounds[axis] + 1;
+            let after = scaled_bounds[axis + 2] - scaled_bounds[axis] + 1;
+            assert!(after.abs_diff(before * 2) <= 4);
+        }
+
+        scene
+            .set_vec_field(label, VecField::Scale, Vec3::ONE)
+            .unwrap();
+        scene
+            .set_vec_field(parent, VecField::Position, Vec3::new(120.0, 24.0, 0.0))
+            .unwrap();
+        scene
+            .set_vec_field(parent, VecField::RotationEuler, Vec3::new(0.0, 0.0, 90.0))
+            .unwrap();
+        let rotated_pixels = renderer.read_pixels(&scene).unwrap();
+        let rotated = text_fill_mask(&rotated_pixels, 256);
+        let aligned = original
+            .iter()
+            .filter(|&&(x, y)| pixel(&rotated_pixels, 256, 119 - y, 24 + x)[0] > 128)
+            .count();
+        assert!(
+            aligned * 100 >= original.len() * 90,
+            "parent rotation did not rotate the glyph mask"
+        );
+        assert!(rotated.len().abs_diff(original.len()) <= original.len() / 10 + 2);
+    }
+
+    #[test]
+    fn ui_text_and_shapes_cover_each_other_in_document_order() {
+        let mut renderer = Renderer::offscreen(128, 80).unwrap();
+        let mut scene = bare();
+        scene.set_sky_enabled(false);
+        let parent = scene.create_ui("square", None, None).unwrap();
+        scene.set_alpha(parent, 0.0).unwrap();
+        let cover = scene.create_ui("square", None, None).unwrap();
+        scene
+            .set_vec_field(cover, VecField::Position, Vec3::new(64.0, 40.0, 0.0))
+            .unwrap();
+        scene
+            .set_vec_field(cover, VecField::Size, Vec3::new(160.0, 112.0, 1.0))
+            .unwrap();
+        scene.set_color_hex(cover, "#0000ff").unwrap();
+        text_label(&mut scene, "HH", Vec3::new(16.0, 12.0, 0.0), Some(parent));
+        let front = text_label(&mut scene, "HH", Vec3::new(16.0, 12.0, 0.0), None);
+        scene.set_visible(cover, false).unwrap();
+        scene.set_visible(front, false).unwrap();
+        let behind = text_fill_mask(&renderer.read_pixels(&scene).unwrap(), 128);
+        assert!(behind.len() > 60);
+
+        scene.set_visible(cover, true).unwrap();
+        let covered = renderer.read_pixels(&scene).unwrap();
+        let blue = ui_pixel_mask(&covered, 128, |rgb| rgb == [0, 0, 255]);
+        assert_eq!(
+            blue.len(),
+            128 * 80,
+            "the later shape must cover even text created after it in an earlier branch"
+        );
+        assert!(text_fill_mask(&covered, 128).is_empty());
+
+        scene.set_visible(front, true).unwrap();
+        let on_top = renderer.read_pixels(&scene).unwrap();
+        let visible = text_fill_mask(&on_top, 128);
+        assert!(visible.len() >= behind.len() * 9 / 10);
+        let preserved = behind
+            .iter()
+            .filter(|&&(x, y)| pixel(&on_top, 128, x, y).into_iter().all(|c| c > 128))
+            .count();
+        assert!(
+            preserved * 10 >= behind.len() * 9,
+            "the later text must cover the shape"
+        );
+        assert_eq!(pixel(&on_top, 128, 0, 0), [0, 0, 255]);
+        assert_eq!(pixel(&on_top, 128, 127, 79), [0, 0, 255]);
     }
 }

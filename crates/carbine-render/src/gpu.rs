@@ -189,12 +189,17 @@ fn field(at: vec2<f32>) -> f32 {
 /// look when the thing wearing it moves, and a face of one picture is left exactly as it
 /// was drawn.
 fn repeated(at: vec2<f32>, running_in: f32) -> vec4<f32> {
-    let bent = at + (vec2<f32>(
-        field(at * 0.4 + vec2<f32>(7.3, 2.1)),
-        field(at * 0.33 + vec2<f32>(3.7, 9.4)),
-    ) - 0.5) * 0.18 * running_in;
+    var bent = at;
+    var worn = 1.0;
+    if (running_in > 0.0) {
+        bent = at + (vec2<f32>(
+            field(at * 0.4 + vec2<f32>(7.3, 2.1)),
+            field(at * 0.33 + vec2<f32>(3.7, 9.4)),
+        ) - 0.5) * 0.18 * running_in;
+        worn = mix(1.0, 0.86 + 0.28 * field(at * 0.21 + vec2<f32>(1.6, 5.2)), running_in);
+    }
+    // Sample after reconvergence so mip derivatives remain valid at face boundaries.
     let picture = textureSample(skin, tiled, bent);
-    let worn = mix(1.0, 0.86 + 0.28 * field(at * 0.21 + vec2<f32>(1.6, 5.2)), running_in);
     return vec4<f32>(picture.rgb * worn, picture.a);
 }
 
@@ -203,6 +208,9 @@ fn repeated(at: vec2<f32>, running_in: f32) -> vec4<f32> {
 /// tile lying at an angle. A face of one tile never leaves the picture, so it keeps the
 /// clamp it has always been read with, pixel for pixel.
 fn sampled(at: vec2<f32>, running_in: f32) -> vec4<f32> {
+    if (uniforms.skinned < 0.5) {
+        return vec4<f32>(1.0);
+    }
     if (uniforms.tile > 0.0) {
         return repeated(at, running_in);
     }
@@ -914,6 +922,61 @@ const SKY: Spec = Spec {
     depth_only: false,
 };
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct TextUniforms {
+    view_proj: [[f32; 4]; 4],
+    model: [[f32; 4]; 4],
+    color: [f32; 4],
+    outline_color: [f32; 4],
+    distance: [f32; 4],
+}
+
+const TEXT_SHADER: &str = r#"
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    model: mat4x4<f32>,
+    color: vec4<f32>,
+    outline_color: vec4<f32>,
+    distance: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var font_sampler: sampler;
+@group(0) @binding(2) var font: texture_2d<f32>;
+struct Pixel {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+@vertex
+fn versus(@location(0) position: vec3<f32>, @location(2) uv: vec2<f32>) -> Pixel {
+    var pixel: Pixel;
+    pixel.clip = uniforms.view_proj * uniforms.model * vec4<f32>(position, 1.0);
+    pixel.uv = uv;
+    return pixel;
+}
+@fragment
+fn fragment(pixel: Pixel) -> @location(0) vec4<f32> {
+    let distance = (textureSample(font, font_sampler, pixel.uv).r - 0.5) * uniforms.distance.x;
+    let antialias = max(fwidth(distance) * 0.5, 0.0001);
+    let fill = smoothstep(-antialias, antialias, distance);
+    let outer = smoothstep(-antialias, antialias, distance + uniforms.distance.y);
+    let color = mix(uniforms.outline_color.rgb, uniforms.color.rgb, fill / max(outer, 0.0001));
+    return vec4<f32>(color, outer * uniforms.color.a);
+}
+"#;
+
+const TEXT: Spec = Spec {
+    label: "carbine text",
+    source: TEXT_SHADER,
+    uniform_bytes: std::mem::size_of::<TextUniforms>(),
+    fullscreen: false,
+    instanced: false,
+    skinned: true,
+    depth: false,
+    depth_write: false,
+    depth_only: false,
+};
+
 const UI: Spec = Spec {
     label: "carbine ui",
     source: UI_SHADER,
@@ -1020,6 +1083,8 @@ pub struct Gpu {
     sky: HashMap<wgpu::TextureFormat, Pipeline>,
     particles: HashMap<wgpu::TextureFormat, Pipeline>,
     ui: HashMap<wgpu::TextureFormat, Pipeline>,
+    text: HashMap<wgpu::TextureFormat, Pipeline>,
+    text_cache: crate::text::Cache,
     /// The depth the sun sees: the world drawn from its side, at `0` texels on a
     /// side. A rung that casts nothing is held at one texel wide, so the map the
     /// rung above it needed is let go.
@@ -1124,6 +1189,8 @@ impl Gpu {
             sky: HashMap::new(),
             particles: HashMap::new(),
             ui: HashMap::new(),
+            text: HashMap::new(),
+            text_cache: crate::text::Cache::default(),
             cast,
             cast_sampler,
             quad,
@@ -1353,6 +1420,12 @@ impl Gpu {
             }
         }
 
+        self.text_cache
+            .prepare(&self.device, &self.queue, &ui_items);
+        let text_pipeline =
+            self.text_cache.atlas.as_ref().map(|_| {
+                ensure_pipeline(&mut self.text, &self.device, format, &TEXT, ui_items.len())
+            });
         let world = ensure_pipeline(&mut self.world, &self.device, format, &WORLD, opaque.len());
         let glass_pipeline =
             ensure_pipeline(&mut self.glass, &self.device, format, &GLASS, glass.len());
@@ -1630,9 +1703,55 @@ impl Gpu {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(&pipeline.pipeline);
-
                 for (index, item) in ui_items.iter().enumerate() {
+                    if let Some(text) = item.text {
+                        let Some(mesh) = self.text_cache.mesh(item.node) else {
+                            continue;
+                        };
+                        let pipeline = text_pipeline.as_ref().unwrap();
+                        let scale = text.font_size / crate::text::FONT_SIZE;
+                        let range = crate::text::SDF_RANGE * scale;
+                        let uniforms = TextUniforms {
+                            view_proj: ui_proj.to_cols_array_2d(),
+                            model: item.model.to_cols_array_2d(),
+                            color: item.color,
+                            outline_color: text.outline_color.extend(1.0).to_array(),
+                            distance: [
+                                2.0 * range,
+                                if text.outline {
+                                    // Stay within the atlas's measured distance, not its rectangular padding.
+                                    text.outline_width.min(range * 0.9)
+                                } else {
+                                    0.0
+                                },
+                                0.0,
+                                0.0,
+                            ],
+                        };
+                        self.queue.write_buffer(
+                            &pipeline.uniforms[index],
+                            0,
+                            bytemuck::bytes_of(&uniforms),
+                        );
+                        let bind = bind_group(
+                            &self.device,
+                            &pipeline.layout,
+                            &pipeline.uniforms[index],
+                            &self.sampler,
+                            self.text_cache.atlas.as_ref().unwrap(),
+                            true,
+                            None,
+                            None,
+                            None,
+                        );
+                        pass.set_pipeline(&pipeline.pipeline);
+                        pass.set_bind_group(0, &bind, &[]);
+                        pass.set_vertex_buffer(0, mesh.vertex.slice(..));
+                        pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                        continue;
+                    }
+                    pass.set_pipeline(&pipeline.pipeline);
                     let mesh = ensure_mesh(&mut self.meshes, &self.device, item.handle, item.mesh);
                     let uniforms = UiUniforms {
                         view_proj: ui_proj.to_cols_array_2d(),

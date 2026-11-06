@@ -239,7 +239,7 @@ impl fmt::Display for SceneError {
             ),
             Self::BadColor(color) => write!(
                 formatter,
-                "\"{color}\" is not a colour; use #rgb, #rgba, #rrggbb or #rrggbbaa"
+                "\"{color}\" is not a colour; use a named colour, #rgb, #rgba, #rrggbb or #rrggbbaa"
             ),
             Self::UnknownDisaster(kind) => write!(
                 formatter,
@@ -750,8 +750,8 @@ impl Scene {
         Ok(hex_of(self.color(id)?))
     }
 
-    /// Accepts `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa`. A trailing alpha sets
-    /// the node's transparency, which both the world and the UI overlay honour.
+    /// Accepts named colours, `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa`.
+    /// Only a trailing hex alpha changes the node's transparency.
     pub fn set_color_hex(&mut self, id: NodeId, hex: &str) -> Result<(), SceneError> {
         let (color, alpha) =
             parse_hex_color(hex).ok_or_else(|| SceneError::BadColor(hex.to_owned()))?;
@@ -945,7 +945,57 @@ pub(crate) fn hex_of(color: Vec3) -> String {
     )
 }
 
+fn named_color_hex(name: &str) -> Option<&'static str> {
+    // The longest swatch name is twelve bytes; normalization needs no allocation.
+    let mut normalized = [0u8; 12];
+    let mut len = 0;
+    for word in name.split_whitespace() {
+        if len > 0 {
+            *normalized.get_mut(len)? = b' ';
+            len += 1;
+        }
+        for byte in word.bytes() {
+            *normalized.get_mut(len)? = byte.to_ascii_lowercase();
+            len += 1;
+        }
+    }
+    Some(match &normalized[..len] {
+        b"red" => "#ff0000",
+        b"dark red" => "#8b0000",
+        b"light red" => "#ff7f7f",
+        b"light orange" => "#ffb366",
+        b"orange" => "#ffa500",
+        b"dark orange" => "#ff8c00",
+        b"yellow" => "#ffff00",
+        b"banana" => "#ffe135",
+        b"light yellow" => "#ffffe0",
+        // One named swatch, not a universal skin tone.
+        b"skin color" => "#f1c27d",
+        b"white" => "#ffffff",
+        b"black" => "#000000",
+        b"grey" | b"gray" => "#808080",
+        b"light grey" | b"light gray" => "#d3d3d3",
+        b"dark grey" | b"dark gray" => "#a9a9a9",
+        b"green" => "#008000",
+        b"light green" => "#90ee90",
+        b"dark green" => "#006400",
+        b"blue" => "#0000ff",
+        b"light blue" => "#add8e6",
+        b"dark blue" => "#00008b",
+        b"cyan" => "#00ffff",
+        b"teal" => "#008080",
+        b"purple" => "#800080",
+        b"pink" => "#ffc0cb",
+        b"brown" => "#a52a2a",
+        b"cream" => "#fffdd0",
+        b"navy" => "#000080",
+        b"gold" => "#ffd700",
+        _ => return None,
+    })
+}
+
 pub(crate) fn parse_hex_color(hex: &str) -> Option<(Vec3, Option<f32>)> {
+    let hex = named_color_hex(hex).unwrap_or(hex);
     let digits = hex.strip_prefix('#').unwrap_or(hex);
     let pairs: Vec<Option<u32>> = match digits.len() {
         3 | 4 => digits
@@ -1292,6 +1342,89 @@ mod tests {
     }
 
     #[test]
+    fn named_colours_match_their_swatches_without_alpha() {
+        for (name, hex) in [
+            ("Red", "#ff0000"),
+            ("Dark Red", "#8b0000"),
+            ("Light Red", "#ff7f7f"),
+            ("Light Orange", "#ffb366"),
+            ("Orange", "#ffa500"),
+            ("Dark Orange", "#ff8c00"),
+            ("Yellow", "#ffff00"),
+            ("Banana", "#ffe135"),
+            ("Light Yellow", "#ffffe0"),
+            ("Skin color", "#f1c27d"),
+            ("White", "#ffffff"),
+            ("Black", "#000000"),
+            ("Grey", "#808080"),
+            ("Gray", "#808080"),
+            ("Light Grey", "#d3d3d3"),
+            ("Light Gray", "#d3d3d3"),
+            ("Dark Grey", "#a9a9a9"),
+            ("Dark Gray", "#a9a9a9"),
+            ("Green", "#008000"),
+            ("Light Green", "#90ee90"),
+            ("Dark Green", "#006400"),
+            ("Blue", "#0000ff"),
+            ("Light Blue", "#add8e6"),
+            ("Dark Blue", "#00008b"),
+            ("Cyan", "#00ffff"),
+            ("Teal", "#008080"),
+            ("Purple", "#800080"),
+            ("Pink", "#ffc0cb"),
+            ("Brown", "#a52a2a"),
+            ("Cream", "#fffdd0"),
+            ("Navy", "#000080"),
+            ("Gold", "#ffd700"),
+        ] {
+            let (color, alpha) = parse_hex_color(name).unwrap();
+            assert_eq!(hex_of(color), hex, "{name}");
+            assert_eq!(alpha, None, "{name}");
+        }
+    }
+
+    #[test]
+    fn named_colours_ignore_case_and_collapse_whitespace() {
+        for (name, hex) in [
+            ("  rEd  ", "#ff0000"),
+            ("\tDARK   rEd\n", "#8b0000"),
+            (" LIGHT\t OrAnGe ", "#ffb366"),
+            ("\u{2003}LiGhT\u{00a0}YELLOW\r\n", "#ffffe0"),
+            ("  sKiN  \n CoLoR ", "#f1c27d"),
+        ] {
+            assert_eq!(parse_hex_color(name), parse_hex_color(hex), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn hex_colours_keep_all_forms_and_eight_bit_alpha() {
+        for (written, hex, alpha) in [
+            ("#aBc", "#aabbcc", None),
+            ("AbC", "#aabbcc", None),
+            ("#aBc4", "#aabbcc", Some(68.0)),
+            ("AbC0", "#aabbcc", Some(0.0)),
+            ("#12aBcD", "#12abcd", None),
+            ("12ABcd", "#12abcd", None),
+            ("#12aBcD40", "#12abcd", Some(64.0)),
+            ("12ABcdFF", "#12abcd", Some(255.0)),
+        ] {
+            let (color, parsed_alpha) = parse_hex_color(written).unwrap();
+            assert_eq!(hex_of(color), hex, "{written}");
+            assert_eq!(parsed_alpha, alpha, "{written}");
+        }
+    }
+
+    #[test]
+    fn a_named_colour_preserves_a_nodes_alpha() {
+        let mut scene = Scene::new();
+        let card = scene.create("rectangle", None, None).unwrap();
+        scene.set_color_hex(card, "#1234").unwrap();
+        scene.set_color_hex(card, "Light Orange").unwrap();
+        assert_eq!(scene.color_hex(card).unwrap(), "#ffb366");
+        assert_eq!(scene.opacity(card).unwrap(), 68.0);
+    }
+
+    #[test]
     fn colours_are_written_as_hex_and_read_back() {
         let mut scene = Scene::new();
         let card = scene.create("rectangle", None, None).unwrap();
@@ -1425,8 +1558,26 @@ mod tests {
     fn bad_colours_are_rejected() {
         let mut scene = Scene::new();
         let card = scene.create("rectangle", None, None).unwrap();
+        scene.set_color_hex(card, "#1234").unwrap();
 
-        for bad in ["#ee7a3", "orange", "#gggggg", ""] {
+        for bad in [
+            "#ee7a3",
+            "orangish",
+            "#gggggg",
+            "",
+            " \t\n ",
+            "very dark red",
+            "light red extra",
+            "lightred",
+            "light-red",
+            "r ed",
+            "réd",
+            "#Red",
+            "Red80",
+            "transparent",
+            " #ff0000 ",
+        ] {
+            assert_eq!(parse_hex_color(bad), None, "{bad:?}");
             assert!(
                 matches!(
                     scene.set_color_hex(card, bad),
@@ -1434,6 +1585,8 @@ mod tests {
                 ),
                 "{bad} should not parse"
             );
+            assert_eq!(scene.color_hex(card).unwrap(), "#112233");
+            assert_eq!(scene.opacity(card).unwrap(), 68.0);
         }
     }
 

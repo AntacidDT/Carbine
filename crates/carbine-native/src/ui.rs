@@ -3,9 +3,7 @@ use pyo3::prelude::*;
 use crate::object::Object;
 use crate::with_scene;
 
-/// The screen overlay. Elements are measured in pixels from the viewport's top
-/// left corner, so `position` and `size` mean something different here than they
-/// do on `carbine.new()`.
+/// Screen overlay in pixels; Text uses a scalar font size rather than a size vector.
 #[pyclass(frozen, module = "carbine", name = "Ui")]
 pub struct PyUi;
 
@@ -17,8 +15,7 @@ impl PyUi {
 
 #[pymethods]
 impl PyUi {
-    /// Creates an element. The kind chooses a default polygon, which the
-    /// `polygon` property overrides.
+    /// Creates a shape or Text as an ordinary Object; kinds are case-insensitive.
     #[pyo3(name = "new")]
     #[pyo3(signature = (kind = "square", *, name = None, parent = None))]
     fn create_element<'py>(

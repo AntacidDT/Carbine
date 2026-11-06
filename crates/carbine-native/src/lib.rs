@@ -16,7 +16,7 @@ mod ui;
 
 use std::cell::RefCell;
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use carbine_core::{NodeId, Scene, SceneError};
 use carbine_render::Renderer;
@@ -50,9 +50,8 @@ thread_local! {
     /// the renderer lives where it was created.
     static RENDERER: RefCell<Option<Renderer>> = const { RefCell::new(None) };
 
-    /// When the last frame was drawn, and how long that frame took. The second
-    /// half is what `carbine.dt()` reports after the fact.
-    static CLOCK: RefCell<(Option<Instant>, f32)> = const { RefCell::new((None, 0.0)) };
+    /// Frame timing and measured FPS share the same native samples and lifetime.
+    static CLOCK: RefCell<Clock> = const { RefCell::new(Clock::new()) };
 
     /// The frame limits as Python last asked for them. A game writes
     /// `carbine.fpsCap = 90` before there is a window to tell, so the numbers wait
@@ -82,15 +81,49 @@ fn remembered() -> Limits {
     LIMITS.with(|cell| *cell.borrow())
 }
 
+struct Clock {
+    previous: Option<Instant>,
+    delta: f32,
+    elapsed: Duration,
+    frames: u64,
+    fps: f64,
+}
+
+impl Clock {
+    const fn new() -> Self {
+        Self {
+            previous: None,
+            delta: 0.0,
+            elapsed: Duration::ZERO,
+            frames: 0,
+            fps: 0.0,
+        }
+    }
+
+    fn tick(&mut self, now: Instant) -> f32 {
+        if let Some(previous) = self.previous {
+            let elapsed = now.duration_since(previous);
+            self.delta = elapsed.as_secs_f32();
+            self.elapsed += elapsed;
+            self.frames += 1;
+            if self.elapsed >= Duration::from_millis(250) {
+                self.fps = self.frames as f64 / self.elapsed.as_secs_f64();
+                self.elapsed = Duration::ZERO;
+                self.frames = 0;
+            }
+        }
+        self.previous = Some(now);
+        self.delta
+    }
+}
+
 /// Seconds since the previous frame, zero for the first one.
 fn tick() -> f32 {
-    let now = Instant::now();
-    CLOCK.with(|cell| {
-        let (previous, _) = *cell.borrow();
-        let delta = previous.map_or(0.0, |then| (now - then).as_secs_f32());
-        *cell.borrow_mut() = (Some(now), delta);
-        delta
-    })
+    CLOCK.with(|cell| cell.borrow_mut().tick(Instant::now()))
+}
+
+fn reset_clock() {
+    CLOCK.with(|cell| *cell.borrow_mut() = Clock::new());
 }
 
 pub(crate) fn scene_handle() -> &'static Mutex<Scene> {
@@ -181,6 +214,7 @@ fn init(width: u32, height: u32, window: bool, title: &str) -> PyResult<String> 
         })?;
     }
     RENDERER.with(|cell| *cell.borrow_mut() = Some(renderer));
+    reset_clock();
     Ok(adapter)
 }
 
@@ -242,10 +276,10 @@ fn fps_limit() -> Option<u32> {
 /// the time the last frame took, and the result goes to the window.
 #[pyfunction]
 fn render() -> PyResult<()> {
-    let dt = tick();
     RENDERER.with(|cell| {
         let mut slot = cell.borrow_mut();
         let renderer = slot.as_mut().ok_or_else(needs_renderer)?;
+        let dt = tick();
         let frame = renderer.poll();
         let mut scene = locked()?;
         scene.update_input(&frame);
@@ -259,7 +293,13 @@ fn render() -> PyResult<()> {
 /// Seconds between the two most recent frames. The first frame reports zero.
 #[pyfunction]
 fn dt() -> f32 {
-    CLOCK.with(|cell| cell.borrow().1)
+    CLOCK.with(|cell| cell.borrow().delta)
+}
+
+/// Measured FPS, refreshed every 0.25s of frame time; zero before a full sample.
+#[pyfunction]
+fn fps() -> f64 {
+    CLOCK.with(|cell| cell.borrow().fps)
 }
 
 /// Advances the world by a number of seconds without drawing. Use it when the
@@ -342,7 +382,7 @@ fn end() -> PyResult<()> {
         scene.reset();
         Ok(())
     })?;
-    CLOCK.with(|cell| *cell.borrow_mut() = (None, 0.0));
+    reset_clock();
     close();
     Ok(())
 }
@@ -409,6 +449,7 @@ fn duplicate<'py>(
 /// The same as `duplicate`, and the copies tied to the original: a write about what
 /// the thing *is* - colour, skin, gravity, collider shape, a crowd's knobs - lands on
 /// every member, while place, turning, size and hit points stay each member's own.
+/// Text font size is shared configuration; its position and scale remain local.
 /// Copying a twin joins the group it was copied from.
 #[pyfunction]
 #[pyo3(signature = (target, count = 1))]
@@ -557,6 +598,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(monitor_hz, module)?)?;
     module.add_function(wrap_pyfunction!(fps_limit, module)?)?;
     module.add_function(wrap_pyfunction!(dt, module)?)?;
+    module.add_function(wrap_pyfunction!(fps, module)?)?;
     module.add_function(wrap_pyfunction!(step, module)?)?;
     module.add_function(wrap_pyfunction!(running, module)?)?;
     module.add_function(wrap_pyfunction!(viewport, module)?)?;
@@ -595,4 +637,90 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add("DestroyedError", module.py().get_type::<DestroyedError>())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    #[test]
+    fn first_frame_has_no_elapsed_sample() {
+        let mut clock = Clock::new();
+        assert_eq!(clock.fps, 0.0);
+        assert_eq!(clock.tick(Instant::now()), 0.0);
+        assert_eq!(clock.fps, 0.0);
+        assert_eq!(clock.frames, 0);
+    }
+
+    #[test]
+    fn fps_waits_for_a_quarter_second_and_uses_all_elapsed_time() {
+        let mut clock = Clock::new();
+        let start = Instant::now();
+        clock.tick(start);
+        clock.tick(start + Duration::from_millis(50));
+        clock.tick(start + Duration::from_millis(200));
+        assert_eq!(clock.fps, 0.0);
+        clock.tick(start + Duration::from_millis(250));
+        assert_eq!(clock.fps, 12.0);
+        assert_eq!(clock.elapsed, Duration::ZERO);
+        assert_eq!(clock.frames, 0);
+    }
+
+    #[test]
+    fn fps_holds_between_windows_and_refreshes_from_new_samples() {
+        let mut clock = Clock::new();
+        let start = Instant::now();
+        clock.tick(start);
+        clock.tick(start + Duration::from_millis(250));
+        assert_eq!(clock.fps, 4.0);
+        clock.tick(start + Duration::from_millis(300));
+        assert_eq!(clock.fps, 4.0);
+        clock.tick(start + Duration::from_millis(500));
+        assert_eq!(clock.fps, 8.0);
+        clock.tick(start + Duration::from_millis(1000));
+        assert_eq!(clock.fps, 2.0);
+    }
+
+    #[test]
+    fn a_slow_frame_replaces_fast_fps_without_clamping_the_interval() {
+        let mut clock = Clock::new();
+        let start = Instant::now();
+        clock.tick(start);
+        for frame in 1..=5 {
+            clock.tick(start + Duration::from_millis(frame * 50));
+        }
+        assert_eq!(clock.fps, 20.0);
+        assert_eq!(clock.tick(start + Duration::from_millis(2250)), 2.0);
+        assert_eq!(clock.fps, 0.5);
+    }
+
+    #[test]
+    fn zero_length_frames_never_divide_by_zero() {
+        let mut clock = Clock::new();
+        let start = Instant::now();
+        for _ in 0..10 {
+            assert_eq!(clock.tick(start), 0.0);
+            assert_eq!(clock.fps, 0.0);
+        }
+        clock.tick(start + Duration::from_millis(250));
+        assert!(clock.fps.is_finite());
+    }
+
+    #[test]
+    fn resetting_drops_complete_and_partial_samples() {
+        let mut clock = Clock::new();
+        let start = Instant::now();
+        clock.tick(start);
+        clock.tick(start + Duration::from_millis(250));
+        clock.tick(start + Duration::from_millis(300));
+        assert!(clock.fps > 0.0);
+        assert!(clock.frames > 0);
+        clock = Clock::new();
+        assert_eq!(clock.fps, 0.0);
+        assert_eq!(clock.delta, 0.0);
+        assert_eq!(clock.frames, 0);
+        assert_eq!(clock.elapsed, Duration::ZERO);
+        assert_eq!(clock.tick(start + Duration::from_secs(60)), 0.0);
+        assert_eq!(clock.fps, 0.0);
+    }
 }

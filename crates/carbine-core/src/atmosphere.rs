@@ -490,7 +490,7 @@ impl Scene {
         self.atmosphere.fog_color = color;
     }
 
-    /// The fog colour written the way an object colour is written.
+    /// The fog colour from a name or hex string; any alpha is ignored.
     pub fn set_fog_color_hex(&mut self, hex: &str) -> Result<(), SceneError> {
         parse_hex_color(hex)
             .map(|(color, _)| self.set_fog_color(color))
@@ -734,6 +734,31 @@ mod tests {
             scene.set_fog_color_hex("not a colour"),
             Err(SceneError::BadColor(_))
         ));
+    }
+
+    #[test]
+    fn named_fog_colours_leave_density_alone_and_ignore_alpha() {
+        let mut scene = Scene::new();
+        scene.set_fog(40.0);
+        let density = scene.haze()[3];
+
+        for (written, hex) in [
+            ("  LIGHT\tGrey ", "#d3d3d3"),
+            ("Banana", "#ffe135"),
+            ("#1230", "#112233"),
+            ("#abcdef00", "#abcdef"),
+        ] {
+            scene.set_fog_color_hex(written).unwrap();
+            assert_eq!(hex_of(scene.atmosphere().fog_color), hex);
+            assert_eq!(scene.haze()[3], density);
+        }
+
+        let before = scene.atmosphere();
+        assert!(matches!(
+            scene.set_fog_color_hex("greyish"),
+            Err(SceneError::BadColor(_))
+        ));
+        assert_eq!(scene.atmosphere(), before);
     }
 
     #[test]

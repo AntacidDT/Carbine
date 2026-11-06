@@ -50,7 +50,7 @@ pub use texture::{
     TextureError, TextureQuality, TextureType, generate as generate_texture,
     pixels as texture_pixels, save as save_texture, variations as texture_variations,
 };
-pub use ui::UiItem;
+pub use ui::{UiItem, UiText};
 pub use vehicle::{DRIVER_SEAT_KIND, HandlingType, KIND as VEHICLE_KIND, SEAT_KIND};
 
 /// A packed skin written to the temporary directory, for tests that only care that a

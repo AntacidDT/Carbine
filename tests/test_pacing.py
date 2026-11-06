@@ -14,8 +14,10 @@ What is left here is the rule with no screen to consult. A desktop hands out exa
 window per process, so the case that needs a real refresh rate — and a cap timed against
 it — is told by `test_a_real_window_renders_and_holds_the_lower_limit`."""
 
+import math
 import subprocess
 import sys
+import time
 
 import carbine
 import pytest
@@ -120,12 +122,83 @@ def test_reading_the_limits_before_the_window_leaves_the_engine_closable():
     script = """
 import carbine
 
-print(carbine.fpsCap, carbine.monitorSync, carbine.monitorHz, carbine.fpsLimit)
+print(carbine.fpsCap, carbine.monitorSync, carbine.monitorHz, carbine.fpsLimit, carbine.fps)
 carbine.init(64, 64, window=False)
+assert carbine.fps == 0.0
+assert carbine.dt() == 0.0
 """
     finished = subprocess.run(
         [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
     )
 
-    assert finished.stdout.split() == ["None", "False", "0", "None"]
+    assert finished.stdout.split() == ["None", "False", "0", "None", "0.0"]
     assert finished.returncode == 0, finished.stderr[-400:]
+
+
+def test_measured_fps_is_read_only_and_exported():
+    assert "fps" in carbine.__all__
+    assert type(carbine.fps) is float
+    before = carbine.fps
+    with pytest.raises(AttributeError):
+        carbine.fps = 60
+    assert carbine.fps == before
+
+
+def test_rejected_render_and_manual_steps_do_not_create_clock_samples():
+    carbine.end()
+    assert carbine.fps == 0.0
+    assert carbine.dt() == 0.0
+    with pytest.raises(RuntimeError, match="renderer is not running"):
+        carbine.render()
+    carbine.step(0.25)
+    assert carbine.fps == 0.0
+    assert carbine.dt() == 0.0
+
+
+def test_measured_fps_uses_elapsed_frames_and_counts_slow_frames(headless, limits):
+    carbine.fpsCap = None
+    carbine.monitorSync = False
+    assert carbine.fps == 0.0
+    assert carbine.dt() == 0.0
+    carbine.readPixels()
+    assert carbine.fps == 0.0
+    assert carbine.dt() == 0.0
+    carbine.render()
+    assert carbine.fps == 0.0
+    assert carbine.dt() == 0.0
+
+    for pause in (0.26, 0.31):
+        time.sleep(pause)
+        carbine.render()
+        assert math.isfinite(carbine.fps)
+        assert 0 < carbine.fps <= 1 / pause
+        assert carbine.fps == pytest.approx(1 / carbine.dt(), rel=1e-6)
+        assert carbine.fpsLimit is None
+        assert carbine.fps == carbine._native.fps()
+
+
+def test_init_and_end_reset_measured_fps_and_dt_without_resetting_limits(headless, limits):
+    carbine.fpsCap = 90
+    carbine.monitorSync = True
+    carbine.render()
+    time.sleep(0.26)
+    carbine.render()
+    assert carbine.fps > 0
+    assert carbine.dt() >= 0.25
+
+    carbine.init(64, 64, window=False)
+    assert carbine.fps == 0.0
+    assert carbine.dt() == 0.0
+    assert (carbine.fpsCap, carbine.monitorSync) == (90, True)
+    carbine.render()
+    assert carbine.fps == 0.0
+    assert carbine.dt() == 0.0
+    time.sleep(0.26)
+    carbine.render()
+    assert carbine.fps > 0
+    assert carbine.dt() >= 0.25
+
+    carbine.end()
+    assert carbine.fps == 0.0
+    assert carbine.dt() == 0.0
+    assert (carbine.fpsCap, carbine.monitorSync) == (90, True)

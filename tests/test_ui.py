@@ -255,3 +255,323 @@ def test_an_element_hangs_off_its_panel(flat):
             badge.destroy()
     finally:
         panel.destroy()
+
+
+@pytest.fixture
+def text():
+    label = carbine.ui.new("Text", name="Label")
+    try:
+        yield label
+    finally:
+        label.destroy()
+
+
+@pytest.mark.parametrize("kind", ["text", "Text", " TEXT ", "\tTeXt\n"])
+def test_text_is_an_ordinary_object_with_scalar_size_and_boolean_outline(kind):
+    label = carbine.ui.new(kind)
+    try:
+        assert type(label) is carbine.Object
+        assert label.kind == "text"
+        assert label.name == "Text"
+        assert label.parent == carbine.scene.root
+        assert label.content == ""
+        assert type(label.size) is float
+        assert label.size == 24
+        assert label.wordWrap is False
+        assert label.width == 400
+        assert label.outline is False
+        assert label.outlineWidth == 1
+        assert label.transparent == 255
+        assert label.anchored is True
+    finally:
+        label.destroy()
+
+
+@pytest.mark.parametrize("content", ["", "FPS: 60", "Hello, 世界\nCafé\t42", "first\n\nlast\n"])
+def test_text_content_round_trips_without_rewriting_whitespace(text, content):
+    text.content = content
+    assert text.content == content
+
+
+def test_text_properties_round_trip_without_changing_transform(text):
+    text.position = (12, 34, 0)
+    text.scale = (2, 3, 1)
+    position = text.position
+    scale = text.scale
+    text.content = "Measured FPS"
+    text.size = 31.5
+    text.wordWrap = True
+    text.width = 125.5
+    text.outline = True
+    text.outlineWidth = 2.5
+    text.transparent = 128
+    assert text.content == "Measured FPS"
+    assert text.size == 31.5
+    assert text.wordWrap is True
+    assert text.width == 125.5
+    assert text.outline is True
+    assert text.outlineWidth == 2.5
+    assert text.transparent == 128
+    assert position.toTuple() == (12, 34, 0)
+    assert scale.toTuple() == (2, 3, 1)
+    text.wordWrap = False
+    text.outline = False
+    assert text.wordWrap is False
+    assert text.outline is False
+
+
+@pytest.mark.parametrize(
+    "property_name, value, expected",
+    [
+        ("size", -20, 1),
+        ("size", 0, 1),
+        ("size", 1, 1),
+        ("size", 24.5, 24.5),
+        ("size", 400, 400),
+        ("size", 401, 400),
+        ("size", 100000, 400),
+        ("width", -10, 1),
+        ("width", 0, 1),
+        ("width", 1, 1),
+        ("width", 400.5, 400.5),
+        ("width", 16384, 16384),
+        ("width", 100000, 16384),
+        ("outlineWidth", -1, 0),
+        ("outlineWidth", 0, 0),
+        ("outlineWidth", 1.5, 1.5),
+        ("outlineWidth", 32, 32),
+        ("outlineWidth", 100000, 32),
+        ("transparent", -10, 0),
+        ("transparent", 300, 255),
+    ],
+)
+def test_text_numeric_properties_clamp_to_their_bounds(text, property_name, value, expected):
+    setattr(text, property_name, value)
+    assert getattr(text, property_name) == expected
+
+
+@pytest.mark.parametrize("property_name", ["size", "width", "outlineWidth", "transparent"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"), 1e100, -1e100])
+def test_nonfinite_text_numbers_do_not_change_any_linked_member(text, property_name, value):
+    twin, = carbine.linkDuplicate(text)
+    try:
+        before = getattr(text, property_name)
+        with pytest.raises(ValueError, match="finite"):
+            setattr(twin, property_name, value)
+        assert getattr(text, property_name) == before
+        assert getattr(twin, property_name) == before
+    finally:
+        twin.destroy()
+
+
+@pytest.mark.parametrize(
+    "property_name, value",
+    [
+        ("content", None),
+        ("content", 42),
+        ("size", (12, 12, 1)),
+        ("size", carbine.Vec3(12, 12, 1)),
+        ("size", "large"),
+        ("size", None),
+        ("width", (10, 20, 30)),
+        ("width", "wide"),
+        ("outlineWidth", None),
+        ("outlineWidth", "thick"),
+        ("wordWrap", 1),
+        ("wordWrap", "yes"),
+        ("wordWrap", None),
+        ("outline", 1),
+        ("outline", 2.5),
+        ("outline", "yes"),
+        ("outline", None),
+    ],
+)
+def test_text_properties_reject_wrong_types_without_mutation(text, property_name, value):
+    before = getattr(text, property_name)
+    with pytest.raises(TypeError):
+        setattr(text, property_name, value)
+    assert getattr(text, property_name) == before
+
+
+@pytest.mark.parametrize("factory, kind", [(carbine.ui.new, "square"), (carbine.new, "cube")])
+def test_text_only_properties_refuse_shape_and_world_nodes(factory, kind):
+    node = factory(kind)
+    try:
+        for property_name, value in [
+            ("content", "text"), ("wordWrap", True), ("width", 100), ("outlineWidth", 2)
+        ]:
+            with pytest.raises(ValueError):
+                getattr(node, property_name)
+            with pytest.raises(ValueError):
+                setattr(node, property_name, value)
+    finally:
+        node.destroy()
+
+
+def test_destroyed_text_properties_raise_destroyed_error():
+    label = carbine.ui.new("Text")
+    label.destroy()
+    for property_name, value in [
+        ("content", "gone"), ("size", 20), ("wordWrap", True), ("width", 120),
+        ("outline", True), ("outlineWidth", 2), ("transparent", 128),
+    ]:
+        with pytest.raises(carbine.DestroyedError):
+            getattr(label, property_name)
+        with pytest.raises(carbine.DestroyedError):
+            setattr(label, property_name, value)
+
+
+def test_text_colours_use_shared_names_hex_and_rgb_without_extra_nodes(text):
+    before = carbine.scene.nodeCount
+    text.color = "#1234"
+    assert text.colorHex == "#112233"
+    assert text.transparent == 68
+    text.color = "  Light   Blue  "
+    assert text.colorHex == "#add8e6"
+    assert text.transparent == 68
+    text.color = (0.5, 0.25, 1)
+    assert text.color.toTuple() == (0.5, 0.25, 1)
+    text.color = carbine.Vec3(1, 0, 0)
+    assert text.colorHex == "#ff0000"
+    with pytest.raises(ValueError, match="not a colour"):
+        text.color = "reddish"
+    assert text.colorHex == "#ff0000"
+    assert carbine.scene.nodeCount == before
+
+
+def test_text_duplicates_copy_configuration_and_subtree_independently(text):
+    settings = {
+        "content": "original\nlabel", "size": 37.5, "wordWrap": True,
+        "width": 220, "outline": True, "outlineWidth": 2.5, "transparent": 100,
+    }
+    for property_name, value in settings.items():
+        setattr(text, property_name, value)
+    text.position = (10, 20, 0)
+    text.scale = (2, 2, 1)
+    child = carbine.ui.new("Text", name="Child", parent=text)
+    child.content = "child"
+    copy, = carbine.duplicate(text)
+    try:
+        assert type(copy) is carbine.Object
+        assert copy != text
+        assert copy.parent == text.parent
+        assert copy.position.toTuple() == text.position.toTuple()
+        assert copy.scale.toTuple() == text.scale.toTuple()
+        for property_name, value in settings.items():
+            assert getattr(copy, property_name) == value
+        copied_child, = copy.children
+        assert type(copied_child) is carbine.Object
+        assert copied_child != child
+        assert copied_child.parent == copy
+        assert copy.find("Child") == copied_child
+        assert copied_child.content == "child"
+        copied_child.content = "independent"
+        assert child.content == "child"
+        copy.content = "copy"
+        copy.size = 80
+        assert text.content == "original\nlabel"
+        assert text.size == 37.5
+    finally:
+        copy.destroy()
+
+
+def test_linked_text_shares_font_configuration_but_not_placement(text):
+    twin, = carbine.linkDuplicate(text)
+    third, = carbine.linkDuplicate(twin)
+    plain, = carbine.duplicate(twin)
+    try:
+        for property_name, value in {
+            "content": "shared", "size": 42, "wordWrap": True, "width": 250,
+            "outline": True, "outlineWidth": 3, "transparent": 100,
+        }.items():
+            setattr(twin, property_name, value)
+            assert getattr(text, property_name) == value
+            assert getattr(third, property_name) == value
+        assert plain.content == ""
+        assert plain.size == 24
+        twin.position = (70, 80, 0)
+        twin.scale = (2, 3, 1)
+        twin.visible = False
+        assert text.position.toTuple() == third.position.toTuple() == (0, 0, 0)
+        assert text.scale.toTuple() == third.scale.toTuple() == (1, 1, 1)
+        assert text.visible is third.visible is True
+    finally:
+        plain.destroy()
+        third.destroy()
+        twin.destroy()
+
+
+def test_text_hierarchy_stays_in_the_overlay_and_destroy_follows_the_branch():
+    panel = carbine.ui.new("rectangle", name="Panel")
+    other = carbine.ui.new("square")
+    cube = carbine.new("cube")
+    try:
+        label = carbine.ui.new("Text", name="Caption", parent=panel)
+        nested = carbine.ui.new("Text", name="Nested", parent=label)
+        assert panel.children == [label]
+        assert label.children == [nested]
+        assert label.parent == panel
+        assert panel.find("Nested") == nested
+        before = carbine.scene.nodeCount
+        with pytest.raises(ValueError, match="branch"):
+            carbine.ui.new("Text", parent=cube)
+        assert carbine.scene.nodeCount == before
+        with pytest.raises(ValueError, match="branch"):
+            label.parent = cube
+        with pytest.raises(ValueError, match="branch"):
+            label.addChild(cube)
+        assert label.parent == panel
+        with pytest.raises(ValueError, match="cycle"):
+            label.parent = nested
+        other.addChild(label)
+        assert panel.children == []
+        assert other.children == [label]
+        other.removeChild(label)
+        assert label.parent == carbine.scene.root
+        panel.children = [label]
+        panel.destroy()
+        with pytest.raises(carbine.DestroyedError):
+            _ = label.content
+        with pytest.raises(carbine.DestroyedError):
+            _ = nested.size
+    finally:
+        if panel in carbine.scene.root.children:
+            panel.destroy()
+        other.destroy()
+        cube.destroy()
+
+
+@pytest.mark.parametrize("factory, kind", [(carbine.ui.new, "square"), (carbine.new, "cube")])
+def test_nontext_size_remains_a_live_vector_with_partial_assignment(factory, kind):
+    node = factory(kind)
+    try:
+        size = node.size
+        assert type(size) is carbine.Vec3
+        node.size = (20, 30, 40)
+        assert size.toTuple() == (20, 30, 40)
+        size.x = 50
+        assert node.size.toTuple() == (50, 30, 40)
+        node.size = (..., None, 60)
+        assert size.toTuple() == (50, 30, 60)
+        node.size = carbine.Vec3(4, 5, 6)
+        assert size.toTuple() == (4, 5, 6)
+        with pytest.raises(TypeError):
+            node.size = 24
+        assert size.toTuple() == (4, 5, 6)
+    finally:
+        node.destroy()
+
+
+def test_shape_outline_remains_float_thickness_and_is_not_a_text_toggle():
+    shape = carbine.ui.new("square")
+    try:
+        assert type(shape.outline) is float
+        for thickness in (0, 3.5, -2, 500):
+            shape.outline = thickness
+            assert type(shape.outline) is float
+            assert shape.outline == thickness
+        with pytest.raises(TypeError):
+            shape.outline = "thick"
+        assert shape.outline == 500
+    finally:
+        shape.destroy()

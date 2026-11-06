@@ -15,41 +15,34 @@ is one word for both the size of the tile and how far its detail is summed, so `
 is 256 texels over three doublings and `high` is 1024 over seven, and six courses of
 brick are six courses either way - a finer tile is the same wall seen closer.
 
-`g` is the whole catalogue at once: a row per surface, plain nearest you and then each
-way that surface goes wrong, twelve tiles laid flat in the light you are standing in.
-The grid runs away from where the player starts, so walk back with S and look down to
-take all of it in, or walk over it to read one tile close. Baking twelve of them is a
-moment's wait rather than the second and a half a single tile used to cost the frame,
-because the engine spreads a tile over every core it can find. The second look is
-free: a tile this quality and this dice already wrote is worn again, not repainted -
-which is also why `q` and `d` refresh everything on show instead of only the wall.
-Quality and dice compare column by column when the whole set moves together.
+All twelve variations start on two-metre cubes in a six-metre circle around you.
+Plain, dusty and mossy brick are directly ahead, left to right; turn right for grass,
+then rock, then sand. `o` shows only the plain cubes and `g` restores the full set.
+Quality and dice refresh every visible sample together, and repeated requests reuse
+the tile already baked at that quality and seed.
 
 The tiles land in `examples/generated/`, named for everything asked for, so the same
 calling twice writes over its own picture. A new dice means a new file, which is also
 what makes the renderer read it again: a skin already uploaded is kept under the path
 it came from. A tile is laid at a size rather than stretched to fit: it covers one
-metre of whatever wears it, so the same brick sits on a six metre patch of ground and
-on a fourteen metre wall at one scale, and a quarter metre of wall shows the same
-courses as a quarter metre of ground. `t` measures that out - half a metre, a metre,
-two metres, or the old ask of one picture pulled across the whole face, which is what
-a model's own UVs already are. Several tiles on one face are not the same picture
-stamped again, either: each repeat is nudged off its lattice and worn to a tone of its
-own, so a fourteen metre wall reads as one surface rather than a row of copies, and a
-face holding exactly one tile is left the way it was painted.
+metre of whatever wears it, so the same brick sits on a two-metre cube and a ten-metre
+wall at one scale. `t` cycles half a metre, a metre, two metres, or one picture across
+the whole face. Smooth UV and tone variation reduce visible repetition on larger
+faces; a face holding exactly one tile is left the way it was painted.
 
     1 2 3 4      the surface on the wall and the monolith
-    o            each surface plain, on its own patch of ground
-    g            every variation there is, all twelve at once
+    o            only the plain comparison cubes
+    g            all twelve comparison cubes (shown at startup)
     v            the next way that surface goes wrong, and back to plain
     q            low - medium - high
-    d            a new dice, so the same surfaces come back differently
-    s            the skins off, or back on
+    r            a new dice, so the same surfaces come back differently
+    h            the skins off, or back on
     t            the reach of one tile: half a metre, a metre, two, or smeared
 
 WASD walks, the mouse looks, space jumps. Close the window to quit.
 """
 
+import math
 import os
 import time
 from pathlib import Path
@@ -65,7 +58,7 @@ TILES = (1.0, 0.5, 2.0, 0.0)
 ORANGE = "#eb7a34"
 CREAM = "#fff8f0"
 
-# The colour each surface wears when it is not skinned, so `s` shows what the picture
+# The colour each surface wears when it is not skinned, so `h` shows what the picture
 # was doing: a flat patch of it against the painted one.
 FLAT = {"grass": "#3d5a2c", "sand": "#c8b183", "rock": "#6f6f72", "brick": "#964434"}
 
@@ -95,6 +88,7 @@ def paint(surface: str, variation: str | None, quality: str, dice: int) -> str:
 
 def main() -> None:
     adapter = carbine.init(1280, 720, title="Carbine Procedural Textures")
+    carbine.fpsCap = 120
     width, height = carbine.viewport()
     print(f"{adapter} at {width}x{height}")
     wears = {
@@ -106,44 +100,47 @@ def main() -> None:
         print(f"  {surface}: {offered}")
     print(
         "1 2 3 4 the surface - o each plain - g every variation - v variation\n"
-        "q quality - d dice - s skins - t tile reach\n"
+        "q quality - r dice - h skins - t tile reach\n"
         "WASD walk - mouse look - space jump - close the window to quit"
     )
 
-    # One patch of ground for every surface and every way it goes wrong, plain nearest
-    # the player, so `g` is the whole catalogue lit by one sun and `o` is its front row.
-    # A wall and a monolith carry one chosen tile up a vertical face.
+    floor = carbine.new("plane", name="Gallery Floor")
+    floor.size = (20.0, 20.0, 1.0)
+    floor.position = (0.0, 0.0, -0.02)
+    floor.color = "#41403b"
+
     cells = []
-    for row, surface in enumerate(SURFACES):
-        for column, variation in enumerate(wears[surface]):
-            patch = carbine.new(
-                "plane",
+    display_order = ("brick", *(surface for surface in SURFACES if surface != "brick"))
+    for surface in display_order:
+        for variation in wears[surface]:
+            sample = carbine.new(
+                "cube",
                 name=f"{surface.title()} {'plain' if variation is None else variation}",
             )
-            patch.size = (6.0, 6.0, 1.0)
-            patch.position = (-8.0 + 8.0 * column, -8.0 - 8.0 * row, 0.0)
-            patch.color = FLAT[surface]
-            patch.visible = False
-            cells.append((surface, variation, patch))
+            angle = math.radians(-60.0 - 30.0 * len(cells))
+            sample.size = (2.0, 2.0, 2.0)
+            sample.position = (6.0 * math.cos(angle), 6.0 * math.sin(angle), 1.0)
+            sample.color = FLAT[surface]
+            cells.append((surface, variation, sample))
 
     wall = carbine.new("cube", name="Wall")
-    wall.size = (14.0, 0.5, 3.0)
-    wall.position = (0.0, -40.0, 1.5)
+    wall.size = (10.0, 0.5, 3.0)
+    wall.position = (0.0, -9.0, 1.5)
 
     monolith = carbine.new("cube", name="Monolith")
     monolith.size = (1.6, 1.6, 4.0)
-    monolith.position = (-17.0, -8.0, 2.0)
+    monolith.position = (-5.0, -6.0, 2.0)
 
-    worn = [wall, monolith, *(patch for _, _, patch in cells)]
+    worn = [wall, monolith, *(sample for _, _, sample in cells)]
     state = {
-        "surface": "grass",
+        "surface": "brick",
         "variation": None,
         "quality": "medium",
         "dice": 7,
         "tile": 1.0,
-        "shown": None,
+        "shown": True,
     }
-    # The path each thing was last skinned with, so `s` can put the same tiles back
+    # The path each thing was last skinned with, so `h` can put the same tiles back
     # rather than asking the generator for a second copy of a surface it already made.
     skins: dict[int, str] = {}
 
@@ -152,43 +149,36 @@ def main() -> None:
         skins[node.id] = skin
 
     def show(everything: bool, quiet: bool = False) -> None:
-        """The front row, or the whole catalogue: one call twelve times over, and only
-        for the tiles that have not been written at this quality and this dice yet."""
         state["shown"] = everything
         wanted = [
-            (surface, variation, patch)
-            for surface, variation, patch in cells
+            (surface, variation, sample)
+            for surface, variation, sample in cells
             if everything or variation is None
         ]
-        for _, variation, patch in cells:
-            patch.visible = everything or variation is None
+        for _, variation, sample in cells:
+            sample.visible = everything or variation is None
         if not quiet:
             print(
                 f"{'every variation' if everything else 'each surface plain'}, "
-                f"{state['quality']}, dice {state['dice']}: {len(wanted)} tiles"
+                f"{state['quality']}, dice {state['dice']}: {len(wanted)} cubes"
             )
         started = time.monotonic()
-        for surface, variation, patch in wanted:
-            patch.color = FLAT[surface]
-            wear(patch, paint(surface, variation, state["quality"], state["dice"]))
+        for surface, variation, sample in wanted:
+            sample.color = FLAT[surface]
+            wear(sample, paint(surface, variation, state["quality"], state["dice"]))
         print(
-            f"  {len(wanted)} tiles up in {time.monotonic() - started:.2f} s, "
-            f"rows near to far: {', '.join(SURFACES)}"
+            f"  {len(wanted)} cubes up in {time.monotonic() - started:.2f} s, "
+            f"clockwise from ahead: {', '.join(display_order)}"
         )
 
     def relayer() -> None:
-        """Repaints the two things that carry one surface, which is the whole call a
-        game makes: the tile is written and worn in the same breath. Whatever is on
-        show moves with it, so a quality or a dice is a comparison, not a second guess.
-        """
         skin = paint(
             state["surface"], state["variation"], state["quality"], state["dice"]
         )
         for node in (wall, monolith):
             node.color = FLAT[state["surface"]]
             wear(node, skin)
-        if state["shown"] is not None:
-            show(everything=state["shown"], quiet=True)
+        show(everything=state["shown"], quiet=True)
 
     relayer()
 
@@ -216,8 +206,27 @@ def main() -> None:
     crosshair.color = ORANGE
     crosshair.transparent = 170
 
+    fps_text = carbine.ui.new("Text", name="FPS")
+    fps_text.position = (18, 12, 0)
+    fps_text.size = 26
+    fps_text.color = "Light Orange"
+    fps_text.outline = True
+    fps_text.outlineWidth = 2
+    fps_text.content = "FPS --"
+
+    help_text = carbine.ui.new("Text", name="Controls")
+    help_text.position = (18, 48, 0)
+    help_text.size = 17
+    help_text.color = "White"
+    help_text.outline = True
+    help_text.outlineWidth = 1
+    help_text.wordWrap = True
+    help_text.width = width - 36
+    help_text.content = "WASD walk | Mouse look | R new seed | H textures | Q quality | T tiling"
+
     player = carbine.player()
     player.position = (0.0, 0.0, 0.0)
+    player.yaw = 270.0
     player.enabled = True
 
     frame = 0
@@ -248,11 +257,11 @@ def main() -> None:
                 state["quality"] = QUALITIES[(QUALITIES.index(state["quality"]) + 1) % 3]
                 relayer()
 
-            if carbine.pressed("d"):
+            if carbine.pressed("r"):
                 state["dice"] += 1
                 relayer()
 
-            if carbine.pressed("s"):
+            if carbine.pressed("h"):
                 if wall.texture:
                     for node in worn:
                         node.texture = None
@@ -282,7 +291,7 @@ def main() -> None:
             bars[2].size = (4.0 + 240.0 * (1.0 if wall.texture else 0.0), ..., ...)
 
             if frame % 180 == 0:
-                on_show = {None: "nothing", False: "front row", True: "catalogue"}
+                on_show = {False: "plain cubes", True: "all variation cubes"}
                 print(
                     f"{state['surface']} "
                     f"{'plain' if state['variation'] is None else state['variation']} "
@@ -293,8 +302,12 @@ def main() -> None:
                     f"{player.position.z:.1f}) m"
                 )
 
+            fps_text.content = f"FPS {carbine.fps:.0f}"
+            width, height = carbine.viewport()
+            help_text.width = max(1, width - 36)
+            crosshair.position = (width / 2.0, height / 2.0, 0)
+            panel.position = (178, height - 46, 0)
             frame += 1
-            time.sleep(1.0 / 120.0)
     finally:
         carbine.end()
 
