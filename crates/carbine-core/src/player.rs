@@ -344,8 +344,12 @@ impl Scene {
 
         player.position += player.velocity * dt;
 
-        if player.position.z <= GROUND_HEIGHT {
-            player.position.z = GROUND_HEIGHT;
+        // The floor under the feet is the flat ground or the top of a map, whichever
+        // is higher, so a walker climbs the hill it is standing on rather than the
+        // plane the world was born with.
+        let floor = self.floor_at(player.position.x, player.position.y);
+        if player.position.z <= floor {
+            player.position.z = floor;
             if player.velocity.z < 0.0 {
                 player.velocity.z = 0.0;
             }

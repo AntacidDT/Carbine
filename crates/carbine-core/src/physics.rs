@@ -11,7 +11,7 @@ use glam::{Quat, Vec3};
 use crate::geometry::{self, Contact, Solid};
 use crate::motion::Motion;
 use crate::node::{NodeId, Scene, VecField};
-use crate::player::{GROUND_HEIGHT, PlayerController};
+use crate::player::PlayerController;
 
 /// The longest one step may be, in seconds. A window that was dragged, or a
 /// debugger left open, cannot fling the world through the floor.
@@ -143,8 +143,11 @@ impl Scene {
             .unwrap_or(0.0);
         let rest = position.z + bottom;
 
-        if rest <= GROUND_HEIGHT {
-            position.z += GROUND_HEIGHT - rest;
+        // The ground under the body is the flat floor or the map it stands on, so a
+        // crate dropped on a hill comes to rest on the hill and not through it.
+        let floor = self.floor_at(position.x, position.y);
+        if rest <= floor {
+            position.z += floor - rest;
             if velocity.z < 0.0 {
                 velocity.z = 0.0;
             }
@@ -490,6 +493,7 @@ mod tests {
     use super::*;
     use crate::input::{FrameInput, Key};
     use crate::motion::EARTH_GRAVITY_PULL;
+    use crate::player::GROUND_HEIGHT;
 
     /// A one metre cube, dropped from `height` with gravity switched on.
     fn dropped(pull: f32, height: f32) -> (Scene, NodeId) {

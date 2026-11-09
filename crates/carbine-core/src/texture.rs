@@ -54,6 +54,12 @@ const DRY: usize = 14;
 const DUST: usize = 15;
 const SPECKLE: usize = 16;
 
+/// Fields the height pass raises and the colour pass reads back, instead of rolling the
+/// same noise twice. Three slots is the most any surface shares: rock keeps its ground
+/// and its two creases, sand its ground and its pebbles, grass its blades. A surface
+/// fills only the slots it uses, in the order its height recipe names them.
+const SHARED: usize = 3;
+
 /// What a generated picture is a surface of.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TextureType {
@@ -255,6 +261,14 @@ struct Spot {
     row: u32,
 }
 
+/// What the light pass reads back from the height pass: the whole tile's heights and
+/// the fields its recipes kept beside them.
+#[derive(Clone, Copy)]
+struct Raised<'a> {
+    heights: &'a [f32],
+    fields: &'a [[f32; SHARED]],
+}
+
 /// The tile area one paint worker is worth, which is where handing a row to another core
 /// stops costing more than the row does. Below it a tile is painted by the caller alone.
 const PAINT_PER_WORKER: usize = 4096;
@@ -349,16 +363,27 @@ impl Canvas {
         // for again. A tile that meets its own edges lets the last column borrow the
         // first one's height, which is what keeps the light from drawing a seam even
         // where the colour alone would not have shown one.
+        //
+        // The fields both passes want are raised once and kept beside the height, so the
+        // colour reads them rather than rolling the same noise a second time. They are
+        // deterministic, so handing them over moves no byte.
         let mut heights = vec![0.0f32; count * count];
+        let mut shared = vec![[0.0f32; SHARED]; count * count];
         std::thread::scope(|work| {
-            for (band, into) in heights.chunks_mut(rows * count).enumerate() {
+            let bands = heights
+                .chunks_mut(rows * count)
+                .zip(shared.chunks_mut(rows * count));
+            for (band, (into, fields)) in bands.enumerate() {
                 let first = band * rows;
-                work.spawn(move || self.raise(kind, variation, across, first, into));
+                work.spawn(move || self.raise(kind, variation, across, first, into, fields));
             }
         });
 
         let mut pixels = vec![255u8; count * count * 4];
-        let raised = heights.as_slice();
+        let raised = Raised {
+            heights: heights.as_slice(),
+            fields: shared.as_slice(),
+        };
         std::thread::scope(|work| {
             for (band, into) in pixels.chunks_mut(rows * count * 4).enumerate() {
                 let first = band * rows;
@@ -370,6 +395,7 @@ impl Canvas {
     }
 
     /// The heights of the rows this band covers, `first` being the tile row it starts on.
+    /// The fields the colour will want again are kept beside each height as it is raised.
     fn raise(
         &self,
         kind: TextureType,
@@ -377,9 +403,11 @@ impl Canvas {
         across: f32,
         first: usize,
         band: &mut [f32],
+        shared: &mut [[f32; SHARED]],
     ) {
         let count = self.size as usize;
         for (row, into) in band.chunks_mut(count).enumerate() {
+            let fields = &mut shared[row * count..(row + 1) * count];
             for (col, slot) in into.iter_mut().enumerate() {
                 *slot = self.height(
                     kind,
@@ -390,6 +418,7 @@ impl Canvas {
                         v: ((first + row) as f32 + 0.5) * across,
                         variation,
                     },
+                    &mut fields[col],
                 );
             }
         }
@@ -398,7 +427,7 @@ impl Canvas {
     /// The colours of the rows this band covers, lit off the map the tile has raised.
     fn light(
         &self,
-        heights: &[f32],
+        raised: Raised<'_>,
         kind: TextureType,
         variation: Option<&'static str>,
         across: f32,
@@ -406,6 +435,7 @@ impl Canvas {
         band: &mut [u8],
     ) {
         let count = self.size as usize;
+        let heights = raised.heights;
         let sun = Vec3::from_array(SUN);
         for (row, into) in band.chunks_mut(count * 4).enumerate() {
             let row = first + row;
@@ -430,7 +460,9 @@ impl Canvas {
                     col: col as u32,
                     row: row as u32,
                 };
-                let color = (self.color(&spot, kind, here) * lit).clamp(Vec3::ZERO, Vec3::ONE);
+                let color = (self.color(&spot, kind, here, &raised.fields[row * count + col])
+                    * lit)
+                    .clamp(Vec3::ZERO, Vec3::ONE);
 
                 for (channel, value) in color.to_array().iter().enumerate() {
                     pixel[channel] = (value * 255.0 + 0.5) as u8;
@@ -440,23 +472,25 @@ impl Canvas {
     }
 
     /// How high the surface stands at one point of the tile. Asked a texel apart by the
-    /// light above, so it is kept cheap and free of anything the colour only knows.
-    fn height(&self, kind: TextureType, at: Place) -> f32 {
+    /// light above, so it is kept cheap and free of anything the colour only knows. The
+    /// fields the colour shares are written into `shared` as they are rolled.
+    fn height(&self, kind: TextureType, at: Place, shared: &mut [f32; SHARED]) -> f32 {
         match kind {
-            TextureType::Grass => self.grass_height(at),
-            TextureType::Sand => self.sand_height(at),
-            TextureType::Rock => self.rock_height(at),
-            TextureType::Brick => self.brick_height(at),
+            TextureType::Grass => self.grass_height(at, shared),
+            TextureType::Sand => self.sand_height(at, shared),
+            TextureType::Rock => self.rock_height(at, shared),
+            TextureType::Brick => self.brick_height(at, shared),
         }
     }
 
-    /// The colour of one texel of the tile, given how high it stands there.
-    fn color(&self, spot: &Spot, kind: TextureType, height: f32) -> Vec3 {
+    /// The colour of one texel of the tile, given how high it stands there and the fields
+    /// the height pass already rolled for it.
+    fn color(&self, spot: &Spot, kind: TextureType, height: f32, shared: &[f32; SHARED]) -> Vec3 {
         match kind {
-            TextureType::Grass => self.grass_color(spot, height),
-            TextureType::Sand => self.sand_color(spot, height),
-            TextureType::Rock => self.rock_color(spot, height),
-            TextureType::Brick => self.brick_color(spot, height),
+            TextureType::Grass => self.grass_color(spot, height, shared),
+            TextureType::Sand => self.sand_color(spot, height, shared),
+            TextureType::Rock => self.rock_color(spot, height, shared),
+            TextureType::Brick => self.brick_color(spot, height, shared),
         }
     }
 }
@@ -464,18 +498,19 @@ impl Canvas {
 /// The grass: low mounds of it, blades lying one way across the tile, and soil showing
 /// wherever the crowd is thin.
 impl Canvas {
-    fn grass_height(&self, at: Place) -> f32 {
+    fn grass_height(&self, at: Place, shared: &mut [f32; SHARED]) -> f32 {
         let mounds = self.field(at.u, at.v, 3, GROUND);
         let blades = self.stretched(at.u, at.v, 44, 6, BLADE);
+        shared[0] = blades;
         (0.55 * mounds + 0.45 * blades).clamp(0.0, 1.0)
     }
 
-    fn grass_color(&self, spot: &Spot, height: f32) -> Vec3 {
+    fn grass_color(&self, spot: &Spot, height: f32, shared: &[f32; SHARED]) -> Vec3 {
         let u = spot.at.u;
         let v = spot.at.v;
 
         let patch = self.field(u, v, 7, PATCH);
-        let blades = self.stretched(u, v, 44, 6, BLADE);
+        let blades = shared[0];
         let mut color = wash(tint(0.13, 0.26, 0.10), tint(0.30, 0.46, 0.17), patch);
         // The tops of the blades catch the light and the gaps between them stay dark.
         color = wash(
@@ -506,24 +541,26 @@ impl Canvas {
 /// The sand: dunes, ripples running along them and bent by them, and loose grain over
 /// the whole thing.
 impl Canvas {
-    fn sand_height(&self, at: Place) -> f32 {
+    fn sand_height(&self, at: Place, shared: &mut [f32; SHARED]) -> f32 {
         let dunes = self.field(at.u, at.v, 3, GROUND);
         let warp = self.field(at.u, at.v, 6, WARP);
         // Ripples run across the tile and lean wherever the dune field bends them. The
         // count is a whole number of wavelengths so the wave closes at the edge too.
         let ripples = ((at.v * 44.0 + 2.0 * warp) * std::f32::consts::TAU).sin() * 0.5 + 0.5;
         let pebbles = self.pebble(at.u, at.v, at.ruined("pebble"));
+        shared[0] = dunes;
+        shared[1] = pebbles;
 
         (0.48 * dunes + 0.14 * ripples + pebbles).clamp(0.0, 1.0)
     }
 
-    fn sand_color(&self, spot: &Spot, height: f32) -> Vec3 {
+    fn sand_color(&self, spot: &Spot, height: f32, shared: &[f32; SHARED]) -> Vec3 {
         let u = spot.at.u;
         let v = spot.at.v;
 
-        let dunes = self.field(u, v, 3, GROUND);
+        let dunes = shared[0];
         let mut color = wash(tint(0.70, 0.58, 0.40), tint(0.87, 0.78, 0.58), dunes);
-        let pebbles = self.pebble(u, v, spot.at.ruined("pebble"));
+        let pebbles = shared[1];
         if pebbles > 0.0 {
             color = wash(color, tint(0.64, 0.60, 0.54), pebbles);
         }
@@ -573,23 +610,26 @@ impl Canvas {
 /// The rock: ground folded back on itself so the crevices are where it turns, pitted
 /// by weather, and darker wherever it is hollow.
 impl Canvas {
-    fn rock_height(&self, at: Place) -> f32 {
+    fn rock_height(&self, at: Place, shared: &mut [f32; SHARED]) -> f32 {
         let ground = self.field(at.u, at.v, 5, GROUND);
         let crag = 1.0 - (2.0 * ground - 1.0).abs();
         let pitting = self.field(at.u, at.v, 28, FINE);
-        let creases =
-            self.crease(at.u, at.v, 9, CREASE)
-                .max(self.crease(at.u, at.v, 13, CREASE + 1));
+        let crease9 = self.crease(at.u, at.v, 9, CREASE);
+        let crease13 = self.crease(at.u, at.v, 13, CREASE + 1);
+        let creases = crease9.max(crease13);
+        shared[0] = ground;
+        shared[1] = crease9;
+        shared[2] = crease13;
 
         let cut = if at.ruined("cracked") { 0.46 } else { 0.30 };
         (0.42 * crag + 0.34 * pitting + 0.24 - cut * creases).clamp(0.0, 1.0)
     }
 
-    fn rock_color(&self, spot: &Spot, height: f32) -> Vec3 {
+    fn rock_color(&self, spot: &Spot, height: f32, shared: &[f32; SHARED]) -> Vec3 {
         let u = spot.at.u;
         let v = spot.at.v;
 
-        let ground = self.field(u, v, 5, GROUND);
+        let ground = shared[0];
         let crag = 1.0 - (2.0 * ground - 1.0).abs();
         let mut color = wash(
             tint(0.29, 0.28, 0.27),
@@ -602,9 +642,7 @@ impl Canvas {
             tint(0.49, 0.44, 0.37),
             self.field(u, v, 3, PATCH) * 0.4,
         );
-        let creases = self
-            .crease(u, v, 9, CREASE)
-            .max(self.crease(u, v, 13, CREASE + 1));
+        let creases = shared[1].max(shared[2]);
         if spot.at.ruined("cracked") {
             color = wash(color, tint(0.13, 0.13, 0.12), creases);
         } else {
@@ -632,7 +670,7 @@ impl Canvas {
     const JOINT_HIGH: f32 = 0.075;
     const JOINT_ACROSS: f32 = 0.055;
 
-    fn brick_height(&self, at: Place) -> f32 {
+    fn brick_height(&self, at: Place, _shared: &mut [f32; SHARED]) -> f32 {
         let laid = Self::bricks(at.u, at.v);
         let face = 0.58
             + 0.20 * self.brick_roll(laid.brick, TILT)
@@ -643,7 +681,7 @@ impl Canvas {
         face * (1.0 - laid.mortar)
     }
 
-    fn brick_color(&self, spot: &Spot, height: f32) -> Vec3 {
+    fn brick_color(&self, spot: &Spot, height: f32, _shared: &[f32; SHARED]) -> Vec3 {
         let u = spot.at.u;
         let v = spot.at.v;
         let laid = Self::bricks(u, v);
@@ -994,8 +1032,10 @@ mod tests {
                     variation,
                 };
 
-                let stands = canvas.height(kind, here);
-                let also = canvas.height(kind, there);
+                let mut here_fields = [0.0f32; SHARED];
+                let mut there_fields = [0.0f32; SHARED];
+                let stands = canvas.height(kind, here, &mut here_fields);
+                let also = canvas.height(kind, there, &mut there_fields);
                 assert!(
                     (stands - also).abs() < 1e-4,
                     "{} {:?} stands at {stands} here and {also} across its own edge",
@@ -1009,8 +1049,8 @@ mod tests {
                     col: twin_col,
                     row: twin_row,
                 };
-                let near = canvas.color(&left, kind, stands);
-                let far = canvas.color(&right, kind, also);
+                let near = canvas.color(&left, kind, stands, &here_fields);
+                let far = canvas.color(&right, kind, also, &there_fields);
                 assert!(
                     (far - near).abs().max_element() < 1e-3,
                     "{} {:?} is a different colour across its own edge: {near} vs {far}",

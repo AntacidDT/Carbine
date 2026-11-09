@@ -153,6 +153,7 @@ pub enum SceneError {
     UnknownLightQuality(String),
     UnknownLightType(String),
     UnknownHandling(String),
+    UnknownTerrainQuality(String),
     BadTime(String),
     BadTexture { path: String, why: String },
     BadModel { path: String, why: String },
@@ -267,6 +268,11 @@ impl fmt::Display for SceneError {
                 formatter,
                 "unknown handling type \"{handling}\" (available: {})",
                 crate::vehicle::HandlingType::NAMES.join(", ")
+            ),
+            Self::UnknownTerrainQuality(quality) => write!(
+                formatter,
+                "unknown terrain quality \"{quality}\" (available: {})",
+                crate::terrain::TerrainQuality::NAMES.join(", ")
             ),
             Self::BadTime(clock) => write!(
                 formatter,
@@ -405,6 +411,9 @@ impl Scene {
         }
         if kind == crate::model::KIND {
             return self.create_model(name, parent);
+        }
+        if kind == crate::terrain::KIND {
+            return self.create_terrain(name, parent);
         }
         if kind == crate::vehicle::KIND {
             return self.create_vehicle(name, parent);

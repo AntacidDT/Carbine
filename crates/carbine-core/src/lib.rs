@@ -18,6 +18,7 @@ mod player;
 mod primitives;
 mod procgen;
 mod sky;
+mod terrain;
 mod texture;
 mod ui;
 mod vehicle;
@@ -46,6 +47,7 @@ pub use primitives::KINDS as PRIMITIVE_KINDS;
 pub use primitives::UI_KINDS as UI_SHAPE_KINDS;
 pub use procgen::{Rng, Seed, fbm2, fbm3, hash, noise2, noise3, salt, scatter};
 pub use sky::Sky;
+pub use terrain::{KIND as TERRAIN_KIND, TerrainQuality};
 pub use texture::{
     TextureError, TextureQuality, TextureType, generate as generate_texture,
     pixels as texture_pixels, save as save_texture, variations as texture_variations,
