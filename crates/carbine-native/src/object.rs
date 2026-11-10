@@ -219,14 +219,16 @@ pub(crate) fn touching_handles<'py>(
 }
 
 /// A node handed back as the class it actually is: a Particle when it flies a
-/// crowd, an Entity when it carries hit points, an Object otherwise. All three
-/// compare equal to each other, so a script can keep comparing handles against
-/// handles.
+/// crowd, an Entity when it carries hit points, a Terrain when it is ground to walk
+/// on, an Object otherwise. They all compare equal to each other, so a script can
+/// keep comparing handles against handles.
 pub(crate) fn handle_for<'py>(py: Python<'py>, node: NodeId) -> PyResult<Bound<'py, PyAny>> {
     if with_scene(|scene| scene.is_particle_system(node))? {
         crate::procedural::Particle::from_id(node).into_bound_py_any(py)
     } else if with_scene(|scene| scene.is_entity(node))? {
         crate::entity::Entity::from_id(node).into_bound_py_any(py)
+    } else if with_scene(|scene| scene.is_terrain(node))? {
+        crate::procedural::Terrain::from_id(node).into_bound_py_any(py)
     } else {
         Object::from_id(node).into_bound_py_any(py)
     }
@@ -239,8 +241,8 @@ pub(crate) fn handles_for<'py>(
     nodes.into_iter().map(|node| handle_for(py, node)).collect()
 }
 
-/// The node behind any handle class: an object, the entity wearing it and a
-/// particle system are all nodes, so they compare equal.
+/// The node behind any handle class: an object, the entity wearing it, a particle
+/// system and a map are all nodes, so they compare equal.
 pub(crate) fn handle_id(value: &Bound<'_, PyAny>) -> Option<NodeId> {
     if let Ok(object) = value.extract::<PyRef<'_, Object>>() {
         return Some(object.node_id());
@@ -248,10 +250,13 @@ pub(crate) fn handle_id(value: &Bound<'_, PyAny>) -> Option<NodeId> {
     if let Ok(entity) = value.extract::<PyRef<'_, crate::entity::Entity>>() {
         return Some(entity.node_id());
     }
+    if let Ok(crowd) = value.extract::<PyRef<'_, crate::procedural::Particle>>() {
+        return Some(crowd.node_id());
+    }
     value
-        .extract::<PyRef<'_, crate::procedural::Particle>>()
+        .extract::<PyRef<'_, crate::procedural::Terrain>>()
         .ok()
-        .map(|crowd| crowd.node_id())
+        .map(|map| map.node_id())
 }
 
 /// The node this one hangs under, as the class it is. Every node in a scene has a

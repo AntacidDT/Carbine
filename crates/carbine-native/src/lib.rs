@@ -35,7 +35,7 @@ use crate::math::extract_vec3;
 use crate::object::Object;
 use crate::packager::PyPackager;
 use crate::player::PyPlayer;
-use crate::procedural::{Particle, PyProcedural};
+use crate::procedural::{Particle, PyProcedural, Terrain};
 use crate::scene::PyScene;
 use crate::sky::PySky;
 use crate::ui::PyUi;
@@ -180,11 +180,11 @@ fn needs_renderer() -> PyErr {
     PyRuntimeError::new_err("the renderer is not running; call carbine.init() first")
 }
 
-/// Reads the node behind an Object, an Entity or a Particle handle.
+/// Reads the node behind an Object, an Entity, a Particle or a Terrain handle.
 pub(crate) fn node_id_of(value: &Bound<'_, PyAny>) -> PyResult<NodeId> {
     object::handle_id(value).ok_or_else(|| {
         PyTypeError::new_err(
-            "expected an Object, an Entity or a Particle, or None for the scene root",
+            "expected an Object, an Entity, a Particle or a Terrain, or None for the scene root",
         )
     })
 }
@@ -392,16 +392,20 @@ fn end() -> PyResult<()> {
 /// vehicle with `carbine.new("Vehicle")`, or a seat - `new("Seat")` for a passenger's,
 /// `new("DriverSeat")` for the one that drives what it hangs on. A model anchor -
 /// `new("Model")` - is a node waiting for a `.glb` to be hung on it as children.
+/// `new("Terrain")` lays a map with the engine's defaults; `carbine.procedural.map()`
+/// is the way to name its size, relief and seed as it is laid. The handle comes back
+/// as the class the node actually is, so a map answers as a `Terrain`.
 #[pyfunction]
 #[pyo3(signature = (kind, *, name=None, parent=None))]
 fn new<'py>(
+    py: Python<'py>,
     kind: &str,
     name: Option<String>,
     parent: Option<Bound<'py, PyAny>>,
-) -> PyResult<Object> {
+) -> PyResult<Bound<'py, PyAny>> {
     let parent = parent.as_ref().map(node_id_of).transpose()?;
     let id = with_scene(|scene| scene.create(kind, name, parent))?;
-    Ok(Object::from_id(id))
+    object::handle_for(py, id)
 }
 
 /// Spawns an actor. Without a `kind` it has no body and draws nothing.
@@ -525,6 +529,7 @@ fn kinds() -> Vec<&'static str> {
     kinds.push(carbine_core::VEHICLE_KIND);
     kinds.push(carbine_core::SEAT_KIND);
     kinds.push(carbine_core::DRIVER_SEAT_KIND);
+    kinds.push(carbine_core::TERRAIN_KIND);
     kinds
 }
 
@@ -573,6 +578,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Object>()?;
     module.add_class::<Entity>()?;
     module.add_class::<Particle>()?;
+    module.add_class::<Terrain>()?;
     module.add_class::<PyScene>()?;
     module.add_class::<PyUi>()?;
     module.add_class::<PyPhysics>()?;

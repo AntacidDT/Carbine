@@ -177,6 +177,10 @@ impl Scene {
                     ..*place
                 });
         let flying = self.is_particle_system(id)?;
+        // A copy of a map wears the same ground: the heights it was laid from come
+        // along, so the copy is floor anything standing on it is caught by, not just
+        // a picture of hills.
+        let ground = self.world.get::<crate::terrain::Terrain>(source).cloned();
 
         let fresh = self.reserve();
         let mut spawned = self.world.spawn((
@@ -221,6 +225,9 @@ impl Scene {
         }
         if let Some(adopted) = adopted {
             spawned.insert(adopted);
+        }
+        if let Some(ground) = ground {
+            spawned.insert(ground);
         }
         if let Some(group) = group {
             spawned.insert(Link(group));

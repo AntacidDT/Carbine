@@ -290,8 +290,10 @@ impl Scene {
 
     pub fn set_terrain_size(&mut self, id: NodeId, size: Vec2) -> Result<(), SceneError> {
         let size = sane_size(size);
-        self.terrain_mut(id)?.size = size;
-        self.relayout(id)
+        self.spread(id, move |scene, member| {
+            scene.terrain_mut(member)?.size = size;
+            scene.relayout(member)
+        })
     }
 
     /// How tall the hills stand above the node, in metres.
@@ -301,8 +303,10 @@ impl Scene {
 
     pub fn set_terrain_relief(&mut self, id: NodeId, relief: f32) -> Result<(), SceneError> {
         let relief = if relief.is_finite() { relief.max(0.0) } else { 0.0 };
-        self.terrain_mut(id)?.relief = relief;
-        self.relayout(id)
+        self.spread(id, move |scene, member| {
+            scene.terrain_mut(member)?.relief = relief;
+            scene.relayout(member)
+        })
     }
 
     pub fn terrain_quality(&self, id: NodeId) -> Result<TerrainQuality, SceneError> {
@@ -310,8 +314,10 @@ impl Scene {
     }
 
     pub fn set_terrain_quality(&mut self, id: NodeId, quality: TerrainQuality) -> Result<(), SceneError> {
-        self.terrain_mut(id)?.quality = quality;
-        self.relayout(id)
+        self.spread(id, move |scene, member| {
+            scene.terrain_mut(member)?.quality = quality;
+            scene.relayout(member)
+        })
     }
 
     pub fn set_terrain_quality_name(&mut self, id: NodeId, name: &str) -> Result<(), SceneError> {
@@ -327,8 +333,10 @@ impl Scene {
     }
 
     pub fn set_terrain_seed(&mut self, id: NodeId, seed: Seed) -> Result<(), SceneError> {
-        self.terrain_mut(id)?.seed = seed;
-        self.relayout(id)
+        self.spread(id, move |scene, member| {
+            scene.terrain_mut(member)?.seed = seed;
+            scene.relayout(member)
+        })
     }
 
     fn terrain_mut(&mut self, id: NodeId) -> Result<Mut<'_, Terrain>, SceneError> {
@@ -552,5 +560,50 @@ mod tests {
             Vec3::ZERO,
             "the ground holds its place"
         );
+    }
+
+    #[test]
+    fn a_copy_of_a_map_is_ground_too() {
+        let mut scene = Scene::new();
+        let id = map(&mut scene, Seed::of("copy"));
+        let copies = scene.duplicate(id, 1).unwrap();
+        let copy = copies[0];
+
+        assert!(scene.is_terrain(copy).unwrap(), "the copy is a map, not just a picture");
+        assert_eq!(scene.terrain_seed(copy).unwrap(), Seed::of("copy").0);
+        assert_eq!(scene.terrain_relief(copy).unwrap(), 8.0);
+        assert_eq!(
+            scene.mesh(copy).unwrap().positions,
+            scene.mesh(id).unwrap().positions,
+            "the copy draws the same hills"
+        );
+        // Lift the copy and ask the floor under its centre: the copy's own ground
+        // answers, so a walker would stand on it.
+        scene
+            .set_vec_field(copy, VecField::Position, Vec3::new(40.0, 0.0, 2.0))
+            .unwrap();
+        assert!(scene.floor_at(40.0, 0.0) >= 2.0);
+    }
+
+    #[test]
+    fn linked_maps_share_their_knobs_but_not_their_place() {
+        let mut scene = Scene::new();
+        let id = map(&mut scene, Seed::of("twins"));
+        let twins = scene.link_duplicate(id, 1).unwrap();
+        let twin = twins[0];
+        assert!(scene.is_linked(id).unwrap());
+
+        // A knob is what the ground *is*, so it lands on both.
+        scene.set_terrain_relief(id, 3.0).unwrap();
+        assert_eq!(scene.terrain_relief(id).unwrap(), 3.0);
+        assert_eq!(scene.terrain_relief(twin).unwrap(), 3.0);
+        scene.set_terrain_seed(twin, Seed::of("elsewhere")).unwrap();
+        assert_eq!(scene.terrain_seed(id).unwrap(), Seed::of("elsewhere").0);
+
+        // Where a member stands stays its own.
+        scene
+            .set_vec_field(twin, VecField::Position, Vec3::new(10.0, 0.0, 0.0))
+            .unwrap();
+        assert_eq!(scene.vec_field(id, VecField::Position).unwrap(), Vec3::ZERO);
     }
 }

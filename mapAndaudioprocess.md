@@ -62,10 +62,17 @@ Update after every chunk. No commits unless asked.
 ## Progress
 
 - [x] Recon: grounding points located, packager pattern read.
-- [ ] Read procgen substrate + particle generator binding as template.
-- [ ] Implement terrain generator in carbine-core (mesh + height_at).
-- [ ] Analytic terrain grounding in player + physics.
-- [ ] PyO3 binding `carbine.procedural.map` + stubs + tests + demo.
+- [x] Read procgen substrate + particle/model generator binding as template.
+- [x] Implement terrain generator in carbine-core (mesh + height_at).
+      `crates/carbine-core/src/terrain.rs`: kind "terrain", TerrainQuality
+      low/medium/high (cells 32/64/128, octaves 3/4/5), seeded fbm heightfield,
+      MeshData grid, Terrain component, create_terrain[_with], setters rebuild
+      on a fresh mesh handle, floor_at(x,y) analytic grounding.
+- [x] Analytic terrain grounding in player + physics.
+      player.rs step_player + physics.rs integrate now use self.floor_at(x,y)
+      = max(GROUND_HEIGHT, terrain height under spot). Terrain is anchored,
+      has no collider (not a solver body). 9 terrain tests pass serial.
+- [ ] PyO3 binding `carbine.procedural.map` + Terrain handle + stubs + tests + demo.
 - [ ] Full verification chain for map.
 - [ ] Audio: verify crates, implement packager.audio.
 - [ ] Audio: own Ogg/FLAC parser crate.
@@ -74,5 +81,8 @@ Update after every chunk. No commits unless asked.
 
 ## Current state
 
-Nothing implemented yet for map/audio. Starting map implementation.
+Core terrain generator implemented and tested (9/9). Next: Python binding
+`carbine.procedural.map(...)` returning a Terrain node handle, register in
+native lib.rs, add to kinds(), write .pyi stubs, pytest, demo. Then audio.
 texture.rs has uncommitted fbm-sharing optimization (task #123, verified green).
+NO commits made (none requested).

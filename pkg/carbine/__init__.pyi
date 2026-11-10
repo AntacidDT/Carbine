@@ -61,19 +61,19 @@ class Object:
     # Only the scene root has no parent. Writing None moves the node to the root.
     # An actor's parent reads back as an `Entity`, plain scenery as an `Object` and
     # a particle system as a `Particle`.
-    parent: Object | Entity | Particle | None
+    parent: Object | Entity | Particle | Terrain | None
     # What hangs under this node, in the order it is walked - which is also the
     # order UI elements are painted in, so the last one sits on top.
     # Writing a list, or a single node, replaces the branch: the order given
     # becomes the order walked, children left out move to the scene root, and a
     # node listed here but hanging elsewhere is adopted. Nothing is destroyed.
-    children: list[Object | Entity | Particle]
+    children: list[Object | Entity | Particle | Terrain]
     # Hangs another node on the end of this one's children.
-    def addChild(self, child: Object | Entity | Particle) -> None: ...
+    def addChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
 
     # Takes a child off this node and hangs it on the scene root. It leaves the
     # branch, not the world - `destroy` is the call that means that.
-    def removeChild(self, child: Object | Entity | Particle) -> None: ...
+    def removeChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
     # Vector writes accept Vec3 or (x, y, z); None or ... preserves an axis.
     position: Vec3
     # Text font size is 1..400 pixels; other nodes return live (length, width, height) Vec3.
@@ -129,7 +129,7 @@ class Object:
     # somebody in it. None for a car nobody has sat in; anything that is not a vehicle
     # refuses, the way the knobs above do.
     @property
-    def driver(self) -> Object | Entity | Particle | None: ...
+    def driver(self) -> Object | Entity | Particle | Terrain | None: ...
     # Seat knobs. True for a `new("DriverSeat")`, which drives whatever vehicle it hangs
     # on, and false for a plain `new("Seat")`, which only rides along. Read, not written:
     # the kind word said it when the node was made. A node that is not a seat refuses.
@@ -137,10 +137,10 @@ class Object:
     # Whoever is riding in this seat, as the handle the rider really is. None while it
     # is empty; a node that is not a seat refuses, the way `drives` does.
     @property
-    def seated(self) -> Object | Entity | Particle | None: ...
+    def seated(self) -> Object | Entity | Particle | Terrain | None: ...
     # Which seat this node is riding in, or None for one standing on its own feet.
     @property
-    def seatedIn(self) -> Object | Entity | Particle | None: ...
+    def seatedIn(self) -> Object | Entity | Particle | Terrain | None: ...
     # Sits this node in a seat. It stays on its own branch, with its own name and
     # children, and the step holds it at the seat's place for as long as it is in;
     # nothing is re-parented. Whoever was in that seat before gets out.
@@ -176,7 +176,7 @@ class Object:
     # rather than one level at a time. An import names what it brings, so this is how
     # a script gets hold of a turret, a door or a seat again. None if nothing is named
     # that, here or below.
-    def find(self, name: str) -> Object | Entity | Particle | None: ...
+    def find(self, name: str) -> Object | Entity | Particle | Terrain | None: ...
     # False leaves the object, and everything pinned under it, out of the frame.
     visible: bool
     # How the object takes part in `step`. Gravity is off by default.
@@ -226,10 +226,10 @@ class Entity:
 
     # An actor is a node like any other, so it hangs in the same tree and rides
     # along with whatever it is pinned to - body or no body.
-    parent: Object | Entity | Particle | None
-    children: list[Object | Entity | Particle]
-    def addChild(self, child: Object | Entity | Particle) -> None: ...
-    def removeChild(self, child: Object | Entity | Particle) -> None: ...
+    parent: Object | Entity | Particle | Terrain | None
+    children: list[Object | Entity | Particle | Terrain]
+    def addChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
+    def removeChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
     # Hit points remaining. At zero the engine has already dealt with the death.
     # Writing a positive number back is the only revive there is, and what a death
     # means for the run - end it, spectate the corpse, let the player up - is the
@@ -253,7 +253,7 @@ class Entity:
     # script can reach; None takes them off. Same rules as `Object.model`.
     model: str | None
     # The first node under this actor carrying the name, anywhere down the branch.
-    def find(self, name: str) -> Object | Entity | Particle | None: ...
+    def find(self, name: str) -> Object | Entity | Particle | Terrain | None: ...
     visible: bool
     anchored: bool
     gravity: bool
@@ -274,7 +274,7 @@ class Entity:
     def touching(self) -> list[Object | Entity]: ...
     # Which seat this actor is riding in, or None standing on its own feet.
     @property
-    def seatedIn(self) -> Object | Entity | Particle | None: ...
+    def seatedIn(self) -> Object | Entity | Particle | Terrain | None: ...
     # Sits this actor in a seat, and the step holds it there: an actor in a car neither
     # falls nor shoves. Whoever was in that seat before gets out.
     def sit(self, seat: Object) -> None: ...
@@ -456,7 +456,7 @@ class Ui:
         kind: str = "square",
         *,
         name: str | None = None,
-        parent: Object | Entity | Particle | None = None,
+        parent: Object | Entity | Particle | Terrain | None = None,
     ) -> Object: ...
 
 class Disaster:
@@ -487,7 +487,7 @@ class Disaster:
     direction: Vec3
     # The object this one rides: its place in the world becomes the centre, so a
     # funnel bolted to a fan follows the fan about. None puts the epicentre back.
-    node: Object | Entity | Particle | None
+    node: Object | Entity | Particle | Terrain | None
     # Whether the solver is asking it how hard to shove right now.
     running: bool
 
@@ -572,10 +572,10 @@ class Particle:
     name: str
     # Always "particles", which is what tells this node from a body.
     kind: str
-    parent: Object | Entity | Particle | None
-    children: list[Object | Entity | Particle]
-    def addChild(self, child: Object | Entity | Particle) -> None: ...
-    def removeChild(self, child: Object | Entity | Particle) -> None: ...
+    parent: Object | Entity | Particle | Terrain | None
+    children: list[Object | Entity | Particle | Terrain]
+    def addChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
+    def removeChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
     # Meters from the scene origin, and the middle of the box the crowd flies in.
     # Moving a system leaves what is already in the air where it was, so call
     # `restart()` to lay the whole veil at the new place.
@@ -639,11 +639,65 @@ class Particle:
     def restart(self) -> None: ...
     def destroy(self) -> None: ...
 
+class Terrain:
+    """One map: a node wearing the ground it draws, laid by `carbine.procedural.map()`
+    or `carbine.new("terrain")`. It is scenery rather than a body, so the knobs it adds
+    are about the ground - how far it reaches, how tall its hills stand, how finely it
+    is counted and the dice it was rolled from - rather than about a shape the solver
+    shoves. It is parented, moved, coloured, skinned and destroyed like any node, and
+    anything the floor catches walks on it without it being cut into a collider."""
+
+    id: int
+    name: str
+    # Always "terrain", which is what tells this node from a body.
+    kind: str
+    parent: Object | Entity | Particle | Terrain | None
+    children: list[Object | Entity | Particle | Terrain]
+    def addChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
+    def removeChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
+    # Meters from the scene origin. The map is laid centred on the node, so moving it
+    # carries the ground - and the floor anything standing on it is caught by - along.
+    position: Vec3
+    # Turning the node turns the ground with it: on its side it is a cliff face.
+    rotation: Quat
+    rotationEuler: Vec3
+    # How far the ground reaches along length and width, in metres, as a
+    # `(length, width)` pair. Writing a new one lays the ground again at the new reach;
+    # the hills keep their shape, counted across the map rather than by the metre.
+    # A Vec3 is read for its first two axes; the height of the hills is `relief`.
+    size: tuple[float, float] | Vec3
+    # How tall the hills stand above the node, in metres. Zero lays the ground flat.
+    relief: float
+    # How finely the ground is counted: "low", "medium" or "high". A finer grid is the
+    # same hills seen closer. `procedural.mapQualities()` is the list.
+    quality: str
+    # The dice the hills were rolled from. Writing a new one lays the map that seed
+    # names. A word is as good as a number.
+    seed: int | str
+    # Ground colour accepts Vec3, RGB tuples, named colours or hex strings.
+    color: Vec3 | str
+    @property
+    def colorHex(self) -> str: ...
+    # The packed `.ktx2` the ground is skinned with, as a path. None paints it flat.
+    # The tile is laid by the metre across the map, so a grass skin reads as one lawn.
+    texture: str | None
+    # Metres one tile of the skin covers. 1.0 lays a tile every metre; 0 smears the
+    # picture once across the whole map.
+    textureTiling: float
+    # Opacity from 0 (invisible) to 255 (opaque).
+    transparent: float
+    # Whether the ground is drawn at all. Hidden, it still holds its floor: a walker
+    # stands on a map they cannot see.
+    visible: bool
+    # Takes the map and everything hung on it out of the world. The floor goes with it.
+    def destroy(self) -> None: ...
+
 class Procedural:
     """The content generators, `carbine.procedural`. These make things rather than
     asking for them: the particle generator takes a shape, a colour or an image and
-    turns it into a crowd flying through the world, and the texture generator paints
-    a surface and writes it as the `.ktx2` an object is skinned with."""
+    turns it into a crowd flying through the world, the texture generator paints
+    a surface and writes it as the `.ktx2` an object is skinned with, and the map
+    generator lays a heightfield of seeded hills as ground to walk on."""
 
     # Writes a system into the world and hands back its handle. Every knob is
     # optional; one left out keeps the value the engine gives a fresh system, so
@@ -653,7 +707,7 @@ class Procedural:
         self,
         *,
         name: str | None = None,
-        parent: Object | Entity | Particle | None = None,
+        parent: Object | Entity | Particle | Terrain | None = None,
         shape: str | None = None,
         count: int | None = None,
         size: float | None = None,
@@ -702,6 +756,32 @@ class Procedural:
     def textureVariations(self, surface: str) -> list[str]: ...
     # The qualities, from the smallest tile to the largest.
     def textureQualities(self) -> list[str]: ...
+
+    # Lays a map into the world and hands back its handle: ground that is somewhere
+    # to stand instead of a flat plane. Every knob is optional; one left out keeps the
+    # value the engine gives a fresh map, so `map()` alone is a 64-metre hill field and
+    # `map(size=(256, 256), relief=20, seed="valley")` is a wide valley. `size` is how
+    # far the ground reaches along length and width in metres (a Vec3 is read for its
+    # first two axes); `relief` is how tall the hills stand above the node; `quality`
+    # is how finely the ground is counted, off `mapQualities()`, and a finer grid is the
+    # same hills seen closer. The hills come out of `seed`, so the same word lays the
+    # same ground for anybody. The ground is laid once with every knob it was given.
+    # A map is scenery: it holds its place, is walked on by anything the floor catches,
+    # and is not a body the solver shoves. Skin it like any object -
+    # `ground.texture = carbine.procedural.texture("grass")` - and the tile is laid by
+    # the metre across it. A quality the engine does not recognise raises ValueError.
+    def map(
+        self,
+        *,
+        name: str | None = None,
+        parent: Object | Entity | Particle | Terrain | None = None,
+        size: Vec3 | tuple[float, float] | None = None,
+        relief: float | None = None,
+        quality: str | None = None,
+        seed: int | str | None = None,
+    ) -> Terrain: ...
+    # The qualities a map's `quality` takes, from the coarsest grid to the finest.
+    def mapQualities(self) -> list[str]: ...
 
 class Packager:
     """The importer, `carbine.packager`. Carbine loads one format per class of
@@ -774,15 +854,19 @@ def close() -> None: ...
 # `destroy("all")` leaves them alone. `end()` is `init()` in reverse: the scene comes back
 # brand new, the player gives its camera and the pointer up, and the window closes. The
 # frame limits are engine settings rather than scene content, so those stay as named.
-def destroy(target: Object | Entity | Particle | str) -> None: ...
+def destroy(target: Object | Entity | Particle | Terrain | str) -> None: ...
 def end() -> None: ...
 
+# Creates a node and hands it back as the class it actually is: an `Object` for
+# geometry, a light, a model anchor, a vehicle or a seat, and a `Terrain` for
+# `new("terrain")`, which lays a map with the engine's defaults. To name a map's size,
+# relief and seed as it is laid, use `carbine.procedural.map()` instead.
 def new(
     kind: str,
     *,
     name: str | None = None,
-    parent: Object | Entity | Particle | None = None,
-) -> Object: ...
+    parent: Object | Entity | Particle | Terrain | None = None,
+) -> Object | Terrain: ...
 
 # More of the same thing. Each copy hangs beside the original, starts where it stood
 # and stands still from there, and comes back as the class the node is - a body's
@@ -792,9 +876,9 @@ def new(
 # corners, a crowd's knobs and its air, and the branch under it as copies of their
 # own. Each copy then has its own place, turning, size and hit points.
 def duplicate(
-    target: Object | Entity | Particle,
+    target: Object | Entity | Particle | Terrain,
     count: int = 1,
-) -> list[Object | Entity | Particle]: ...
+) -> list[Object | Entity | Particle | Terrain]: ...
 
 # Like `duplicate`, and the copies tied to the original in one configuration, the way
 # Blender's linked duplicates share a data block. A write about what the thing *is*
@@ -811,15 +895,15 @@ def duplicate(
 # when it is first copied by link.
 # Text content, font size, wrapping and outline are shared; position and scale stay local.
 def linkDuplicate(
-    target: Object | Entity | Particle,
+    target: Object | Entity | Particle | Terrain,
     count: int = 1,
-) -> list[Object | Entity | Particle]: ...
+) -> list[Object | Entity | Particle | Terrain]: ...
 
 def spawnEntity(
     kind: str | None = None,
     *,
     name: str | None = None,
-    parent: Object | Entity | Particle | None = None,
+    parent: Object | Entity | Particle | Terrain | None = None,
     position: Vec3 | tuple[float, float, float] | None = None,
     health: float = 1.0,
     damage: float = 0.0,
@@ -831,9 +915,10 @@ def player() -> Player: ...
 def mouse() -> Mouse: ...
 # What `new` accepts: the geometry kinds, plus "light", which lights rather than fills,
 # "model", an empty node there to wear a `.glb`, "vehicle", which is a body wearing a
-# drive, and the two seats - "seat" to ride along in and "driverSeat", which drives the
-# vehicle it hangs on. A seat reads whatever a script feels like calling it: "chair",
-# "passenger" and "Driver's Seat" all work.
+# drive, the two seats - "seat" to ride along in and "driverSeat", which drives the
+# vehicle it hangs on - and "terrain", which lays a map with the engine's defaults.
+# A seat reads whatever a script feels like calling it: "chair", "passenger" and
+# "Driver's Seat" all work.
 def kinds() -> list[str]: ...
 # How the solver reads a body: "box", "sphere" and "mesh".
 def collisionTypes() -> list[str]: ...

@@ -20,18 +20,19 @@
 
 use std::path::PathBuf;
 
+use glam::Vec2;
 use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
-use carbine_core::{NodeId, SceneError, Seed, VecField};
+use carbine_core::{NodeId, SceneError, Seed, TerrainQuality, VecField};
 
 use crate::math::{PyQuat, PyVec3, extract_vec3};
 use crate::node_id_of;
 use crate::object::{
     add_child_on, children_of, handle_id, name_of, parent_of, remove_child_on, set_children_on,
-    set_color_on, set_name_on, set_parent_on, set_texture_on, set_vec3, set_visible_on, texture_of,
-    vec3_of, visible_of,
+    set_color_on, set_name_on, set_parent_on, set_texture_on, set_tiling_on, set_vec3,
+    set_visible_on, texture_of, tiling_of, vec3_of, visible_of,
 };
 use crate::with_scene;
 
@@ -213,6 +214,68 @@ impl PyProcedural {
         carbine_core::TextureQuality::NAMES.to_vec()
     }
 
+    /// Lays a map into the world and hands back its handle: ground that is somewhere
+    /// to stand instead of a flat plane. Every knob is optional; one left out keeps
+    /// the value the engine gives a fresh map, so `map()` alone is a 64-metre hill
+    /// field and `map(size=(256, 256), relief=20, seed="valley")` is a wide valley.
+    ///
+    /// `size` is how far the ground reaches along length and width, in metres;
+    /// `relief` is how tall the hills stand above the node; `quality` is how finely
+    /// the ground is counted - `mapQualities()` is the list - and a finer grid is the
+    /// same hills seen closer. The hills come out of `seed`, so the same word lays the
+    /// same ground for anybody, on this machine and on the four others in a session.
+    ///
+    /// The ground is laid once with every knob it was given rather than rebuilt as
+    /// each is written. A map is scenery: it holds its place, is walked on by anything
+    /// the floor catches, and is not a body the solver shoves. Skin it the way any
+    /// object is skinned - `ground.texture = carbine.procedural.texture("grass")` -
+    /// and the tile is laid by the metre across it.
+    #[pyo3(name = "map")]
+    #[pyo3(signature = (*, name=None, parent=None, size=None, relief=None, quality=None,
+                        seed=None))]
+    fn create_map(
+        &self,
+        name: Option<String>,
+        parent: Option<Bound<'_, PyAny>>,
+        size: Option<Bound<'_, PyAny>>,
+        relief: Option<f64>,
+        quality: Option<&str>,
+        seed: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Terrain> {
+        let parent = parent.as_ref().map(node_id_of).transpose()?;
+        let size = size
+            .as_ref()
+            .map(extract_map_size)
+            .transpose()?
+            .unwrap_or(Vec2::new(64.0, 64.0));
+        let relief = relief.map(|value| value as f32).unwrap_or(6.0);
+        let quality = match quality {
+            Some(name) => TerrainQuality::from_name(name).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unknown terrain quality \"{name}\" (available: {})",
+                    TerrainQuality::NAMES.join(", ")
+                ))
+            })?,
+            None => TerrainQuality::default(),
+        };
+        let seed = seed
+            .as_ref()
+            .map(wanted_seed)
+            .transpose()?
+            .unwrap_or_default();
+
+        let id = with_scene(|scene| {
+            scene.create_terrain_with(name, parent, size, relief, quality, seed)
+        })?;
+        Ok(Terrain::from_id(id))
+    }
+
+    /// The qualities a map's `quality` takes, from the coarsest grid to the finest.
+    #[pyo3(name = "mapQualities")]
+    fn map_qualities(&self) -> Vec<&'static str> {
+        TerrainQuality::NAMES.to_vec()
+    }
+
     fn __repr__(&self) -> &'static str {
         "<Procedural generators>"
     }
@@ -246,6 +309,22 @@ fn wanted_seed(value: &Bound<'_, PyAny>) -> PyResult<Seed> {
     }
     Err(PyTypeError::new_err(
         "a seed is a word or a whole number, up to 18446744073709551615",
+    ))
+}
+
+/// How far a map reaches, as a script writes it: a `(length, width)` pair, or a
+/// `Vec3` whose first two axes are the ground's reach. The height of the hills is
+/// `relief`, not a third side of the size.
+fn extract_map_size(value: &Bound<'_, PyAny>) -> PyResult<Vec2> {
+    if let Ok(vector) = value.extract::<PyRef<'_, PyVec3>>() {
+        let at = vector.current()?;
+        return Ok(Vec2::new(at.x, at.y));
+    }
+    if let Ok((length, width)) = value.extract::<(f64, f64)>() {
+        return Ok(Vec2::new(length as f32, width as f32));
+    }
+    Err(PyTypeError::new_err(
+        "a map size is a (length, width) tuple or a Vec3",
     ))
 }
 
@@ -615,6 +694,282 @@ impl Particle {
                 self.id.0
             ),
             Err(_) => format!("<Particle destroyed id={}>", self.id.0),
+        }
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        handle_id(other) == Some(self.id)
+    }
+
+    fn __hash__(&self) -> u64 {
+        self.id.0
+    }
+}
+
+/// One map: a node wearing the ground it draws. It is scenery rather than a body, so
+/// the knobs it adds are about the ground - how far it reaches, how tall its hills
+/// stand, how finely it is counted and the dice it was rolled from - rather than about
+/// a shape the solver shoves. It is parented, moved, coloured, skinned and destroyed
+/// the way any other node is.
+#[pyclass(module = "carbine", name = "Terrain")]
+#[derive(Clone, Copy)]
+pub struct Terrain {
+    id: NodeId,
+}
+
+impl Terrain {
+    pub(crate) fn from_id(id: NodeId) -> Self {
+        Self { id }
+    }
+
+    pub(crate) fn node_id(&self) -> NodeId {
+        self.id
+    }
+
+    /// Reads the map as the scene holds it. One that has been destroyed answers
+    /// `DestroyedError`, the same way a destroyed object does.
+    fn read<T>(
+        &self,
+        get: impl FnOnce(&carbine_core::Scene) -> Result<T, SceneError>,
+    ) -> PyResult<T> {
+        with_scene(|scene| get(scene))
+    }
+}
+
+#[pymethods]
+impl Terrain {
+    /// The number the scene and the other handles use for this node.
+    #[getter]
+    fn id(&self) -> u64 {
+        self.id.0
+    }
+
+    #[getter]
+    fn name(&self) -> PyResult<String> {
+        name_of(self.id)
+    }
+
+    #[setter]
+    fn set_name(&self, value: String) -> PyResult<()> {
+        set_name_on(self.id, value)
+    }
+
+    /// Always `"terrain"`, which is what tells this node from a body.
+    #[getter]
+    fn kind(&self) -> PyResult<String> {
+        with_scene(|scene| Ok(scene.kind(self.id)?.to_owned()))
+    }
+
+    /// The node this one hangs under. `None` hangs it on the scene root.
+    #[getter]
+    fn parent<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        parent_of(py, self.id)
+    }
+
+    #[setter]
+    fn set_parent(&self, value: Option<Bound<'_, PyAny>>) -> PyResult<()> {
+        set_parent_on(self.id, value.as_ref())
+    }
+
+    #[getter]
+    fn children<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        children_of(py, self.id)
+    }
+
+    #[setter]
+    fn set_children(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
+        set_children_on(self.id, &value)
+    }
+
+    #[pyo3(name = "addChild")]
+    fn add_child(&self, child: Bound<'_, PyAny>) -> PyResult<()> {
+        add_child_on(self.id, &child)
+    }
+
+    #[pyo3(name = "removeChild")]
+    fn remove_child(&self, child: Bound<'_, PyAny>) -> PyResult<()> {
+        remove_child_on(self.id, &child)
+    }
+
+    /// Meters from the scene origin. The map is laid centred on the node, so moving
+    /// it carries the ground - and the floor anything standing on it is caught by -
+    /// to the new place.
+    #[getter]
+    fn position(&self) -> PyResult<PyVec3> {
+        vec3_of(self.id, VecField::Position)
+    }
+
+    #[setter]
+    fn set_position(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
+        set_vec3(self.id, VecField::Position, &value)
+    }
+
+    /// Turning the node turns the ground with it: a map laid on its side is a cliff
+    /// face, and the floor under a walker follows it round.
+    #[getter]
+    fn rotation(&self) -> PyResult<PyQuat> {
+        let rotation = with_scene(|scene| scene.rotation(self.id))?;
+        Ok(PyQuat::from_value(rotation))
+    }
+
+    #[setter]
+    fn set_rotation(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
+        crate::object::set_rotation(self.id, &value)
+    }
+
+    /// Euler angles in degrees.
+    #[getter(rotationEuler)]
+    fn rotation_euler(&self) -> PyResult<PyVec3> {
+        vec3_of(self.id, VecField::RotationEuler)
+    }
+
+    #[setter(rotationEuler)]
+    fn set_rotation_euler(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
+        set_vec3(self.id, VecField::RotationEuler, &value)
+    }
+
+    /// How far the ground reaches along length and width, in metres, as a
+    /// `(length, width)` pair. Writing a new one lays the ground again at the new
+    /// reach; the hills keep their shape, counted across the map rather than by the
+    /// metre. A `Vec3` is read for its first two axes.
+    #[getter]
+    fn size(&self) -> PyResult<(f32, f32)> {
+        self.read(|scene| {
+            let size = scene.terrain_size(self.id)?;
+            Ok((size.x, size.y))
+        })
+    }
+
+    #[setter]
+    fn set_size(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
+        let size = extract_map_size(&value)?;
+        with_scene(|scene| scene.set_terrain_size(self.id, size))
+    }
+
+    /// How tall the hills stand above the node, in metres. Zero lays the ground flat;
+    /// writing a new one sums the heights again, so the same hills rise to the new
+    /// relief.
+    #[getter]
+    fn relief(&self) -> PyResult<f32> {
+        self.read(|scene| scene.terrain_relief(self.id))
+    }
+
+    #[setter]
+    fn set_relief(&self, relief: f64) -> PyResult<()> {
+        with_scene(|scene| scene.set_terrain_relief(self.id, relief as f32))
+    }
+
+    /// How finely the ground is counted: `"low"`, `"medium"` or `"high"`. A finer grid
+    /// is the same hills seen closer, the way a texture's quality is the same pattern
+    /// counted smaller. `procedural.mapQualities()` is the list.
+    #[getter]
+    fn quality(&self) -> PyResult<String> {
+        Ok(self.read(|scene| scene.terrain_quality(self.id))?.name().to_owned())
+    }
+
+    #[setter]
+    fn set_quality(&self, name: &str) -> PyResult<()> {
+        with_scene(|scene| scene.set_terrain_quality_name(self.id, name))
+    }
+
+    /// The dice the hills were rolled from. Writing a new one lays the map that seed
+    /// names, which is how the same ground comes back. A word is as good as a number.
+    #[getter]
+    fn seed(&self) -> PyResult<u64> {
+        self.read(|scene| scene.terrain_seed(self.id))
+    }
+
+    #[setter]
+    fn set_seed(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
+        let seed = wanted_seed(&value)?;
+        with_scene(|scene| scene.set_terrain_seed(self.id, seed))
+    }
+
+    /// The colour the ground is painted, from a `Vec3`, a three tuple, a named colour
+    /// or a hex string such as `"#eb7a34"`.
+    #[getter]
+    fn color(&self) -> PyResult<PyVec3> {
+        vec3_of(self.id, VecField::Color)
+    }
+
+    #[setter]
+    fn set_color(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
+        set_color_on(self.id, &value)
+    }
+
+    /// The colour as `#rrggbb`, the way a design tool writes it.
+    #[getter(colorHex)]
+    fn color_hex(&self) -> PyResult<String> {
+        with_scene(|scene| scene.color_hex(self.id))
+    }
+
+    /// The packed `.ktx2` the ground is skinned with, as a path. `None` paints it flat.
+    /// The tile is laid by the metre across the map, so a grass skin reads as one
+    /// lawn rather than a picture stretched over the hills.
+    #[getter]
+    fn texture(&self) -> PyResult<Option<String>> {
+        texture_of(self.id)
+    }
+
+    #[setter]
+    fn set_texture(&self, value: Option<String>) -> PyResult<()> {
+        set_texture_on(self.id, value)
+    }
+
+    /// Metres one tile of the skin covers. `1.0` lays a tile every metre; `0` smears
+    /// the picture once across the whole map.
+    #[getter(textureTiling)]
+    fn texture_tiling(&self) -> PyResult<f32> {
+        tiling_of(self.id)
+    }
+
+    #[setter(textureTiling)]
+    fn set_texture_tiling(&self, value: f64) -> PyResult<()> {
+        set_tiling_on(self.id, value as f32)
+    }
+
+    /// Opacity from 0 (invisible) to 255 (opaque).
+    #[getter]
+    fn transparent(&self) -> PyResult<f32> {
+        with_scene(|scene| scene.alpha(self.id))
+    }
+
+    #[setter]
+    fn set_transparent(&self, alpha: f32) -> PyResult<()> {
+        with_scene(|scene| scene.set_alpha(self.id, alpha))
+    }
+
+    /// Whether the ground is drawn at all. Hidden, it still holds its floor: a walker
+    /// stands on a map they cannot see.
+    #[getter]
+    fn visible(&self) -> PyResult<bool> {
+        visible_of(self.id)
+    }
+
+    #[setter]
+    fn set_visible(&self, value: bool) -> PyResult<()> {
+        set_visible_on(self.id, value)
+    }
+
+    /// Takes the map and everything hung on it out of the world. The floor goes with
+    /// it, so anything that was standing on the ground falls back to the flat plane.
+    fn destroy(&self) -> PyResult<()> {
+        with_scene(|scene| scene.destroy(self.id))
+    }
+
+    fn __repr__(&self) -> String {
+        match with_scene(|scene| {
+            Ok((
+                scene.name(self.id)?.to_owned(),
+                scene.terrain_size(self.id)?,
+                scene.terrain_relief(self.id)?,
+            ))
+        }) {
+            Ok((name, size, relief)) => format!(
+                "<Terrain \"{name}\" size=({:.0}, {:.0}) relief={relief:.0} id={}>",
+                size.x, size.y, self.id.0
+            ),
+            Err(_) => format!("<Terrain destroyed id={}>", self.id.0),
         }
     }
 
