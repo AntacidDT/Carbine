@@ -181,6 +181,8 @@ impl Scene {
         // along, so the copy is floor anything standing on it is caught by, not just
         // a picture of hills.
         let ground = self.world.get::<crate::terrain::Terrain>(source).cloned();
+        let sound = self.world.get::<crate::sound::Sound>(source).cloned();
+        let video = self.world.get::<crate::video::Video>(source).cloned();
 
         let fresh = self.reserve();
         let mut spawned = self.world.spawn((
@@ -228,6 +230,12 @@ impl Scene {
         }
         if let Some(ground) = ground {
             spawned.insert(ground);
+        }
+        if let Some(sound) = sound {
+            spawned.insert(sound);
+        }
+        if let Some(video) = video {
+            spawned.insert(video);
         }
         if let Some(group) = group {
             spawned.insert(Link(group));

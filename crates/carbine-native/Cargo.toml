@@ -14,8 +14,10 @@ default = []
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
+carbine-audio = { path = "../carbine-audio" }
 carbine-core = { path = "../carbine-core" }
 carbine-pack = { path = "../carbine-pack" }
 carbine-render = { path = "../carbine-render" }
+cpal.workspace = true
 glam.workspace = true
 pyo3.workspace = true

@@ -1044,6 +1044,13 @@ struct GpuMesh {
     index_count: u32,
 }
 
+struct VideoTexture {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+}
+
 struct Pipeline {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
@@ -1077,6 +1084,9 @@ pub struct Gpu {
     skins: HashMap<String, Option<wgpu::TextureView>>,
     /// The white pixel every untextured object is skinned with.
     plain: wgpu::TextureView,
+    /// The frame a video node is showing, by node id. Frames are uploaded by the
+    /// platform layer before a frame is drawn.
+    videos: HashMap<u64, VideoTexture>,
     world: HashMap<wgpu::TextureFormat, Pipeline>,
     glass: HashMap<wgpu::TextureFormat, Pipeline>,
     casts: HashMap<wgpu::TextureFormat, Pipeline>,
@@ -1183,6 +1193,7 @@ impl Gpu {
             meshes: HashMap::new(),
             skins: HashMap::new(),
             plain,
+            videos: HashMap::new(),
             world: HashMap::new(),
             glass: HashMap::new(),
             casts: HashMap::new(),
@@ -1381,14 +1392,10 @@ impl Gpu {
         }
         glass.sort_by(|(this, _), (other, _)| other.total_cmp(this));
 
-        let skins: Vec<wgpu::TextureView> = opaque
-            .iter()
-            .map(|item| self.skin_for(item.texture))
-            .collect();
-        let glass_skins: Vec<wgpu::TextureView> = glass
-            .iter()
-            .map(|(_, item)| self.skin_for(item.texture))
-            .collect();
+        let skins: Vec<wgpu::TextureView> =
+            opaque.iter().map(|item| self.item_skin(item)).collect();
+        let glass_skins: Vec<wgpu::TextureView> =
+            glass.iter().map(|(_, item)| self.item_skin(item)).collect();
         let ui_items = scene.ui_items();
 
         // A crowd is one instanced draw per skin, so the drops are put in image
@@ -1788,6 +1795,92 @@ impl Gpu {
         }
 
         Ok(self.queue.submit([encoder.finish()]))
+    }
+
+    /// Uploads one video frame for a node, recreating the texture when the film's
+    /// size changes. Rows are padded to the copy alignment wgpu asks for.
+    pub fn upload_video(&mut self, id: u64, width: u32, height: u32, rgba: &[u8]) {
+        if width == 0 || height == 0 || rgba.len() != (width as usize * height as usize * 4) {
+            return;
+        }
+        let recreate = self
+            .videos
+            .get(&id)
+            .is_none_or(|frame| frame.width != width || frame.height != height);
+        if recreate {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("carbine video frame"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.videos.insert(
+                id,
+                VideoTexture {
+                    _texture: texture,
+                    view,
+                    width,
+                    height,
+                },
+            );
+        }
+
+        let row = width as usize * 4;
+        let padded = row.next_multiple_of(256);
+        let bytes: Vec<u8> = if padded == row {
+            rgba.to_vec()
+        } else {
+            let mut padded_bytes = vec![0u8; padded * height as usize];
+            for line in 0..height as usize {
+                padded_bytes[line * padded..line * padded + row]
+                    .copy_from_slice(&rgba[line * row..(line + 1) * row]);
+            }
+            padded_bytes
+        };
+
+        if let Some(frame) = self.videos.get(&id) {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &frame._texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded as u32),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+
+    fn video_for(&self, id: u64) -> Option<wgpu::TextureView> {
+        self.videos.get(&id).map(|frame| frame.view.clone())
+    }
+
+    fn item_skin(&mut self, item: &carbine_core::DrawItem<'_>) -> wgpu::TextureView {
+        if let Some(id) = item.video
+            && let Some(view) = self.video_for(id)
+        {
+            return view;
+        }
+        self.skin_for(item.texture)
     }
 
     /// The skin for a path, reading and uploading it the first time it is asked

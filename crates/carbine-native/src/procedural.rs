@@ -864,7 +864,10 @@ impl Terrain {
     /// counted smaller. `procedural.mapQualities()` is the list.
     #[getter]
     fn quality(&self) -> PyResult<String> {
-        Ok(self.read(|scene| scene.terrain_quality(self.id))?.name().to_owned())
+        Ok(self
+            .read(|scene| scene.terrain_quality(self.id))?
+            .name()
+            .to_owned())
     }
 
     #[setter]

@@ -229,6 +229,10 @@ pub(crate) fn handle_for<'py>(py: Python<'py>, node: NodeId) -> PyResult<Bound<'
         crate::entity::Entity::from_id(node).into_bound_py_any(py)
     } else if with_scene(|scene| scene.is_terrain(node))? {
         crate::procedural::Terrain::from_id(node).into_bound_py_any(py)
+    } else if with_scene(|scene| scene.is_sound(node))? {
+        crate::sound::Sound::from_id(node).into_bound_py_any(py)
+    } else if with_scene(|scene| scene.is_video(node))? {
+        crate::video::Video::from_id(node).into_bound_py_any(py)
     } else {
         Object::from_id(node).into_bound_py_any(py)
     }
@@ -253,10 +257,16 @@ pub(crate) fn handle_id(value: &Bound<'_, PyAny>) -> Option<NodeId> {
     if let Ok(crowd) = value.extract::<PyRef<'_, crate::procedural::Particle>>() {
         return Some(crowd.node_id());
     }
+    if let Ok(map) = value.extract::<PyRef<'_, crate::procedural::Terrain>>() {
+        return Some(map.node_id());
+    }
+    if let Ok(sound) = value.extract::<PyRef<'_, crate::sound::Sound>>() {
+        return Some(sound.node_id());
+    }
     value
-        .extract::<PyRef<'_, crate::procedural::Terrain>>()
+        .extract::<PyRef<'_, crate::video::Video>>()
         .ok()
-        .map(|map| map.node_id())
+        .map(|video| video.node_id())
 }
 
 /// The node this one hangs under, as the class it is. Every node in a scene has a

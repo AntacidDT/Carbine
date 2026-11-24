@@ -136,6 +136,21 @@ impl Renderer {
 
     /// Draws one frame of `scene`, then waits out whatever the frame limits still
     /// ask for so the next one cannot start early.
+    /// Hands one decoded video frame to the GPU. The platform layer calls this
+    /// before `render`; the node draws whatever was uploaded last.
+    pub fn upload_video(&mut self, id: u64, width: u32, height: u32, rgba: &[u8]) {
+        match &mut self.target {
+            Target::Windowed(windowed) => {
+                if let Some(session) = &mut windowed.session {
+                    session.gpu.upload_video(id, width, height, rgba);
+                }
+            }
+            Target::Offscreen(offscreen) => {
+                offscreen.gpu.upload_video(id, width, height, rgba);
+            }
+        }
+    }
+
     pub fn render(&mut self, scene: &Scene) -> Result<(), RenderError> {
         match &mut self.target {
             Target::Windowed(windowed) => windowed.render(scene, &mut self.pacing),

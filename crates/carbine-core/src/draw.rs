@@ -18,6 +18,9 @@ pub struct DrawItem<'a> {
     pub alpha: f32,
     /// The image the renderer should skin this object with, by path.
     pub texture: Option<&'a str>,
+    /// A live video texture, by node id, when this node is a video. The renderer
+    /// keeps the frames; the path above is then ignored.
+    pub video: Option<u64>,
     /// How many metres of this object one tile of its skin covers. Nil is the whole
     /// picture across the face, which is what a model's own UVs already are.
     pub tiling: f32,
@@ -61,6 +64,7 @@ impl Scene {
                     .world
                     .get::<NodeTexture>(entity)
                     .and_then(|texture| texture.0.as_deref());
+                let video = self.world.get::<crate::video::Video>(entity).map(|_| id.0);
                 let tiling = self
                     .world
                     .get::<TextureTiling>(entity)
@@ -74,6 +78,7 @@ impl Scene {
                     color: color.to_array(),
                     alpha: alpha / MAX_ALPHA,
                     texture,
+                    video,
                     tiling,
                 });
             }

@@ -29,9 +29,10 @@ pub const KIND: &str = "terrain";
 /// How finely the map is laid: the grid across it and the octaves of noise summed into
 /// each height. A finer grid is the same hills seen closer, the way a texture's quality
 /// is the same pattern counted smaller.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum TerrainQuality {
     Low,
+    #[default]
     Medium,
     High,
 }
@@ -72,12 +73,6 @@ impl TerrainQuality {
             Self::Medium => 4,
             Self::High => 5,
         }
-    }
-}
-
-impl Default for TerrainQuality {
-    fn default() -> Self {
-        Self::Medium
     }
 }
 
@@ -173,8 +168,16 @@ fn mesh(size: Vec2, quality: TerrainQuality, heights: &[f32]) -> MeshData {
             let right = at((i + 1).min(cells), j);
             let down = at(i, j.saturating_sub(1));
             let up = at(i, (j + 1).min(cells));
-            let dx = if i == 0 || i == cells { step.x } else { step.x * 2.0 };
-            let dy = if j == 0 || j == cells { step.y } else { step.y * 2.0 };
+            let dx = if i == 0 || i == cells {
+                step.x
+            } else {
+                step.x * 2.0
+            };
+            let dy = if j == 0 || j == cells {
+                step.y
+            } else {
+                step.y * 2.0
+            };
             normals.push(Vec3::new(-(right - left) / dx, -(up - down) / dy, 1.0).normalize());
         }
     }
@@ -234,7 +237,11 @@ impl Scene {
         self.branch_allows(parent_id, false)?;
 
         let size = sane_size(size);
-        let relief = if relief.is_finite() { relief.max(0.0) } else { 6.0 };
+        let relief = if relief.is_finite() {
+            relief.max(0.0)
+        } else {
+            6.0
+        };
         let field = heights(relief, quality, seed);
         let data = mesh(size, quality, &field);
 
@@ -302,7 +309,11 @@ impl Scene {
     }
 
     pub fn set_terrain_relief(&mut self, id: NodeId, relief: f32) -> Result<(), SceneError> {
-        let relief = if relief.is_finite() { relief.max(0.0) } else { 0.0 };
+        let relief = if relief.is_finite() {
+            relief.max(0.0)
+        } else {
+            0.0
+        };
         self.spread(id, move |scene, member| {
             scene.terrain_mut(member)?.relief = relief;
             scene.relayout(member)
@@ -313,7 +324,11 @@ impl Scene {
         Ok(self.terrain(id)?.quality)
     }
 
-    pub fn set_terrain_quality(&mut self, id: NodeId, quality: TerrainQuality) -> Result<(), SceneError> {
+    pub fn set_terrain_quality(
+        &mut self,
+        id: NodeId,
+        quality: TerrainQuality,
+    ) -> Result<(), SceneError> {
         self.spread(id, move |scene, member| {
             scene.terrain_mut(member)?.quality = quality;
             scene.relayout(member)
@@ -355,7 +370,9 @@ impl Scene {
         let handle = self.next_mesh_handle();
         self.terrain_mut(id)?.heights = field;
         let entity = self.entity(id)?;
-        self.world.entity_mut(entity).insert(NodeMesh { handle, data });
+        self.world
+            .entity_mut(entity)
+            .insert(NodeMesh { handle, data });
         Ok(())
     }
 
@@ -387,8 +404,16 @@ impl Scene {
 /// metre so a stray knob never lays a map with no area to stand on.
 fn sane_size(size: Vec2) -> Vec2 {
     Vec2::new(
-        if size.x.is_finite() && size.x > 0.0 { size.x } else { 1.0 },
-        if size.y.is_finite() && size.y > 0.0 { size.y } else { 1.0 },
+        if size.x.is_finite() && size.x > 0.0 {
+            size.x
+        } else {
+            1.0
+        },
+        if size.y.is_finite() && size.y > 0.0 {
+            size.y
+        } else {
+            1.0
+        },
     )
 }
 
@@ -433,8 +458,14 @@ mod tests {
         let again = map(&mut scene, Seed::of("valley"));
         let other = map(&mut scene, Seed::of("vallez"));
 
-        assert_eq!(scene.mesh(first).unwrap().positions, scene.mesh(again).unwrap().positions);
-        assert_ne!(scene.mesh(first).unwrap().positions, scene.mesh(other).unwrap().positions);
+        assert_eq!(
+            scene.mesh(first).unwrap().positions,
+            scene.mesh(again).unwrap().positions
+        );
+        assert_ne!(
+            scene.mesh(first).unwrap().positions,
+            scene.mesh(other).unwrap().positions
+        );
         assert_eq!(scene.terrain_seed(first).unwrap(), Seed::of("valley").0);
     }
 
@@ -445,7 +476,10 @@ mod tests {
         let mesh = scene.mesh(id).unwrap();
         let (min, max) = mesh.bounds().unwrap();
         assert!(min.z >= -1e-4, "valleys sit at the node: {min:?}");
-        assert!(max.z <= 8.0 + 1e-3, "no peak taller than the relief: {max:?}");
+        assert!(
+            max.z <= 8.0 + 1e-3,
+            "no peak taller than the relief: {max:?}"
+        );
         assert!(max.z > 1.0, "a flat sheet is not a map: {max:?}");
     }
 
@@ -463,7 +497,11 @@ mod tests {
         // A grid point's height is the mesh's own, plus the metre the node was lifted.
         let centre = mesh.positions[32 * 65 + 32].z;
         let floor = scene.floor_at(0.0, 0.0);
-        assert!((floor - (centre + 1.0)).abs() < 1e-3, "{floor} vs {}", centre + 1.0);
+        assert!(
+            (floor - (centre + 1.0)).abs() < 1e-3,
+            "{floor} vs {}",
+            centre + 1.0
+        );
 
         // Outside the map the flat ground answers instead.
         assert_eq!(scene.floor_at(100.0, 100.0), GROUND_HEIGHT);
@@ -486,7 +524,10 @@ mod tests {
             "the walker settled onto the ground under it: {at:?}"
         );
         assert!(scene.player.grounded);
-        assert!(at.z > GROUND_HEIGHT, "the hill holds them above the flat floor");
+        assert!(
+            at.z > GROUND_HEIGHT,
+            "the hill holds them above the flat floor"
+        );
         let _ = id;
     }
 
@@ -569,7 +610,10 @@ mod tests {
         let copies = scene.duplicate(id, 1).unwrap();
         let copy = copies[0];
 
-        assert!(scene.is_terrain(copy).unwrap(), "the copy is a map, not just a picture");
+        assert!(
+            scene.is_terrain(copy).unwrap(),
+            "the copy is a map, not just a picture"
+        );
         assert_eq!(scene.terrain_seed(copy).unwrap(), Seed::of("copy").0);
         assert_eq!(scene.terrain_relief(copy).unwrap(), 8.0);
         assert_eq!(

@@ -18,10 +18,12 @@ mod player;
 mod primitives;
 mod procgen;
 mod sky;
+mod sound;
 mod terrain;
 mod texture;
 mod ui;
 mod vehicle;
+mod video;
 
 pub use atmosphere::{
     Atmosphere, DeviceKind, Gpu, Light, LightQuality, LightType, Precipitation, auto_quality,
@@ -47,6 +49,7 @@ pub use primitives::KINDS as PRIMITIVE_KINDS;
 pub use primitives::UI_KINDS as UI_SHAPE_KINDS;
 pub use procgen::{Rng, Seed, fbm2, fbm3, hash, noise2, noise3, salt, scatter};
 pub use sky::Sky;
+pub use sound::{KIND as SOUND_KIND, SoundNode};
 pub use terrain::{KIND as TERRAIN_KIND, TerrainQuality};
 pub use texture::{
     TextureError, TextureQuality, TextureType, generate as generate_texture,
@@ -54,6 +57,7 @@ pub use texture::{
 };
 pub use ui::{UiItem, UiText};
 pub use vehicle::{DRIVER_SEAT_KIND, HandlingType, KIND as VEHICLE_KIND, SEAT_KIND};
+pub use video::{KIND as VIDEO_KIND, VideoNode};
 
 /// A packed skin written to the temporary directory, for tests that only care that a
 /// scene remembers a path. A skin has to be a real file now that the scene checks one.

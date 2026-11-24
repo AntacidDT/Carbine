@@ -140,6 +140,8 @@ pub enum SceneError {
     NotAUi,
     NotAParticles,
     NotALight,
+    NotASound,
+    NotAVideo,
     NotAVehicle,
     NotASeat,
     SeatCannotSit,
@@ -157,6 +159,8 @@ pub enum SceneError {
     BadTime(String),
     BadTexture { path: String, why: String },
     BadModel { path: String, why: String },
+    BadSound { path: String, why: String },
+    BadVideo { path: String, why: String },
 }
 
 impl fmt::Display for SceneError {
@@ -165,13 +169,15 @@ impl fmt::Display for SceneError {
             Self::NodeDestroyed => write!(formatter, "the object has been destroyed"),
             Self::UnknownKind(kind) => write!(
                 formatter,
-                "unknown object kind \"{kind}\" (available: {}, {}, {}, {}, {}, {})",
+                "unknown object kind \"{kind}\" (available: {}, {}, {}, {}, {}, {}, {}, {})",
                 primitives::KINDS.join(", "),
                 crate::light::KIND,
                 crate::model::KIND,
                 crate::vehicle::KIND,
                 crate::vehicle::SEAT_KIND,
-                crate::vehicle::DRIVER_SEAT_KIND
+                crate::vehicle::DRIVER_SEAT_KIND,
+                crate::sound::KIND,
+                crate::video::KIND
             ),
             Self::CannotDestroyRoot => write!(formatter, "the scene root cannot be destroyed"),
             Self::CannotReparentRoot => write!(formatter, "the scene root cannot be reparented"),
@@ -201,6 +207,18 @@ impl fmt::Display for SceneError {
                 write!(
                     formatter,
                     "the object is not a light; a light is written with carbine.new(\"Light\")"
+                )
+            }
+            Self::NotASound => {
+                write!(
+                    formatter,
+                    "the object is not a sound; a sound is written with carbine.new(\"Sound\")"
+                )
+            }
+            Self::NotAVideo => {
+                write!(
+                    formatter,
+                    "the object is not a video; a video is written with carbine.new(\"Video\")"
                 )
             }
             Self::NotAVehicle => {
@@ -288,6 +306,16 @@ impl fmt::Display for SceneError {
                 formatter,
                 "\"{path}\" cannot be a model: {why}. Models come to Carbine as .glb, so a \
                  shape written in another format goes through the Packager first."
+            ),
+            Self::BadSound { path, why } => write!(
+                formatter,
+                "\"{path}\" cannot be played: {why}. Audio comes to Carbine as .wav or .mp3, \
+                 so hand the file straight to the sound's `source`."
+            ),
+            Self::BadVideo { path, why } => write!(
+                formatter,
+                "\"{path}\" cannot be a video: {why}. Video comes to Carbine as .mp4, so \
+                 hand the file straight to the video's `source`."
             ),
         }
     }
@@ -414,6 +442,12 @@ impl Scene {
         }
         if kind == crate::terrain::KIND {
             return self.create_terrain(name, parent);
+        }
+        if kind == crate::sound::KIND {
+            return self.create_sound(name, parent);
+        }
+        if kind == crate::video::KIND {
+            return self.create_video(name, parent);
         }
         if kind == crate::vehicle::KIND {
             return self.create_vehicle(name, parent);

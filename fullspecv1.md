@@ -4,8 +4,7 @@ The complete engine surface as it stands: every subsystem, every API entry, and 
 mechanisms underneath them. Written against the live code — the Python stub
 (`pkg/carbine/__init__.pyi`) is the contract, the Rust crates are the truth behind it.
 
-Status markers: everything below is **implemented** unless a section says
-otherwise. The one piece still in flight (audio) is collected at the end.
+Status markers: everything below is **implemented**.
 
 ---
 
@@ -16,12 +15,13 @@ otherwise. The one piece still in flight (audio) is collected at the end.
   generators and the renderer; a script only asks and writes.
 - **z-up world**, metres and seconds throughout. `size = (length, width, height)`
   along x, y, z. Perspective camera is the default; orthographic is a mode.
-- **One format per class of asset**: objects `.glb`, images `.ktx2`, audio `.ogg`
-  (audio in flight). The engine carries one small loader per class, never a codec
-  zoo. The Packager converts authored files into those formats.
-- **Own runtime parsers**: GLB reader, KTX2 reader, hand-rolled GJK/EPA collision —
-  no Rapier/parry, no runtime codec crates. Pure-Rust third-party crates are allowed
-  in *converters* only (BC7 encoder, model converters).
+- **Common formats in, no conversion detour**: objects `.glb`, images `.ktx2`,
+  audio `.wav`/`.mp3`, video `.mp4`. The Packager converts pictures into `.ktx2`;
+  audio and video are read where they are. The engine keeps one loader per class.
+- **Own runtime parsers where they pay**: GLB reader, KTX2 reader, WAV reader,
+  hand-rolled GJK/EPA collision. Codec crates are allowed for the formats it would
+  be irresponsible to re-implement: MP3 (pure-Rust Symphonia), MP4 audio (AAC via
+  Symphonia), and MP4 pictures (the system `ffmpeg`). cpal owns the output device.
 - Desktop first, GPLv3 with exception, self-hosted accounts planned, 5-player P2P
   planned, RON for authored data. Editor layer ("Enginebay") rides the same core.
 - Keep it simple: understandable APIs over realism. `gravityPull = 10` is Earth;
@@ -33,10 +33,11 @@ otherwise. The one piece still in flight (audio) is collected at the end.
 |---|---|
 | `carbine-core` | Scene/ECS (bevy_ecs), transforms, physics, player, vehicles, particles, lights, atmospheres, procgen substrate, texture + terrain generators |
 | `carbine-render` | wgpu renderer, winit window, sky/shadow/UI passes, frame pacing, input collection |
+| `carbine-audio` | WAV parser, MP3/MP4-audio decoding, voices and mixing (no device) |
 | `carbine-glb` | Own GLB container reader + minimal writer, Y-up→Z-up crossing |
 | `carbine-ktx` | Own KTX2 reader + BC7 packer interface (decoder-free loader) |
 | `carbine-pack` | The Packager: authored file in, engine format out (only crate that knows what a PNG is) |
-| `carbine-native` | PyO3 bindings — the whole Python surface |
+| `carbine-native` | PyO3 bindings — the whole Python surface, cpal output, ffmpeg video decoding |
 
 Python package: `pkg/carbine` (`__init__.py` + `_native` + `.pyi` stubs).
 `import carbine` stands alone; `atexit` closes the engine cleanly if the script never does.
@@ -55,17 +56,17 @@ Python package: `pkg/carbine` (`__init__.py` + `_native` + `.pyi` stubs).
 | `viewport` | `viewport() -> tuple[int, int]` | Current drawable size in pixels. |
 | `readPixels` | `readPixels() -> bytes` | Last frame's pixels (replay/tooling). |
 | `close` | `close() -> None` | Shut the renderer down. Registered with `atexit`. |
-| `destroy` | `destroy(target: Object \| Entity \| Particle \| Terrain \| str) -> None` | A handle: that node + its whole subtree. `"all"`: every authored node (objects, actors, UI, crowds, weather, maps) + all disasters. Camera, backdrop, player settings and the sun stay — they are settings, not content. |
+| `destroy` | `destroy(target: Object \| Entity \| Particle \| Terrain \| Sound \| Video \| str) -> None` | A handle: that node + its whole subtree. `"all"`: every authored node (objects, actors, UI, crowds, weather, maps, sounds, films) + all disasters. Camera, backdrop, player settings and the sun stay — they are settings, not content. |
 | `end` | `end() -> None` | `init()` in reverse: brand-new scene, player gives up camera and pointer, window closes. Frame limits survive (engine settings, not scene content). |
 
 ### Creation and copies
 
 | Entry | Signature | Meaning |
 |---|---|---|
-| `new` | `new(kind, *, name=None, parent=None) -> Object \| Terrain` | One world node of `kind` (see `kinds()`). Returns the class the node is: an `Object` for geometry/light/model/vehicle/seat, a `Terrain` for `"terrain"` (a map laid with the engine's defaults — use `procedural.map()` to name its size/relief/seed as it is laid). |
+| `new` | `new(kind, *, name=None, parent=None) -> Object \| Terrain \| Sound \| Video` | One world node of `kind` (see `kinds()`). Returns the class the node is: an `Object` for geometry/light/model/vehicle/seat, a `Terrain` for `"terrain"` (a map laid with the engine's defaults — use `procedural.map()` to name its size/relief/seed as it is laid), a `Sound` for `"sound"` and a `Video` for `"video"`. |
 | `spawnEntity` | `spawnEntity(kind=None, *, name=None, parent=None, position=None, health=1.0, damage=0.0) -> Entity` | An actor: a node with hit points. `kind` skins its body. |
 | `killEntity` | `killEntity(entity) -> None` | Deal death through the engine's own rules. |
-| `duplicate` | `duplicate(target, count=1) -> list[...]` | Independent copies beside the original, standing where it stood, at rest. Everything carried: size, colour, skin, gravity, collider cut, UI knobs, crowd knobs + its air, a map's hills, and the branch under it as copies. Each copy then owns its place, turning, size and health. Returns the class the node is (Object/Entity/Particle/Terrain). `count=0` makes none. |
+| `duplicate` | `duplicate(target, count=1) -> list[...]` | Independent copies beside the original, standing where it stood, at rest. Everything carried: size, colour, skin, gravity, collider cut, UI knobs, crowd knobs + its air, a map's hills, and the branch under it as copies. Each copy then owns its place, turning, size and health. Returns the class the node is (Object/Entity/Particle/Terrain/Sound/Video). `count=0` makes none. |
 | `linkDuplicate` | `linkDuplicate(target, count=1) -> list[...]` | Copies tied in one configuration group (Blender-style linked data). **Shared writes** (what a thing *is*): colour, `transparent`, `texture`, `textureTiling`, `gravity`, `gravityPull`, `mass`, `anchored`, `collision`, `collisionType`, actor `hitPause`/`stayAfterDeath`, UI `corner`/`polygon`/`outline`, vehicle `type`/`topSpeed`/`turnRate`/`grip`, every particle knob except `active`, a map's `relief`/`quality`/`seed`/`size`, Text content/size/wrap/outline. **Local writes** (where/what's left): `position`, `rotation`, `size` (bodies), `scale`, `health`, `damage`, `visible`, crowd `restart()`. A copy of a member joins its group; plain `duplicate` leaves the group; the original gains a group only when first link-copied. Linked maps share their hills but not their place. |
 
 ### Registers and lookups
@@ -81,7 +82,7 @@ Python package: `pkg/carbine` (`__init__.py` + `_native` + `.pyi` stubs).
 | `camera()` | The `Camera` handle. |
 | `player()` | The `Player` controller handle. |
 | `mouse()` | The `Mouse` read-only state. |
-| `kinds()` | What `new` accepts: `cube, plane, sphere, rectangle, square, light, model, vehicle, seat, driverSeat, terrain`. |
+| `kinds()` | What `new` accepts: `cube, plane, sphere, rectangle, square, light, model, vehicle, seat, driverSeat, terrain, sound, video`. |
 | `collisionTypes()` | `["box", "sphere", "mesh"]`. |
 | `lightTypes()` | `["straight", "blocky"]` (shade-edge looks). |
 | `handlingTypes()` | `["arcade", "drift"]`. |
@@ -688,8 +689,9 @@ file. `pathlib.Path` fine for both.
 Engine reads **only GLB** (settled); the Packager converts obj/stl via pure-Rust
 crates (tobj / stl_io). FBX ruled out. Imports stay a node tree.
 
-### Audio — in flight: `audio(path)` mp4/mp3/wav → `.ogg`, then the engine's own
-Ogg parser reads it back (see §18).
+### Audio and video
+There is no converter entry for either. `packager.image` is the only Packager call;
+audio and video are handed straight to a node's `source` (see §18).
 
 ---
 
@@ -705,17 +707,51 @@ Ogg parser reads it back (see §18).
 
 ---
 
-## 18. In flight (not yet on the Python surface)
+## 18. Audio and video
 
-### Audio
-Plan: `packager.audio` converts mp4/mp3/wav → `.ogg` (pure-Rust converter deps;
-FLAC-in-Ogg likely, no pure-Rust Vorbis encoder exists), then the engine parses the
-`.ogg` with **its own Ogg page parser + codec decoder** and plays it (cpal for the
-device, Sound as a node). Nothing shipped yet.
+### Sound — `carbine.new("Sound")`
+A sound is a node with a `.wav` or `.mp3`, a volume, a loop flag and a playhead. It
+draws nothing and the solver does not push it, but it hangs in the tree, so it can
+ride on a moving object.
+
+| Member | Meaning |
+|---|---|
+| `source: str \| None` | `.wav` or `.mp3` path. A new source stops the node; `play()` starts it. |
+| `volume: float` | 0 silence to 1 full; held at the edge outside that. |
+| `looping: bool` | Whether the clip starts again at the end. |
+| `playing: bool` | Settable; `True` starts, `False` stops. A finished non-looping clip reads `False`. |
+| `time: float` | Playhead in seconds, read-only. |
+| `duration: float` | Clip length in seconds, read-only; first ask loads and caches it. |
+| `play()` / `stop()` | Start from the beginning / silence and rewind. `play()` raises `ValueError` for a missing or undecodable file. |
+
+Under it: `carbine-audio` parses WAV itself (PCM 8/16/24/32, float 32/64, extensible
+headers), decodes MP3 with Symphonia, and mixes one voice per node with linear
+resampling and mono/stereo mapping. `carbine-native` opens cpal and fills the device
+buffer; the callback only touches the mixer. A machine with no output device is not
+an error: `step()` advances the mixer on the game clock, so a headless sound still
+starts, moves and ends.
+
+### Video — `carbine.new("Video")`
+A video is a rectangle showing an `.mp4`, with the film's own sound played by the
+mixer. `play()` probes the file with `ffprobe`, shapes the rectangle to the film's
+aspect ratio (one metre high), starts `ffmpeg` on a worker thread for RGBA frames,
+and decodes the AAC track into a clip. Frames are uploaded to a per-node GPU texture
+as the playhead passes them; a draw item asks for that texture instead of a skin.
+
+| Member | Meaning |
+|---|---|
+| `source: str \| None` | `.mp4` path. A new source stops the film. |
+| `playing: bool` | Settable; starts/stops the picture and the sound track. |
+| `volume`, `looping`, `time`, `duration` | As for Sound. |
+| `width`, `height`, `fps` | What the probe found; zero until first `play()`. |
+| `play()` / `stop()` | Probe and start / stop and rewind. Missing `ffmpeg`/`ffprobe` raises `ValueError`. |
+
+A film with no audio track plays silently. Codec support is whatever the installed
+`ffmpeg` decodes; H.264/AAC is the tested path.
 
 ### Also planned, undeclared
 Map variants/biomes and a tree count; building generator; flipbook loops (ktx2 has
-no layers yet); video on hold.
+no layers yet).
 
 ---
 

@@ -12,7 +12,9 @@ def test_kinds_are_advertised():
     # The shapes the geometry knows, and the kinds it does not: a light is a node `new`
     # writes like any other and draws nothing, a model is an anchor a `.glb` hangs on, a
     # vehicle is a box wearing a drive, the two seats are somewhere a node can sit, and
-    # terrain is ground a map lays to walk on.
+    # terrain is ground a map lays to walk on, and a sound is a node that plays a
+    # `.wav` or `.mp3` without drawing anything, and a video shows an `.mp4` with its
+    # own sound.
     assert carbine.kinds() == [
         "cube",
         "plane",
@@ -25,6 +27,8 @@ def test_kinds_are_advertised():
         "seat",
         "driverSeat",
         "terrain",
+        "sound",
+        "video",
     ]
 
 

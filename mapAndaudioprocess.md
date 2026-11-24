@@ -1,4 +1,4 @@
-# Map generator + Audio — working process log
+# Map generator + Audio + Video — working process log
 
 Written while working so a context freeze can be caught up from this file alone.
 Update after every chunk. No commits unless asked.
@@ -6,15 +6,17 @@ Update after every chunk. No commits unless asked.
 ## The ask
 
 1. `carbine.procedural.map` — terrain/maps instead of flat unusable places.
-2. Audio: `packager.audio` converts mp4/mp3/wav → `.ogg`, then the engine parses
-   the `.ogg` with its own parser and plays it.
-3. Map first, audio second.
+2. Audio: engine reads `.wav` and `.mp3` directly; no conversion step, no `.ogg`.
+3. Video: engine reads `.mp4`, shows it on a rectangle and plays its sound track.
+4. Map first, audio second, video third.
 
 ## Standing rules (do not violate)
 
 - Rust core does every calculation; Python is a thin scripting layer.
-- Own runtime parsers (Ogg + codec decoding hand-rolled). Pure-Rust crates ARE
-  allowed in the *converter* (Packager) — precedent: rusty_dds, tobj, stl_io.
+- Own runtime parsers where they pay (GLB, KTX2, WAV, collision). Codec crates ARE
+  allowed for MP3/AAC (Symphonia) and MP4 pictures (system ffmpeg); cpal owns the
+  output device. The `.ogg` plan was dropped: nobody has `.ogg`, and converting to
+  it added a container with no runtime benefit.
 - Generator rules: configure fully BEFORE producing; `seed` accepts/returns the
   full unsigned u64 range (words hash to top of u64); deterministic.
 - No `image` crate outside carbine-pack.
@@ -40,15 +42,26 @@ Update after every chunk. No commits unless asked.
 - API shape: `carbine.procedural.map(...)` like particles/texture generators.
 
 ### Audio
-- Packager converter: pure-Rust decode (symphonia candidate for mp3/mp4/wav).
-  No pure-Rust Vorbis encoder exists → encode FLAC (flacenc) and mux into Ogg
-  with our own muxer. Output `.ogg` container, FLAC payload.
-- Runtime: own Ogg page parser + own FLAC decoder crate (carbine-ogg or
-  similar), no runtime codec crates. cpal for output device (OS binding is
-  acceptable like wgpu/winit).
-- API: Sound as a node (lights/particles precedent) — decide exact surface when
-  we get there.
-- Crate availability NOT yet verified (cargo search pending).
+- Format pivot: `.wav` + `.mp3`, no `.ogg`, no Packager step. The mixer reads what
+  people actually have.
+- `crates/carbine-audio`: hand-rolled WAV parser (PCM 8/16/24/32, float 32/64,
+  extensible), MP3 via Symphonia, MP4/AAC audio track via Symphonia, and a voice
+  mixer with linear resampling and mono/stereo mapping.
+- `carbine-native`: cpal output on a thread-local stream; the callback only locks
+  the mixer. No device is not an error — `step()` advances the mixer on the game
+  clock, so headless tests see sounds start, move and end.
+- API: `carbine.new("Sound")` is a node with `source`, `volume`, `looping`,
+  `playing`, `time`, `duration`, `play()`, `stop()`.
+
+### Video
+- `.mp4` only. `play()` probes with `ffprobe`, spawns `ffmpeg` on a worker thread
+  for RGBA frames, and decodes the AAC track into the same mixer.
+- `carbine.new("Video")` is a rectangle (one metre high, film aspect) whose draw
+  item asks for a per-node GPU texture; frames are uploaded as the playhead passes.
+- `carbine-render` owns the video texture cache; `Gpu::upload_video` pads rows to
+  the 256-byte copy alignment.
+- Looping restarts both the decoder and the audio voice. A film with no audio track
+  plays silently. Missing ffmpeg/ffprobe raises `ValueError` in `play()`.
 
 ## Recon done
 
@@ -72,17 +85,18 @@ Update after every chunk. No commits unless asked.
       player.rs step_player + physics.rs integrate now use self.floor_at(x,y)
       = max(GROUND_HEIGHT, terrain height under spot). Terrain is anchored,
       has no collider (not a solver body). 9 terrain tests pass serial.
-- [ ] PyO3 binding `carbine.procedural.map` + Terrain handle + stubs + tests + demo.
-- [ ] Full verification chain for map.
-- [ ] Audio: verify crates, implement packager.audio.
-- [ ] Audio: own Ogg/FLAC parser crate.
-- [ ] Audio: playback (cpal) + Sound API + stubs/tests/demo.
-- [ ] Full verification chain for audio.
+- [x] PyO3 binding `carbine.procedural.map` + Terrain handle + stubs + tests + demo.
+- [x] Full verification chain for map.
+- [x] Audio: `carbine-audio` crate (WAV + MP3 + MP4 audio + mixer).
+- [x] Audio: cpal output, `carbine.new("Sound")`, stubs, tests, demo.
+- [x] Video: `carbine.new("Video")`, ffmpeg frames, AAC audio, GPU texture upload.
+- [x] Full verification chain for map + audio + video.
 
 ## Current state
 
-Core terrain generator implemented and tested (9/9). Next: Python binding
-`carbine.procedural.map(...)` returning a Terrain node handle, register in
-native lib.rs, add to kinds(), write .pyi stubs, pytest, demo. Then audio.
-texture.rs has uncommitted fbm-sharing optimization (task #123, verified green).
-NO commits made (none requested).
+Map, audio and video are implemented and green. Map: core heightfield, analytic
+grounding, `procedural.map()`, 17 pytest cases. Audio: `.wav`/`.mp3`, Sound node,
+mixer, cpal; 15 pytest cases. Video: `.mp4`, Video node, ffmpeg frames, AAC sound;
+13 pytest cases. Verification: `cargo fmt --all`, clippy 0 warnings,
+`cargo test -p carbine-core` 369 passed, `cargo test -p carbine-audio` 17 passed,
+whole `.venv/bin/pytest` green. NO commits made (none requested).

@@ -1,7 +1,9 @@
 mod atmosphere;
+mod audio;
 mod camera;
 mod disaster;
 mod entity;
+mod film;
 mod input;
 mod light;
 mod math;
@@ -12,7 +14,9 @@ mod player;
 mod procedural;
 mod scene;
 mod sky;
+mod sound;
 mod ui;
+mod video;
 
 use std::cell::RefCell;
 use std::sync::{Mutex, OnceLock};
@@ -38,7 +42,9 @@ use crate::player::PyPlayer;
 use crate::procedural::{Particle, PyProcedural, Terrain};
 use crate::scene::PyScene;
 use crate::sky::PySky;
+use crate::sound::Sound;
 use crate::ui::PyUi;
+use crate::video::Video;
 
 create_exception!(carbine, DestroyedError, PyRuntimeError);
 
@@ -180,11 +186,13 @@ fn needs_renderer() -> PyErr {
     PyRuntimeError::new_err("the renderer is not running; call carbine.init() first")
 }
 
-/// Reads the node behind an Object, an Entity, a Particle or a Terrain handle.
+/// Reads the node behind an Object, an Entity, a Particle, a Terrain or a Sound
+/// handle.
 pub(crate) fn node_id_of(value: &Bound<'_, PyAny>) -> PyResult<NodeId> {
     object::handle_id(value).ok_or_else(|| {
         PyTypeError::new_err(
-            "expected an Object, an Entity, a Particle or a Terrain, or None for the scene root",
+            "expected an Object, an Entity, a Particle, a Terrain, a Sound or a Video, or \
+             None for the scene root",
         )
     })
 }
@@ -284,6 +292,8 @@ fn render() -> PyResult<()> {
         let mut scene = locked()?;
         scene.update_input(&frame);
         scene.step(dt);
+        audio::sync(&mut scene, dt, true);
+        film::sync(&mut scene, Some(renderer), dt);
         let wants = scene.wants_pointer_grab();
         renderer.set_pointer_grab(wants);
         renderer.render(&scene).map_err(render_error)
@@ -307,7 +317,10 @@ fn fps() -> f64 {
 #[pyfunction]
 fn step(seconds: f64) -> PyResult<()> {
     with_scene(|scene| {
-        scene.step(seconds as f32);
+        let seconds = seconds as f32;
+        scene.step(seconds);
+        audio::sync(scene, seconds, false);
+        film::sync(scene, None, seconds);
         Ok(())
     })
 }
@@ -346,6 +359,16 @@ fn read_pixels(py: Python<'_>) -> PyResult<Bound<'_, PyBytes>> {
 
 #[pyfunction]
 fn close() {
+    if let Ok(mut scene) = locked() {
+        for sound in scene.sound_nodes() {
+            let _ = scene.set_sound_playing(sound.id, false);
+        }
+        for video in scene.video_nodes() {
+            let _ = scene.set_video_playing(video.id, false);
+        }
+    }
+    film::stop_all();
+    audio::stop_all();
     RENDERER.with(|cell| *cell.borrow_mut() = None);
 }
 
@@ -358,6 +381,8 @@ fn close() {
 fn destroy(target: &Bound<'_, PyAny>) -> PyResult<()> {
     if let Ok(word) = target.extract::<String>() {
         if word.eq_ignore_ascii_case("all") {
+            film::stop_all();
+            audio::stop_all();
             return with_scene(|scene| {
                 scene.clear();
                 Ok(())
@@ -369,6 +394,8 @@ fn destroy(target: &Bound<'_, PyAny>) -> PyResult<()> {
     }
 
     let id = node_id_of(target)?;
+    audio::stop(id);
+    film::stop(id);
     with_scene(|scene| scene.destroy(id))
 }
 
@@ -393,8 +420,10 @@ fn end() -> PyResult<()> {
 /// `new("DriverSeat")` for the one that drives what it hangs on. A model anchor -
 /// `new("Model")` - is a node waiting for a `.glb` to be hung on it as children.
 /// `new("Terrain")` lays a map with the engine's defaults; `carbine.procedural.map()`
-/// is the way to name its size, relief and seed as it is laid. The handle comes back
-/// as the class the node actually is, so a map answers as a `Terrain`.
+/// is the way to name its size, relief and seed as it is laid. `new("Sound")` is a
+/// node that plays a `.wav` or `.mp3` without drawing anything. The handle comes back
+/// as the class the node actually is, so a map answers as a `Terrain` and a sound as
+/// a `Sound`.
 #[pyfunction]
 #[pyo3(signature = (kind, *, name=None, parent=None))]
 fn new<'py>(
@@ -530,6 +559,8 @@ fn kinds() -> Vec<&'static str> {
     kinds.push(carbine_core::SEAT_KIND);
     kinds.push(carbine_core::DRIVER_SEAT_KIND);
     kinds.push(carbine_core::TERRAIN_KIND);
+    kinds.push(carbine_core::SOUND_KIND);
+    kinds.push(carbine_core::VIDEO_KIND);
     kinds
 }
 
@@ -579,6 +610,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Entity>()?;
     module.add_class::<Particle>()?;
     module.add_class::<Terrain>()?;
+    module.add_class::<Sound>()?;
+    module.add_class::<Video>()?;
     module.add_class::<PyScene>()?;
     module.add_class::<PyUi>()?;
     module.add_class::<PyPhysics>()?;

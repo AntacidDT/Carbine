@@ -61,19 +61,19 @@ class Object:
     # Only the scene root has no parent. Writing None moves the node to the root.
     # An actor's parent reads back as an `Entity`, plain scenery as an `Object` and
     # a particle system as a `Particle`.
-    parent: Object | Entity | Particle | Terrain | None
+    parent: Object | Entity | Particle | Terrain | Sound | Video | None
     # What hangs under this node, in the order it is walked - which is also the
     # order UI elements are painted in, so the last one sits on top.
     # Writing a list, or a single node, replaces the branch: the order given
     # becomes the order walked, children left out move to the scene root, and a
     # node listed here but hanging elsewhere is adopted. Nothing is destroyed.
-    children: list[Object | Entity | Particle | Terrain]
+    children: list[Object | Entity | Particle | Terrain | Sound | Video]
     # Hangs another node on the end of this one's children.
-    def addChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
+    def addChild(self, child: Object | Entity | Particle | Terrain | Sound | Video) -> None: ...
 
     # Takes a child off this node and hangs it on the scene root. It leaves the
     # branch, not the world - `destroy` is the call that means that.
-    def removeChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
+    def removeChild(self, child: Object | Entity | Particle | Terrain | Sound | Video) -> None: ...
     # Vector writes accept Vec3 or (x, y, z); None or ... preserves an axis.
     position: Vec3
     # Text font size is 1..400 pixels; other nodes return live (length, width, height) Vec3.
@@ -129,7 +129,7 @@ class Object:
     # somebody in it. None for a car nobody has sat in; anything that is not a vehicle
     # refuses, the way the knobs above do.
     @property
-    def driver(self) -> Object | Entity | Particle | Terrain | None: ...
+    def driver(self) -> Object | Entity | Particle | Terrain | Sound | Video | None: ...
     # Seat knobs. True for a `new("DriverSeat")`, which drives whatever vehicle it hangs
     # on, and false for a plain `new("Seat")`, which only rides along. Read, not written:
     # the kind word said it when the node was made. A node that is not a seat refuses.
@@ -137,10 +137,10 @@ class Object:
     # Whoever is riding in this seat, as the handle the rider really is. None while it
     # is empty; a node that is not a seat refuses, the way `drives` does.
     @property
-    def seated(self) -> Object | Entity | Particle | Terrain | None: ...
+    def seated(self) -> Object | Entity | Particle | Terrain | Sound | Video | None: ...
     # Which seat this node is riding in, or None for one standing on its own feet.
     @property
-    def seatedIn(self) -> Object | Entity | Particle | Terrain | None: ...
+    def seatedIn(self) -> Object | Entity | Particle | Terrain | Sound | Video | None: ...
     # Sits this node in a seat. It stays on its own branch, with its own name and
     # children, and the step holds it at the seat's place for as long as it is in;
     # nothing is re-parented. Whoever was in that seat before gets out.
@@ -176,7 +176,7 @@ class Object:
     # rather than one level at a time. An import names what it brings, so this is how
     # a script gets hold of a turret, a door or a seat again. None if nothing is named
     # that, here or below.
-    def find(self, name: str) -> Object | Entity | Particle | Terrain | None: ...
+    def find(self, name: str) -> Object | Entity | Particle | Terrain | Sound | Video | None: ...
     # False leaves the object, and everything pinned under it, out of the frame.
     visible: bool
     # How the object takes part in `step`. Gravity is off by default.
@@ -226,10 +226,10 @@ class Entity:
 
     # An actor is a node like any other, so it hangs in the same tree and rides
     # along with whatever it is pinned to - body or no body.
-    parent: Object | Entity | Particle | Terrain | None
-    children: list[Object | Entity | Particle | Terrain]
-    def addChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
-    def removeChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
+    parent: Object | Entity | Particle | Terrain | Sound | Video | None
+    children: list[Object | Entity | Particle | Terrain | Sound | Video]
+    def addChild(self, child: Object | Entity | Particle | Terrain | Sound | Video) -> None: ...
+    def removeChild(self, child: Object | Entity | Particle | Terrain | Sound | Video) -> None: ...
     # Hit points remaining. At zero the engine has already dealt with the death.
     # Writing a positive number back is the only revive there is, and what a death
     # means for the run - end it, spectate the corpse, let the player up - is the
@@ -253,7 +253,7 @@ class Entity:
     # script can reach; None takes them off. Same rules as `Object.model`.
     model: str | None
     # The first node under this actor carrying the name, anywhere down the branch.
-    def find(self, name: str) -> Object | Entity | Particle | Terrain | None: ...
+    def find(self, name: str) -> Object | Entity | Particle | Terrain | Sound | Video | None: ...
     visible: bool
     anchored: bool
     gravity: bool
@@ -274,7 +274,7 @@ class Entity:
     def touching(self) -> list[Object | Entity]: ...
     # Which seat this actor is riding in, or None standing on its own feet.
     @property
-    def seatedIn(self) -> Object | Entity | Particle | Terrain | None: ...
+    def seatedIn(self) -> Object | Entity | Particle | Terrain | Sound | Video | None: ...
     # Sits this actor in a seat, and the step holds it there: an actor in a car neither
     # falls nor shoves. Whoever was in that seat before gets out.
     def sit(self, seat: Object) -> None: ...
@@ -456,7 +456,7 @@ class Ui:
         kind: str = "square",
         *,
         name: str | None = None,
-        parent: Object | Entity | Particle | Terrain | None = None,
+        parent: Object | Entity | Particle | Terrain | Sound | Video | None = None,
     ) -> Object: ...
 
 class Disaster:
@@ -487,7 +487,7 @@ class Disaster:
     direction: Vec3
     # The object this one rides: its place in the world becomes the centre, so a
     # funnel bolted to a fan follows the fan about. None puts the epicentre back.
-    node: Object | Entity | Particle | Terrain | None
+    node: Object | Entity | Particle | Terrain | Sound | Video | None
     # Whether the solver is asking it how hard to shove right now.
     running: bool
 
@@ -572,10 +572,10 @@ class Particle:
     name: str
     # Always "particles", which is what tells this node from a body.
     kind: str
-    parent: Object | Entity | Particle | Terrain | None
-    children: list[Object | Entity | Particle | Terrain]
-    def addChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
-    def removeChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
+    parent: Object | Entity | Particle | Terrain | Sound | Video | None
+    children: list[Object | Entity | Particle | Terrain | Sound | Video]
+    def addChild(self, child: Object | Entity | Particle | Terrain | Sound | Video) -> None: ...
+    def removeChild(self, child: Object | Entity | Particle | Terrain | Sound | Video) -> None: ...
     # Meters from the scene origin, and the middle of the box the crowd flies in.
     # Moving a system leaves what is already in the air where it was, so call
     # `restart()` to lay the whole veil at the new place.
@@ -639,6 +639,103 @@ class Particle:
     def restart(self) -> None: ...
     def destroy(self) -> None: ...
 
+class Sound:
+    """One sound: a node with a `.wav` or `.mp3`, a volume, a loop flag and a playhead.
+    It draws nothing and the solver does not push it, but it hangs in the tree like any
+    other node, so a sound can ride on a moving object.
+
+    The engine reads the two files directly - no conversion step - and the mixer plays
+    one voice per node. `time` is where the playhead is; a non-looping clip turns
+    `playing` off when it reaches the end."""
+
+    id: int
+    name: str
+    # Always "sound", which is what tells this node from a body.
+    kind: str
+    parent: Object | Entity | Particle | Terrain | Sound | Video | None
+    children: list[Object | Entity | Particle | Terrain | Sound | Video]
+    def addChild(self, child: Object | Entity | Particle | Terrain | Sound | Video) -> None: ...
+    def removeChild(self, child: Object | Entity | Particle | Terrain | Sound | Video) -> None: ...
+    # Meters from the scene origin. The mixer does not pan yet, so this is the place a
+    # sound will be heard from once it does.
+    position: Vec3
+    rotation: Quat
+    rotationEuler: Vec3
+    # The `.wav` or `.mp3` to play, as a path. Writing a new source stops the node, so
+    # `play()` is always the call that starts it.
+    source: str | None
+    # How loud the node is, from 0 (silent) to 1 (full). A number outside that is held
+    # at the edge.
+    volume: float
+    # Whether the clip starts again when it reaches the end.
+    looping: bool
+    # Whether the node has been asked to play. A non-looping clip that has finished
+    # reads False; a looping one keeps reading True until `stop()`.
+    playing: bool
+    # Seconds into the clip as of the last step or frame.
+    @property
+    def time(self) -> float: ...
+    # How long the file runs, in seconds.
+    @property
+    def duration(self) -> float: ...
+    # Loads the source and starts it from the beginning. Raises ValueError when no
+    # source is set, the file is not there, or it is not a readable `.wav`/`.mp3`.
+    def play(self) -> None: ...
+    # Silences the node and puts its playhead back at the start.
+    def stop(self) -> None: ...
+    # Takes the sound and its voice out of the world.
+    def destroy(self) -> None: ...
+
+class Video:
+    """One film: a rectangle showing an `.mp4`, with the film's own sound played by the
+    mixer. It is a node, so it is moved, turned, parented and destroyed like any other
+    piece of the world; the picture is drawn where the rectangle stands.
+
+    Frames are decoded by the system's `ffmpeg`; the audio track is decoded in Rust.
+    `play()` probes the file, shapes the rectangle to the film's aspect ratio, starts the
+    picture and starts the sound. A machine without `ffmpeg` raises ValueError there."""
+
+    id: int
+    name: str
+    # Always "video".
+    kind: str
+    parent: Object | Entity | Particle | Terrain | Sound | Video | None
+    children: list[Object | Entity | Particle | Terrain | Sound | Video]
+    def addChild(self, child: Object | Entity | Particle | Terrain | Sound | Video) -> None: ...
+    def removeChild(
+        self, child: Object | Entity | Particle | Terrain | Sound | Video
+    ) -> None: ...
+    position: Vec3
+    rotation: Quat
+    rotationEuler: Vec3
+    # The `.mp4` to show, as a path. Writing a new source stops the film.
+    source: str | None
+    # The sound track's volume, from 0 to 1.
+    volume: float
+    # Whether the film starts again when it reaches the end.
+    looping: bool
+    # Whether the film is running. A finished film reads False.
+    playing: bool
+    # Seconds into the film, as of the last step or frame.
+    @property
+    def time(self) -> float: ...
+    # How long the film runs, in seconds. Zero until it has been started.
+    @property
+    def duration(self) -> float: ...
+    # The film's own pixel size and frame rate, once it has been started.
+    @property
+    def width(self) -> int: ...
+    @property
+    def height(self) -> int: ...
+    @property
+    def fps(self) -> float: ...
+    # Probes the film and starts the picture and its sound. Raises ValueError when no
+    # source is set, the file is not there, or ffmpeg/ffprobe cannot read it.
+    def play(self) -> None: ...
+    # Stops the picture and the sound and puts the playhead back at the start.
+    def stop(self) -> None: ...
+    def destroy(self) -> None: ...
+
 class Terrain:
     """One map: a node wearing the ground it draws, laid by `carbine.procedural.map()`
     or `carbine.new("terrain")`. It is scenery rather than a body, so the knobs it adds
@@ -651,10 +748,10 @@ class Terrain:
     name: str
     # Always "terrain", which is what tells this node from a body.
     kind: str
-    parent: Object | Entity | Particle | Terrain | None
-    children: list[Object | Entity | Particle | Terrain]
-    def addChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
-    def removeChild(self, child: Object | Entity | Particle | Terrain) -> None: ...
+    parent: Object | Entity | Particle | Terrain | Sound | Video | None
+    children: list[Object | Entity | Particle | Terrain | Sound | Video]
+    def addChild(self, child: Object | Entity | Particle | Terrain | Sound | Video) -> None: ...
+    def removeChild(self, child: Object | Entity | Particle | Terrain | Sound | Video) -> None: ...
     # Meters from the scene origin. The map is laid centred on the node, so moving it
     # carries the ground - and the floor anything standing on it is caught by - along.
     position: Vec3
@@ -707,7 +804,7 @@ class Procedural:
         self,
         *,
         name: str | None = None,
-        parent: Object | Entity | Particle | Terrain | None = None,
+        parent: Object | Entity | Particle | Terrain | Sound | Video | None = None,
         shape: str | None = None,
         count: int | None = None,
         size: float | None = None,
@@ -774,7 +871,7 @@ class Procedural:
         self,
         *,
         name: str | None = None,
-        parent: Object | Entity | Particle | Terrain | None = None,
+        parent: Object | Entity | Particle | Terrain | Sound | Video | None = None,
         size: Vec3 | tuple[float, float] | None = None,
         relief: float | None = None,
         quality: str | None = None,
@@ -854,19 +951,21 @@ def close() -> None: ...
 # `destroy("all")` leaves them alone. `end()` is `init()` in reverse: the scene comes back
 # brand new, the player gives its camera and the pointer up, and the window closes. The
 # frame limits are engine settings rather than scene content, so those stay as named.
-def destroy(target: Object | Entity | Particle | Terrain | str) -> None: ...
+def destroy(target: Object | Entity | Particle | Terrain | Sound | Video | str) -> None: ...
 def end() -> None: ...
 
 # Creates a node and hands it back as the class it actually is: an `Object` for
-# geometry, a light, a model anchor, a vehicle or a seat, and a `Terrain` for
-# `new("terrain")`, which lays a map with the engine's defaults. To name a map's size,
-# relief and seed as it is laid, use `carbine.procedural.map()` instead.
+# geometry, a light, a model anchor, a vehicle or a seat, a `Terrain` for
+# `new("terrain")`, which lays a map with the engine's defaults, and a `Sound` for
+# `new("sound")`, which plays a `.wav` or `.mp3` without drawing anything, and a
+# `Video` for `new("video")`, a rectangle showing an `.mp4` with its sound. To name a
+# map's size, relief and seed as it is laid, use `carbine.procedural.map()` instead.
 def new(
     kind: str,
     *,
     name: str | None = None,
-    parent: Object | Entity | Particle | Terrain | None = None,
-) -> Object | Terrain: ...
+    parent: Object | Entity | Particle | Terrain | Sound | Video | None = None,
+) -> Object | Terrain | Sound | Video: ...
 
 # More of the same thing. Each copy hangs beside the original, starts where it stood
 # and stands still from there, and comes back as the class the node is - a body's
@@ -876,9 +975,9 @@ def new(
 # corners, a crowd's knobs and its air, and the branch under it as copies of their
 # own. Each copy then has its own place, turning, size and hit points.
 def duplicate(
-    target: Object | Entity | Particle | Terrain,
+    target: Object | Entity | Particle | Terrain | Sound | Video,
     count: int = 1,
-) -> list[Object | Entity | Particle | Terrain]: ...
+) -> list[Object | Entity | Particle | Terrain | Sound | Video]: ...
 
 # Like `duplicate`, and the copies tied to the original in one configuration, the way
 # Blender's linked duplicates share a data block. A write about what the thing *is*
@@ -895,15 +994,15 @@ def duplicate(
 # when it is first copied by link.
 # Text content, font size, wrapping and outline are shared; position and scale stay local.
 def linkDuplicate(
-    target: Object | Entity | Particle | Terrain,
+    target: Object | Entity | Particle | Terrain | Sound | Video,
     count: int = 1,
-) -> list[Object | Entity | Particle | Terrain]: ...
+) -> list[Object | Entity | Particle | Terrain | Sound | Video]: ...
 
 def spawnEntity(
     kind: str | None = None,
     *,
     name: str | None = None,
-    parent: Object | Entity | Particle | Terrain | None = None,
+    parent: Object | Entity | Particle | Terrain | Sound | Video | None = None,
     position: Vec3 | tuple[float, float, float] | None = None,
     health: float = 1.0,
     damage: float = 0.0,
@@ -916,7 +1015,8 @@ def mouse() -> Mouse: ...
 # What `new` accepts: the geometry kinds, plus "light", which lights rather than fills,
 # "model", an empty node there to wear a `.glb`, "vehicle", which is a body wearing a
 # drive, the two seats - "seat" to ride along in and "driverSeat", which drives the
-# vehicle it hangs on - and "terrain", which lays a map with the engine's defaults.
+# vehicle it hangs on - "terrain", which lays a map with the engine's defaults, and
+# "sound", which plays a `.wav` or `.mp3` without drawing anything.
 # A seat reads whatever a script feels like calling it: "chair", "passenger" and
 # "Driver's Seat" all work.
 def kinds() -> list[str]: ...
