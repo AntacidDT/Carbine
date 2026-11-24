@@ -199,7 +199,10 @@ impl Scene {
                 0.0
             };
         }
-        if height > 0 {
+        // A world rectangle is shaped by the film; a UI panel keeps the size its
+        // layout gave it, because there scale is measured in pixels.
+        let entity = self.entity(id)?;
+        if height > 0 && self.world.get::<crate::ui::Ui>(entity).is_none() {
             let aspect = width as f32 / height as f32;
             self.set_vec_field(id, VecField::Scale, crate::Vec3::new(aspect, 1.0, 1.0))?;
         }
@@ -310,6 +313,42 @@ mod tests {
         let scale = scene.vec_field(id, VecField::Scale).unwrap();
         assert!((scale.x - 16.0 / 9.0).abs() < 1e-6);
         assert!((scale.y - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_ui_video_is_an_overlay_element_not_a_world_object() {
+        let mut scene = Scene::new();
+        let id = scene.create_ui("video", None, None).unwrap();
+
+        assert!(scene.is_ui(id).unwrap());
+        assert!(scene.is_video(id).unwrap());
+        assert_eq!(scene.kind(id).unwrap(), KIND);
+        assert!(scene.draw_items().is_empty());
+        assert!(
+            scene
+                .ui_items()
+                .iter()
+                .any(|item| item.node == id && item.video == Some(id.0))
+        );
+
+        // A film does not resize a UI panel; its layout owns its pixel size.
+        let before = scene.vec_field(id, VecField::Scale).unwrap();
+        scene.set_video_metadata(id, 1920, 1080, 30.0, 2.0).unwrap();
+        assert_eq!(scene.vec_field(id, VecField::Scale).unwrap(), before);
+    }
+
+    #[test]
+    fn a_ui_image_keeps_its_packed_skin() {
+        let mut scene = Scene::new();
+        let id = scene.create_ui("image", None, None).unwrap();
+        let path = crate::test_skin("ui-image");
+        scene.set_texture(id, Some(path.clone())).unwrap();
+
+        assert!(scene.is_ui(id).unwrap());
+        assert_eq!(scene.kind(id).unwrap(), "image");
+        let items = scene.ui_items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].texture, Some(path.as_str()));
     }
 
     #[test]

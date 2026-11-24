@@ -448,16 +448,18 @@ class Scene:
     def entityCount(self) -> int: ...
 
 class Ui:
-    """Pixel overlay; Text uses top-left position and scalar font size, shapes use size vectors."""
+    """Pixel overlay; Text uses top-left position and scalar font size, shapes use size vectors.
+    `Image` and `Video` are overlay elements too: a packed picture or a film frame on a quad."""
 
-    # Presets: square, rectangle, triangle, hexagon, circle, Text (case-insensitive).
+    # Presets: square, rectangle, triangle, hexagon, circle, Text, Image, Video
+    # (case-insensitive). Images come back as Object, films as Video.
     def new(
         self,
         kind: str = "square",
         *,
         name: str | None = None,
         parent: Object | Entity | Particle | Terrain | Sound | Video | None = None,
-    ) -> Object: ...
+    ) -> Object | Video: ...
 
 class Disaster:
     """One weather event: an acceleration the whole world is asked about, once a
@@ -708,6 +710,8 @@ class Video:
     position: Vec3
     rotation: Quat
     rotationEuler: Vec3
+    # Local scale: metres on a world screen, pixels on the overlay.
+    scale: Vec3
     # The `.mp4` to show, as a path. Writing a new source stops the film.
     source: str | None
     # The sound track's volume, from 0 to 1.

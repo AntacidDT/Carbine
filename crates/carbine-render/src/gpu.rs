@@ -586,19 +586,23 @@ struct Uniforms {
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var picture_sampler: sampler;
+@group(0) @binding(2) var picture: texture_2d<f32>;
 
 struct Pixel {
     @builtin(position) clip: vec4<f32>,
     @location(0) local: vec2<f32>,
+    @location(1) uv: vec2<f32>,
 };
 
 const PI: f32 = 3.14159265;
 
 @vertex
-fn versus(@location(0) position: vec3<f32>) -> Pixel {
+fn versus(@location(0) position: vec3<f32>, @location(2) uv: vec2<f32>) -> Pixel {
     var pixel: Pixel;
     pixel.clip = uniforms.view_proj * uniforms.model * vec4<f32>(position, 1.0);
     pixel.local = vec2<f32>(position.x, position.y) * uniforms.size;
+    pixel.uv = uv;
     return pixel;
 }
 
@@ -646,7 +650,14 @@ fn fragment(pixel: Pixel) -> @location(0) vec4<f32> {
 
     let fill = coverage(distance);
     let band = fill - coverage(distance + max(uniforms.outline, 0.0));
-    return vec4<f32>(uniforms.color.rgb, max(fill * uniforms.color.a, band));
+    // A plain shape binds a one-pixel white texture, so this is its old flat
+    // colour exactly. An image or a film binds the frame instead, tinted by the
+    // element's colour and clipped to its shape.
+    let skin = textureSample(picture, picture_sampler, pixel.uv);
+    return vec4<f32>(
+        uniforms.color.rgb * skin.rgb,
+        max(fill * uniforms.color.a * skin.a, band)
+    );
 }
 "#;
 
@@ -983,7 +994,9 @@ const UI: Spec = Spec {
     uniform_bytes: std::mem::size_of::<UiUniforms>(),
     fullscreen: false,
     instanced: false,
-    skinned: false,
+    // Every UI element binds a picture now: a white pixel for shapes, a skin or
+    // a video frame for images and films.
+    skinned: true,
     depth: false,
     depth_write: false,
     depth_only: false,
@@ -1427,6 +1440,13 @@ impl Gpu {
             }
         }
 
+        // Resolve the pictures before the text pipeline borrows the cache: a UI
+        // item may be a plain shape, a packed skin or a live video frame.
+        let ui_skins: Vec<wgpu::TextureView> = ui_items
+            .iter()
+            .map(|item| self.pick_skin(item.video, item.texture))
+            .collect();
+
         self.text_cache
             .prepare(&self.device, &self.queue, &ui_items);
         let text_pipeline =
@@ -1775,12 +1795,13 @@ impl Gpu {
                         0,
                         bytemuck::bytes_of(&uniforms),
                     );
+                    let skin = ui_skins[index].clone();
                     let bind = bind_group(
                         &self.device,
                         &pipeline.layout,
                         &pipeline.uniforms[index],
                         &self.sampler,
-                        &self.plain,
+                        &skin,
                         pipeline.skinned,
                         None,
                         None,
@@ -1874,13 +1895,17 @@ impl Gpu {
         self.videos.get(&id).map(|frame| frame.view.clone())
     }
 
-    fn item_skin(&mut self, item: &carbine_core::DrawItem<'_>) -> wgpu::TextureView {
-        if let Some(id) = item.video
+    fn pick_skin(&mut self, video: Option<u64>, texture: Option<&str>) -> wgpu::TextureView {
+        if let Some(id) = video
             && let Some(view) = self.video_for(id)
         {
             return view;
         }
-        self.skin_for(item.texture)
+        self.skin_for(texture)
+    }
+
+    fn item_skin(&mut self, item: &carbine_core::DrawItem<'_>) -> wgpu::TextureView {
+        self.pick_skin(item.video, item.texture)
     }
 
     /// The skin for a path, reading and uploading it the first time it is asked

@@ -2,7 +2,10 @@ use bevy_ecs::prelude::*;
 use glam::{Mat4, Vec3};
 
 use crate::mesh::{MeshData, MeshHandle};
-use crate::node::{Children, MAX_ALPHA, NodeId, NodeMesh, ObjectColor, Opacity, Scene, SceneError};
+use crate::node::{
+    Children, MAX_ALPHA, NodeId, NodeKind, NodeMesh, NodeTexture, ObjectColor, Opacity, Scene,
+    SceneError, VecField,
+};
 use crate::primitives;
 
 /// A screen space overlay node. UI is laid out in pixels from the viewport's
@@ -50,6 +53,9 @@ impl Scene {
         parent: Option<NodeId>,
     ) -> Result<NodeId, SceneError> {
         let kind = kind.trim().to_lowercase();
+        if kind == "image" || kind == "video" {
+            return self.create_ui_media(&kind, name, parent);
+        }
         let data =
             primitives::ui_mesh(&kind).ok_or_else(|| SceneError::UnknownKind(kind.clone()))?;
         if let Some(parent) = parent {
@@ -69,6 +75,33 @@ impl Scene {
         }
         // A UI element is pinned to the screen; gravity has nothing to do with it.
         self.set_anchored(id, true)?;
+        Ok(id)
+    }
+
+    /// A UI element with a picture or a film on it. Both are the same quad the
+    /// other UI shapes use; what makes them different is the skin or the video
+    /// component hung on the node.
+    fn create_ui_media(
+        &mut self,
+        kind: &str,
+        name: Option<String>,
+        parent: Option<NodeId>,
+    ) -> Result<NodeId, SceneError> {
+        let fallback = if kind == "video" { "Video" } else { "Image" };
+        let id = self.create_ui(
+            "square",
+            Some(name.unwrap_or_else(|| fallback.to_owned())),
+            parent,
+        )?;
+        let entity = self.entity(id)?;
+        self.world.get_mut::<NodeKind>(entity).unwrap().0 = kind.to_owned();
+        if kind == "video" {
+            self.world
+                .entity_mut(entity)
+                .insert(crate::video::Video::default());
+        }
+        // Pixels, not metres: a default panel big enough to read a film on.
+        self.set_vec_field(id, VecField::Size, Vec3::new(320.0, 180.0, 1.0))?;
         Ok(id)
     }
 
@@ -287,6 +320,11 @@ impl Scene {
                     sides: ui.sides.max(3) as f32,
                     outline: ui.outline,
                     text: self.world.get::<UiText>(entity),
+                    texture: self
+                        .world
+                        .get::<NodeTexture>(entity)
+                        .and_then(|skin| skin.0.as_deref()),
+                    video: self.world.get::<crate::video::Video>(entity).map(|_| id.0),
                 });
             }
 
@@ -321,6 +359,10 @@ pub struct UiItem<'a> {
     pub sides: f32,
     pub outline: f32,
     pub text: Option<&'a UiText>,
+    /// A packed `.ktx2` painted over the element, by path.
+    pub texture: Option<&'a str>,
+    /// A live video texture for the element, by node id.
+    pub video: Option<u64>,
 }
 
 fn finite_clamp(value: f32, min: f32, max: f32) -> f32 {

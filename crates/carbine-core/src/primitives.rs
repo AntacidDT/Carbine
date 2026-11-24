@@ -18,6 +18,10 @@ pub const UI_KINDS: &[&str] = &[
     "hexagon",
     "circle",
     "text",
+    // A picture or a film laid on the overlay, both the same unit quad as any
+    // other UI shape until a skin or a frame is painted on it.
+    "image",
+    "video",
 ];
 
 /// Geometry for a world kind, or `None` when the kind belongs to the UI overlay.

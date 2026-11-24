@@ -528,10 +528,11 @@ thousand drops don't read as one flat sheet. Image particles skin the quad from 
 
 ## 14. UI — the pixel overlay
 
-`carbine.ui.new(kind="square", *, name=None, parent=None) -> Object`. The overlay
-is measured in **pixels**, not metres, and hangs off the scene root on its own
-branch (the one-branch rule: a UI element never sits inside a world branch, root
-excepted). Every UI element is an `Object` handle with the shared node surface
+`carbine.ui.new(kind="square", *, name=None, parent=None) -> Object | Video`. The
+overlay is measured in **pixels**, not metres, and hangs off the scene root on its
+own branch (the one-branch rule: a UI element never sits inside a world branch, root
+excepted). A `Video` element comes back as a `Video` handle so it has `play()`;
+every other UI element is an `Object` handle with the shared node surface
 (`id, name, kind, parent, children, addChild, removeChild, position, rotation,
 color, colorHex, transparent, visible, destroy`) plus the overlay knobs below.
 World objects **raise** on the overlay knobs; UI elements raise on physics knobs.
@@ -553,6 +554,17 @@ mesh.
 | `hexagon` | 6 | Six-sided polygon. |
 | `circle` | 64 | A disc (a 64-gon reads as round). |
 | `text` | — | The SDF glyph path, not a polygon (see below). |
+| `image` | 4 | A packed `.ktx2` painted on the quad; write its path to `texture`. |
+| `video` | 4 | A film frame on the quad; write `source` and call `play()` (see §18). |
+
+### Pictures and films on the overlay
+
+`ui.new("image")` writes a packed `.ktx2` to `texture` (the Packager makes one from
+a PNG/JPG/WebP/TGA/BMP). `ui.new("video")` returns a `Video`: set `source` to an
+`.mp4`, `size` in pixels and call `play()`. Both are clipped to the element's shape
+and tinted by its `color`; frames are uploaded to the same per-node texture the
+world screen uses. A plain shape binds a white pixel, so it still draws its flat
+colour.
 
 ### Shape properties (square / rectangle / triangle / hexagon / circle)
 
@@ -747,7 +759,9 @@ as the playhead passes them; a draw item asks for that texture instead of a skin
 | `play()` / `stop()` | Probe and start / stop and rewind. Missing `ffmpeg`/`ffprobe` raises `ValueError`. |
 
 A film with no audio track plays silently. Codec support is whatever the installed
-`ffmpeg` decodes; H.264/AAC is the tested path.
+`ffmpeg` decodes; H.264/AAC is the tested path. `ui.new("video")` gives the same
+film on the pixel overlay; a world `new("Video")` puts it in the map. Both share the
+decoder, the mixer and the per-node frame texture.
 
 ### Also planned, undeclared
 Map variants/biomes and a tree count; building generator; flipbook loops (ktx2 has

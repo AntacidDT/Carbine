@@ -79,7 +79,14 @@ impl FilmEngine {
         volume: f32,
         looping: bool,
     ) -> Result<Meta, String> {
-        let meta = probe(path)?;
+        let mut meta = probe(path)?;
+        // A phone video can be 4K. Cap the decoded frame so a screen in a scene
+        // does not spend sixty megabytes per frame; the film keeps its aspect.
+        if meta.width > 1280 {
+            let height = (meta.height as f32 * 1280.0 / meta.width as f32).round() as u32;
+            meta.height = height.max(2).next_multiple_of(2);
+            meta.width = 1280;
+        }
         // A film with a codec we cannot decode still plays its picture; only the
         // probe and the frame decoder are required.
         let audio = carbine_audio::load_mp4_audio(path).ok().flatten();
@@ -338,9 +345,10 @@ fn fraction(text: &str) -> Option<f32> {
 }
 
 fn spawn_frames(path: &str, meta: Meta) -> Result<(Receiver<Frame>, Arc<Mutex<Child>>), String> {
+    let scale = format!("scale={}:{}", meta.width, meta.height);
     let mut child = Command::new("ffmpeg")
-        .args(["-v", "error", "-i", path, "-an", "-sn", "-f", "rawvideo"])
-        .args(["-pix_fmt", "rgba", "-"])
+        .args(["-v", "error", "-i", path, "-an", "-sn", "-vf", &scale])
+        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

@@ -238,3 +238,40 @@ def test_destroy_takes_the_film_with_it(quiet, clip):
     assert all(node.id != node_id for node in carbine.scene.root.children)
     with pytest.raises(carbine.DestroyedError):
         _ = video.volume
+
+
+def test_video_can_live_on_the_ui(headless, tmp_path):
+    clip = encode(tmp_path / "hud.mp4", seconds=0.2)
+    screen = carbine.ui.new("Video", name="HUD")
+
+    assert isinstance(screen, carbine.Video)
+    assert screen.kind == "video"
+    screen.source = clip
+    screen.scale = (320.0, 180.0, 1.0)
+    screen.play()
+    for _ in range(3):
+        carbine.render()
+    assert screen.playing is True
+    with_film = bytes(carbine.readPixels())
+    assert len(with_film) == 64 * 64 * 4
+
+    screen.destroy()
+    carbine.render()
+    assert with_film != bytes(carbine.readPixels()), "the overlay film was drawn"
+
+
+def test_image_can_live_on_the_ui(headless, authored):
+    picture = authored("ui-media.bmp", [[(255, 0, 0), (0, 255, 0)] * 4] * 4)
+    skin = carbine.packager.image(picture)
+    panel = carbine.ui.new("Image", name="Logo")
+
+    assert isinstance(panel, carbine.Object)
+    assert panel.kind == "image"
+    panel.texture = skin
+    carbine.render()
+    with_image = bytes(carbine.readPixels())
+    assert len(with_image) == 64 * 64 * 4
+
+    panel.destroy()
+    carbine.render()
+    assert with_image != bytes(carbine.readPixels()), "the overlay image was drawn"

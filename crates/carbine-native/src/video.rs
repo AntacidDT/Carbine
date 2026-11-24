@@ -116,6 +116,17 @@ impl Video {
         set_vec3(self.id, carbine_core::VecField::RotationEuler, &value)
     }
 
+    /// Local scale: metres on a world screen, pixels on the overlay.
+    #[getter]
+    fn scale(&self) -> PyResult<PyVec3> {
+        vec3_of(self.id, carbine_core::VecField::Scale)
+    }
+
+    #[setter]
+    fn set_scale(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
+        set_vec3(self.id, carbine_core::VecField::Scale, &value)
+    }
+
     /// The `.mp4` this node plays. Writing a new source stops the film.
     #[getter]
     fn source(&self) -> PyResult<Option<String>> {

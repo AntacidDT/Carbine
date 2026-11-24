@@ -62,6 +62,14 @@ Update after every chunk. No commits unless asked.
   the 256-byte copy alignment.
 - Looping restarts both the decoder and the audio voice. A film with no audio track
   plays silently. Missing ffmpeg/ffprobe raises `ValueError` in `play()`.
+- Decoded frames are capped at 1280 px wide so phone 4K clips do not eat memory.
+- UI media: `ui.new("Image")` and `ui.new("Video")` are overlay quads. The UI shader
+  samples a per-element picture (a white pixel for plain shapes, a packed `.ktx2`
+  for images, a video frame for films), clipped to the element's shape. Films keep
+  their pixel size; only world screens are reshaped by the film's aspect.
+- `examples/video.py` is the walk-around demo: the MIT carbine character GLB as the
+  player's body, a procedural map, a world screen, a HUD video, a packed logo image
+  and a random mp4 from the home directory.
 
 ## Recon done
 
@@ -97,6 +105,6 @@ Update after every chunk. No commits unless asked.
 Map, audio and video are implemented and green. Map: core heightfield, analytic
 grounding, `procedural.map()`, 17 pytest cases. Audio: `.wav`/`.mp3`, Sound node,
 mixer, cpal; 15 pytest cases. Video: `.mp4`, Video node, ffmpeg frames, AAC sound;
-13 pytest cases. Verification: `cargo fmt --all`, clippy 0 warnings,
-`cargo test -p carbine-core` 369 passed, `cargo test -p carbine-audio` 17 passed,
-whole `.venv/bin/pytest` green. NO commits made (none requested).
+15 pytest cases, plus UI image/video cases. Verification: `cargo fmt --all`, clippy 0 warnings,
+`cargo test -p carbine-core` 371 passed, `cargo test -p carbine-audio` 17 passed,
+whole `.venv/bin/pytest` 427 passed, 1 skipped. NO commits made (none requested).
