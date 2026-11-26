@@ -89,8 +89,8 @@ Python package: `pkg/carbine` (`__init__.py` + `_native` + `.pyi` stubs).
 | `lightTypes()` | `["straight", "blocky"]` (shade-edge looks). |
 | `handlingTypes()` | `["arcade", "drift"]`. |
 
-### The alien
-`carbine.alien() -> str` rolls one of the alien sayings each call — `"ONLY AN ALIEN
+### The alien — permanent
+`carbine.alien() -> str` is a permanent easter egg. It rolls one of the alien sayings each call — `"ONLY AN ALIEN
 CAN DEFEAT A MITTEN"`, `"MY GAMBIT MY LEGACY MY PRECIOUS"`, `"ARE YOU NOT
 ENTERTAINED?!"`, `"I have become alien, the destroyer of Caro-Kann"`, `"She could
 beat humans, but not an alien."`, `"I PREMOVED THE GAME!! WHILE SHAVING!!!"` or
@@ -650,8 +650,8 @@ down, each square `None` or `(colour, piece)`. `turn`, `status`
 `inCheck(colour=None)`, `moves("e2")` and `play("e2", "e4", promotion=None)` are the
 moves. Legal moves include castling, en passant and four promotion choices (`e7e8q`);
 a move that exposes its own king is refused with `ValueError`. `reset()` starts again.
-`examples/chess.py` plays it with Cburnett's public piece SVGs rasterised to PNGs —
-see `examples/assets/chess/CREDITS.md` for the artwork licence.
+No piece artwork ships with it yet: the test demo used CC BY-SA pieces and was
+removed so it cannot pull a share-alike obligation onto the engine.
 
 ### `flipbook(surface, *, frames=8, fps=8, variation=None, quality=None, seed=None, out=None) -> str`
 Paints a surface into an animated `.ktx2`: **two to sixty-four frames**, each its own

@@ -118,9 +118,9 @@ Update after every chunk. No commits unless asked.
 - [x] Map biomes + tree count; building generator; flipbook KTX2 layers.
 - [x] Media hardening: A/V clock sync, seek, spatial pan/attenuation.
 - [x] Mini chess: `carbine.chess()` rules in core (legal moves, castling, en passant,
-  promotion, checkmate/stalemate), Python `Chess` handle, playable UI demo with
-  Cburnett's credited SVG piece art.
-- [x] Easter egg: `carbine.alien()` rolls one of seven alien sayings — with thanks to Witty Alien.
+  promotion, checkmate/stalemate), Python `Chess` handle. The click-to-play demo and
+  its CC BY-SA artwork were removed — share-alike would reach the engine.
+- [x] PERMANENT easter egg: `carbine.alien()` rolls one of seven alien sayings — with thanks to Witty Alien. Do not remove.
 
 ## Current state
 

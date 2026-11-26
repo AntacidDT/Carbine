@@ -2,7 +2,7 @@ import os
 
 __version__: str
 
-# One of the alien sayings, picked at random. Prints nothing, changes nothing.
+# Permanent easter egg: one of the alien sayings, picked at random. No state change.
 def alien() -> str: ...
 
 # A fresh chess board, with the rules in Rust.
