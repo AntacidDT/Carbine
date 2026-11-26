@@ -50,8 +50,9 @@ Update after every chunk. No commits unless asked.
 - `carbine-native`: cpal output on a thread-local stream; the callback only locks
   the mixer. No device is not an error — `step()` advances the mixer on the game
   clock, so headless tests see sounds start, move and end.
-- API: `carbine.new("Sound")` is a node with `source`, `volume`, `looping`,
-  `playing`, `time`, `duration`, `play()`, `stop()`.
+- API: `carbine.new("Sound")` is a node with `source`, `volume`, `looping`/`loop`,
+  `playing`, `time`, `duration`, `play()`, `stop()`. `loop=False` plays once per
+  `play()`; `stop()` silences it and rewinds. Video has the same alias.
 
 ### Video
 - `.mp4` only. `play()` probes with `ffprobe`, spawns `ffmpeg` on a worker thread
@@ -67,6 +68,20 @@ Update after every chunk. No commits unless asked.
   samples a per-element picture (a white pixel for plain shapes, a packed `.ktx2`
   for images, a video frame for films), clipped to the element's shape. Films keep
   their pixel size; only world screens are reshaped by the film's aspect.
+- Map content: `biome` (meadow/forest/desert/alpine) shapes the ground and picks
+  a default tree count; a generated `Trees` group stands the trees on the ground and
+  is regrown when the map or count changes. `procedural.building()` raises seeded
+  floors/walls/windows/roof as an ordinary node tree. `procedural.flipbook()` paints
+  BC7 layers with a rate stored in the KTX2; the renderer swaps frames into one GPU
+  texture and `textureFps` overrides the painted rate.
+- Media hardening: a film with an audio track follows the mixer's clock so picture
+  and sound stay together; `time`/`seek()` move both on Sound and Video; `spatial`
+  pans a voice from the camera's right and fades it with distance. Frame decoding
+  caps 4K phone video at 1280 px wide.
+- Packager model conversion is complete: `carbine.packager.model()` reads OBJ (tobj)
+  and STL (stl_io), writes GLB through `carbine-glb`, and keeps the same destination
+  rules as `image()`. Flat colours, transforms and triangles survive; skins and
+  animation have nowhere to live in a Carbine GLB.
 - `examples/video.py` is the walk-around demo: the MIT carbine character GLB as the
   player's body, a procedural map, a world screen, a HUD video, a packed logo image
   and a random mp4 from the home directory.
@@ -99,12 +114,19 @@ Update after every chunk. No commits unless asked.
 - [x] Audio: cpal output, `carbine.new("Sound")`, stubs, tests, demo.
 - [x] Video: `carbine.new("Video")`, ffmpeg frames, AAC audio, GPU texture upload.
 - [x] Full verification chain for map + audio + video.
+- [x] Packager `model()` — OBJ/STL → GLB, bindings, stubs, tests, spec.
+- [x] Map biomes + tree count; building generator; flipbook KTX2 layers.
+- [x] Media hardening: A/V clock sync, seek, spatial pan/attenuation.
+- [x] Mini chess: `carbine.chess()` rules in core (legal moves, castling, en passant,
+  promotion, checkmate/stalemate), Python `Chess` handle, playable UI demo with
+  Cburnett's credited SVG piece art.
+- [x] Easter egg: `carbine.alien()` rolls one of seven alien sayings — with thanks to Witty Alien.
 
 ## Current state
 
 Map, audio and video are implemented and green. Map: core heightfield, analytic
 grounding, `procedural.map()`, 17 pytest cases. Audio: `.wav`/`.mp3`, Sound node,
-mixer, cpal; 15 pytest cases. Video: `.mp4`, Video node, ffmpeg frames, AAC sound;
-15 pytest cases, plus UI image/video cases. Verification: `cargo fmt --all`, clippy 0 warnings,
-`cargo test -p carbine-core` 371 passed, `cargo test -p carbine-audio` 17 passed,
-whole `.venv/bin/pytest` 427 passed, 1 skipped. NO commits made (none requested).
+mixer, cpal; 18 pytest cases. Video: `.mp4`, Video node, ffmpeg frames, AAC sound;
+18 pytest cases, plus UI image/video cases. Verification: `cargo fmt --all`, clippy 0 warnings,
+`cargo test -p carbine-core` 376 passed, `cargo test -p carbine-audio` 17 passed,
+whole `.venv/bin/pytest` 458 passed, 1 skipped; `cargo test --workspace` green. NO commits made (none requested).

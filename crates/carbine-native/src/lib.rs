@@ -1,6 +1,7 @@
 mod atmosphere;
 mod audio;
 mod camera;
+mod chess_bind;
 mod disaster;
 mod entity;
 mod film;
@@ -31,6 +32,7 @@ use pyo3::types::{PyAny, PyBytes};
 
 use crate::atmosphere::PyAtmosphere;
 use crate::camera::PyCamera;
+use crate::chess_bind::PyChess;
 use crate::disaster::{Disaster, PyPhysics};
 use crate::entity::Entity;
 use crate::input::PyMouse;
@@ -241,6 +243,13 @@ fn set_fps_cap(fps: Option<u32>) -> Option<u32> {
 }
 
 /// The cap as it was last set, `None` when nothing was asked of the frames.
+/// A fresh chess board. The rules live in `carbine-core`; this is just a handle to
+/// one game, so two scripts can play two boards without sharing a position.
+#[pyfunction]
+fn chess() -> PyChess {
+    PyChess::new()
+}
+
 #[pyfunction]
 #[pyo3(name = "fpsCap")]
 fn fps_cap() -> Option<u32> {
@@ -298,6 +307,32 @@ fn render() -> PyResult<()> {
         renderer.set_pointer_grab(wants);
         renderer.render(&scene).map_err(render_error)
     })
+}
+
+/// A word from the aliens. Each call rolls one out of the canon; the scene is not
+/// touched, so a script can ask whenever it likes without changing the game.
+#[pyfunction]
+fn alien() -> &'static str {
+    const WORDS: &[&str] = &[
+        "ONLY AN ALIEN CAN DEFEAT A MITTEN",
+        "MY GAMBIT MY LEGACY MY PRECIOUS",
+        "ARE YOU NOT ENTERTAINED?!",
+        "I have become alien, the destroyer of Caro-Kann",
+        "She could beat humans, but not an alien.",
+        "I PREMOVED THE GAME!! WHILE SHAVING!!!",
+        "SHES UNBEATABLE? ALMOST, WITH THE SOLE EXCEPTION OF ME!",
+    ];
+    // A few operations on the wall clock, mixed so the low bits are not just the
+    // same few nanoseconds every call. No dice from the engine's own seeds: an
+    // easter egg should not move a generator forward.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|time| time.as_nanos() as u64)
+        .unwrap_or(0x5EED_1234_ABCD_0001);
+    let mixed = (nanos ^ (nanos >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    let mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    let index = ((mixed ^ (mixed >> 31)) as usize) % WORDS.len();
+    WORDS[index]
 }
 
 /// Seconds between the two most recent frames. The first frame reports zero.
@@ -606,6 +641,7 @@ fn handling_types() -> Vec<&'static str> {
 
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<PyChess>()?;
     module.add_class::<Object>()?;
     module.add_class::<Entity>()?;
     module.add_class::<Particle>()?;
@@ -636,6 +672,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(monitor_sync, module)?)?;
     module.add_function(wrap_pyfunction!(monitor_hz, module)?)?;
     module.add_function(wrap_pyfunction!(fps_limit, module)?)?;
+    module.add_function(wrap_pyfunction!(alien, module)?)?;
+    module.add_function(wrap_pyfunction!(chess, module)?)?;
     module.add_function(wrap_pyfunction!(dt, module)?)?;
     module.add_function(wrap_pyfunction!(fps, module)?)?;
     module.add_function(wrap_pyfunction!(step, module)?)?;

@@ -16,8 +16,9 @@ Status markers: everything below is **implemented**.
 - **z-up world**, metres and seconds throughout. `size = (length, width, height)`
   along x, y, z. Perspective camera is the default; orthographic is a mode.
 - **Common formats in, no conversion detour**: objects `.glb`, images `.ktx2`,
-  audio `.wav`/`.mp3`, video `.mp4`. The Packager converts pictures into `.ktx2`;
-  audio and video are read where they are. The engine keeps one loader per class.
+  audio `.wav`/`.mp3`, video `.mp4`. The Packager converts pictures into `.ktx2`
+  and authored models into `.glb`; audio and video are read where they are. The
+  engine keeps one loader per class.
 - **Own runtime parsers where they pay**: GLB reader, KTX2 reader, WAV reader,
   hand-rolled GJK/EPA collision. Codec crates are allowed for the formats it would
   be irresponsible to re-implement: MP3 (pure-Rust Symphonia), MP4 audio (AAC via
@@ -36,7 +37,7 @@ Status markers: everything below is **implemented**.
 | `carbine-audio` | WAV parser, MP3/MP4-audio decoding, voices and mixing (no device) |
 | `carbine-glb` | Own GLB container reader + minimal writer, Y-up→Z-up crossing |
 | `carbine-ktx` | Own KTX2 reader + BC7 packer interface (decoder-free loader) |
-| `carbine-pack` | The Packager: authored file in, engine format out (only crate that knows what a PNG is) |
+| `carbine-pack` | The Packager: authored file in, engine format out (only crate that knows PNG/OBJ/STL) |
 | `carbine-native` | PyO3 bindings — the whole Python surface, cpal output, ffmpeg video decoding |
 
 Python package: `pkg/carbine` (`__init__.py` + `_native` + `.pyi` stubs).
@@ -78,7 +79,8 @@ Python package: `pkg/carbine` (`__init__.py` + `_native` + `.pyi` stubs).
 | `physics` | The `Physics` register (disasters). |
 | `atmosphere` | The `Atmosphere` register (sky, light, time, fog, weather). |
 | `procedural` | The `Procedural` generators. |
-| `packager` | The `Packager` importer. |
+| `packager` | The `Packager` importer: `image()` and `model()`. |
+| `chess()` | A fresh `Chess` board; the rules live in `carbine-core`. |
 | `camera()` | The `Camera` handle. |
 | `player()` | The `Player` controller handle. |
 | `mouse()` | The `Mouse` read-only state. |
@@ -86,6 +88,15 @@ Python package: `pkg/carbine` (`__init__.py` + `_native` + `.pyi` stubs).
 | `collisionTypes()` | `["box", "sphere", "mesh"]`. |
 | `lightTypes()` | `["straight", "blocky"]` (shade-edge looks). |
 | `handlingTypes()` | `["arcade", "drift"]`. |
+
+### The alien
+`carbine.alien() -> str` rolls one of the alien sayings each call — `"ONLY AN ALIEN
+CAN DEFEAT A MITTEN"`, `"MY GAMBIT MY LEGACY MY PRECIOUS"`, `"ARE YOU NOT
+ENTERTAINED?!"`, `"I have become alien, the destroyer of Caro-Kann"`, `"She could
+beat humans, but not an alien."`, `"I PREMOVED THE GAME!! WHILE SHAVING!!!"` or
+`"SHES UNBEATABLE? ALMOST, WITH THE SOLE EXCEPTION OF ME!"`. It touches no engine
+state — words from the aliens, with thanks to Witty Alien.
+
 
 ### Simulation clock and input
 
@@ -632,13 +643,35 @@ Paints a surface and writes the `.ktx2` an object skins with; answers the path.
   (one noise evaluation per texel feeds both). Output is BC7 + full mip chain —
   the bytes the GPU wants, no decode at scene load.
 
-### `map(*, name=None, parent=None, size=None, relief=None, quality=None, seed=None) -> Terrain`
+### `chess() -> Chess`
+A fresh chess board whose rules live in Rust. `board()` is eight rows from rank eight
+down, each square `None` or `(colour, piece)`. `turn`, `status`
+(`playing`/`checkmate`/`stalemate`), `winner` and `last` read the position;
+`inCheck(colour=None)`, `moves("e2")` and `play("e2", "e4", promotion=None)` are the
+moves. Legal moves include castling, en passant and four promotion choices (`e7e8q`);
+a move that exposes its own king is refused with `ValueError`. `reset()` starts again.
+`examples/chess.py` plays it with Cburnett's public piece SVGs rasterised to PNGs —
+see `examples/assets/chess/CREDITS.md` for the artwork licence.
+
+### `flipbook(surface, *, frames=8, fps=8, variation=None, quality=None, seed=None, out=None) -> str`
+Paints a surface into an animated `.ktx2`: **two to sixty-four frames**, each its own
+seeded take on the same recipe, packed as BC7 array layers with a full mip chain per
+frame. The frame rate is written into the file, so pointing `obj.texture` at the
+answer loops the picture without a script timing it. `textureFps` on any skinned node
+writes a rate over the painted one; zero hands timing back to the file. The other
+knobs and `out` follow `texture()`.
+
+### `map(*, name=None, parent=None, size=None, relief=None, quality=None, seed=None, biome=None, trees=None) -> Terrain`
 Lays a heightfield of seeded hills as ground to walk on — somewhere to stand
 instead of a flat plane. Every knob is optional; one left out keeps the fresh-map
 value, so `map()` alone is a 64 × 64 m hill field and `map(size=(256, 256),
 relief=20, seed="valley")` is a wide valley. The ground is laid **once every knob
 is written**. `new("terrain")` lays the same defaults but returns without naming
-them. `mapQualities()` lists the rungs.
+them. `mapQualities()` lists the grid rungs; `mapBiomes()` lists the countries.
+`biome` (`meadow`, `forest`, `desert`, `alpine`) shapes the ground and chooses how
+many trees it plants when `trees` is not named. The stand hangs under one generated
+`Trees` group and stands on the ground the map laid; a ground or count change regrows
+only the stand, leaving anything a script hung on the map where it was.
 
 | Knob | Default | Notes |
 |---|---|---|
@@ -646,11 +679,22 @@ them. `mapQualities()` lists the rungs.
 | `relief` | `6.0` | How tall the hills stand above the node, metres; 0 lays flat. |
 | `quality` | `"medium"` | Grid fineness — see the ladder below. Unknown name → `ValueError`. |
 | `seed` | engine default | Word or full u64; same seed lays the same ground for anybody. |
+| `biome` | `"meadow"` | `meadow`, `forest`, `desert` or `alpine`; the country's shape and default tree count. |
+| `trees` | biome's default | Seeded trees planted on the map; `0` lays no stand. |
 
 Quality ladder (`mapQualities()` = `["low", "medium", "high"]`): **low = 32 cells /
 3 octaves, medium = 64 / 4, high = 128 / 5**. A finer grid is the *same hills seen
 closer*, not different hills — the fbm is counted across the map (three features
 wide), so quality changes resolution, never the shape.
+
+### `building(*, name=None, parent=None, position=None, floors=2, width=8, depth=6, style="house", seed=None) -> Object`
+Raises a building as a **node tree**, not a welded mesh: one floor slab, four walls
+and two to four windows per storey, then a roof. Every piece is an ordinary Object
+hanging under the root, so a script can move a window, skin a wall or hide a floor.
+Everything is rolled from `seed` before the first piece is laid — the same word raises
+the same building for anybody. `style` ∈ `buildingStyles()` =
+`["house", "tower", "cabin"]`; `floors` is storeys (3 m each), `width`/`depth` metres.
+The root is anchored scenery; no collider is cut.
 
 ### `Terrain` — the map node handle
 
@@ -669,9 +713,12 @@ textureTiling, transparent, visible, destroy`.
 | `relief` | float | Hill height above the node, metres; 0 flat. Writing re-lays. |
 | `quality` | str | `"low"`/`"medium"`/`"high"`; writing re-lays finer/coarser. |
 | `seed` | int \| str | The dice the hills were rolled from; writing lays the map that seed names. |
+| `biome` | str | `meadow`/`forest`/`desert`/`alpine`; writing re-lays the hills and regrows the stand. |
+| `treeCount` | int | How many seeded trees grow; writing regrows only the generated stand. |
 | `position` | Vec3 | The map is laid centred on the node, so moving it carries the ground — and the floor anything standing on it is caught by — along. |
 | `rotation` | Quat | Turning the node turns the ground; on its side it is a cliff face. |
-| `texture` / `textureTiling` | str \| None / float | Skin like any object; the tile is laid by the metre across the map, so a grass skin reads as one lawn. |
+| `texture` / `textureTiling` | str \| None / float | Skin like any object; the tile is laid by the metre across the map, so a grass skin reads as one lawn. A layered `.ktx2` animates. |
+| `textureFps` | float | Frame rate over a flipbook's painted rate; zero uses the file's own. |
 | `visible` | bool | Hidden, it **still holds its floor** — a walker stands on a map they cannot see. |
 
 **Analytic grounding**: the floor under any spot is `max(flat ground, terrain
@@ -687,8 +734,8 @@ their own places. A `duplicate` of a map is real walkable ground too.
 ## 16. Packager — `carbine.packager`
 
 An authored file in, a Carbine-format file out. The same work Enginebay does on
-drop; a script can do it in real time. Only this layer knows what a PNG is — the
-runtime loaders stay decoder-free.
+drop; a script can do it in real time. Only this layer knows what a PNG, an OBJ or
+an STL is — the runtime loaders stay decoder-free.
 
 ### `image(path, *, out=None) -> str`
 Picture → `.ktx2` (BC7 blocks, full mip chain). Reads **png, jpg, webp, tga, bmp**;
@@ -697,13 +744,18 @@ source, same stem (`wood.png → wood.ktx2`). `out` naming a folder (exists, or
 trailing separator) packs into it keeping the stem; anything else is the exact
 file. `pathlib.Path` fine for both.
 
-### Model conversion
-Engine reads **only GLB** (settled); the Packager converts obj/stl via pure-Rust
-crates (tobj / stl_io). FBX ruled out. Imports stay a node tree.
+### `model(path, *, out=None) -> str`
+Model → `.glb`. Reads **obj** and **stl** with pure-Rust `tobj`/`stl_io`; anything else
+`ValueError` (FBX ruled out), unwriteable target `OSError`. No `out`: beside the source,
+same stem (`chair.obj → chair.glb`). `out` naming a folder (exists, or trailing
+separator) writes into it keeping the stem; anything else is the exact file.
+`pathlib.Path` fine for both. The answer goes straight to `obj.model` — the file's
+nodes arrive as children, keeping their transforms, triangles and flat colours; skins,
+animation and morph targets have nowhere to live in a Carbine GLB.
 
 ### Audio and video
-There is no converter entry for either. `packager.image` is the only Packager call;
-audio and video are handed straight to a node's `source` (see §18).
+There is no converter entry for either. `packager.image` and `packager.model` are the
+only Packager calls; audio and video are handed straight to a node's `source` (§18).
 
 ---
 
@@ -730,11 +782,12 @@ ride on a moving object.
 |---|---|
 | `source: str \| None` | `.wav` or `.mp3` path. A new source stops the node; `play()` starts it. |
 | `volume: float` | 0 silence to 1 full; held at the edge outside that. |
-| `looping: bool` | Whether the clip starts again at the end. |
+| `looping: bool` / `loop: bool` | Whether the clip starts again at the end. `loop` is an alias; `False` means one `play()` plays the clip once. |
 | `playing: bool` | Settable; `True` starts, `False` stops. A finished non-looping clip reads `False`. |
-| `time: float` | Playhead in seconds, read-only. |
+| `spatial: bool` | Places the voice: stereo pan from the camera's right and a gentle distance fade. Off keeps centred playback. |
+| `time: float` | Playhead in seconds. Writable: seeks a live voice, and a stopped sound starts there next `play()`. `seek(seconds)` is the same write. |
 | `duration: float` | Clip length in seconds, read-only; first ask loads and caches it. |
-| `play()` / `stop()` | Start from the beginning / silence and rewind. `play()` raises `ValueError` for a missing or undecodable file. |
+| `play()` / `stop()` | Start at the current playhead / silence and rewind. `play()` raises `ValueError` for a missing or undecodable file. |
 
 Under it: `carbine-audio` parses WAV itself (PCM 8/16/24/32, float 32/64, extensible
 headers), decodes MP3 with Symphonia, and mixes one voice per node with linear
@@ -754,18 +807,22 @@ as the playhead passes them; a draw item asks for that texture instead of a skin
 |---|---|
 | `source: str \| None` | `.mp4` path. A new source stops the film. |
 | `playing: bool` | Settable; starts/stops the picture and the sound track. |
-| `volume`, `looping`, `time`, `duration` | As for Sound. |
+| `volume`, `looping`/`loop`, `time`, `duration`, `spatial` | As for Sound. |
+| `seek(seconds)` | Moves picture and sound together without stopping. |
 | `width`, `height`, `fps` | What the probe found; zero until first `play()`. |
 | `play()` / `stop()` | Probe and start / stop and rewind. Missing `ffmpeg`/`ffprobe` raises `ValueError`. |
+
+When a film has an audio track its mixer voice is the clock: frames are chosen to
+match the playhead the sound card is actually at, so picture and sound stay together
+even if a frame was slow to arrive. A silent film uses the game clock instead.
 
 A film with no audio track plays silently. Codec support is whatever the installed
 `ffmpeg` decodes; H.264/AAC is the tested path. `ui.new("video")` gives the same
 film on the pixel overlay; a world `new("Video")` puts it in the map. Both share the
 decoder, the mixer and the per-node frame texture.
 
-### Also planned, undeclared
-Map variants/biomes and a tree count; building generator; flipbook loops (ktx2 has
-no layers yet).
+### Longer horizon
+Enginebay (editor), self-hosted accounts and five-player P2P.
 
 ---
 

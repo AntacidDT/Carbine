@@ -6,5 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+carbine-glb = { path = "../carbine-glb" }
 carbine-ktx = { path = "../carbine-ktx" }
+glam.workspace = true
 image.workspace = true
+stl_io.workspace = true
+tobj.workspace = true

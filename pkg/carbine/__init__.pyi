@@ -2,6 +2,30 @@ import os
 
 __version__: str
 
+# One of the alien sayings, picked at random. Prints nothing, changes nothing.
+def alien() -> str: ...
+
+# A fresh chess board, with the rules in Rust.
+def chess() -> Chess: ...
+
+class Chess:
+    """One chess game. The board is eight rows from rank eight down; each square is
+    `None` or `(colour, piece)`. Moves are algebraic: `e2e4`, `e7e8q`."""
+
+    def reset(self) -> None: ...
+    def board(self) -> list[list[tuple[str, str] | None]]: ...
+    @property
+    def turn(self) -> str: ...
+    @property
+    def status(self) -> str: ...  # playing, checkmate or stalemate
+    @property
+    def winner(self) -> str | None: ...
+    @property
+    def last(self) -> str | None: ...
+    def inCheck(self, colour: str | None = None) -> bool: ...
+    def moves(self, square: str) -> list[str]: ...
+    def play(self, from: str, to: str, promotion: str | None = None) -> None: ...
+
 class DestroyedError(RuntimeError): ...
 
 class Vec3Iterator:
@@ -164,6 +188,8 @@ class Object:
     # in rather than stamped - each repeat nudged off its lattice and worn to a tone of
     # its own - so a long wall reads as one surface instead of a row of copies.
     textureTiling: float
+    # Frame rate of a layered skin; zero uses the rate painted into the flipbook.
+    textureFps: float
     # The model file worn here, as the path it was asked for. Assign a `.glb` and the
     # file's own nodes come in as children of this one - a whole vehicle, with every
     # turret, door and seat still a node of its own, named what the file named it -
@@ -248,6 +274,8 @@ class Entity:
     # Metres of the actor's body one tile of its skin covers, as on `Object`; `0` lays
     # one whole picture across each face.
     textureTiling: float
+    # Frame rate of a layered skin; zero uses the rate painted into the flipbook.
+    textureFps: float
     # The `.glb` this actor's body wears. Its nodes come in as children of the actor,
     # named what the file names them, so an imported rig is still a set of parts a
     # script can reach; None takes them off. Same rules as `Object.model`.
@@ -658,8 +686,8 @@ class Sound:
     children: list[Object | Entity | Particle | Terrain | Sound | Video]
     def addChild(self, child: Object | Entity | Particle | Terrain | Sound | Video) -> None: ...
     def removeChild(self, child: Object | Entity | Particle | Terrain | Sound | Video) -> None: ...
-    # Meters from the scene origin. The mixer does not pan yet, so this is the place a
-    # sound will be heard from once it does.
+    # Meters from the scene origin. With `spatial` on, this is where the voice is
+    # heard from relative to the camera.
     position: Vec3
     rotation: Quat
     rotationEuler: Vec3
@@ -669,18 +697,24 @@ class Sound:
     # How loud the node is, from 0 (silent) to 1 (full). A number outside that is held
     # at the edge.
     volume: float
-    # Whether the clip starts again when it reaches the end.
+    # Whether the clip starts again when it reaches the end. `loop` is the short
+    # alias: `sound.loop = True` keeps it going, False plays it once per `play()`.
     looping: bool
+    loop: bool
     # Whether the node has been asked to play. A non-looping clip that has finished
     # reads False; a looping one keeps reading True until `stop()`.
     playing: bool
-    # Seconds into the clip as of the last step or frame.
-    @property
-    def time(self) -> float: ...
+    # Whether the voice is panned around the camera and faded with distance.
+    spatial: bool
+    # Seconds into the clip as of the last step or frame. Writing it seeks the voice;
+    # a stopped sound starts from there on the next `play()`.
+    time: float
     # How long the file runs, in seconds.
     @property
     def duration(self) -> float: ...
-    # Loads the source and starts it from the beginning. Raises ValueError when no
+    # Moves the playhead without stopping the voice.
+    def seek(self, seconds: float) -> None: ...
+    # Loads the source and starts it at the current playhead. Raises ValueError when no
     # source is set, the file is not there, or it is not a readable `.wav`/`.mp3`.
     def play(self) -> None: ...
     # Silences the node and puts its playhead back at the start.
@@ -716,13 +750,17 @@ class Video:
     source: str | None
     # The sound track's volume, from 0 to 1.
     volume: float
-    # Whether the film starts again when it reaches the end.
+    # Whether the film starts again when it reaches the end. `loop` is its short
+    # alias; False shows the film once per `play()`.
     looping: bool
+    loop: bool
     # Whether the film is running. A finished film reads False.
     playing: bool
-    # Seconds into the film, as of the last step or frame.
-    @property
-    def time(self) -> float: ...
+    # Whether the film's sound is panned around the camera and faded with distance.
+    spatial: bool
+    # Seconds into the film. Writing it seeks the decoder and the sound together;
+    # a stopped film starts there on the next `play()`.
+    time: float
     # How long the film runs, in seconds. Zero until it has been started.
     @property
     def duration(self) -> float: ...
@@ -733,8 +771,11 @@ class Video:
     def height(self) -> int: ...
     @property
     def fps(self) -> float: ...
-    # Probes the film and starts the picture and its sound. Raises ValueError when no
-    # source is set, the file is not there, or ffmpeg/ffprobe cannot read it.
+    # Moves the picture and its sound to a new place without stopping.
+    def seek(self, seconds: float) -> None: ...
+    # Probes the film and starts the picture and its sound at the current playhead.
+    # Raises ValueError when no source is set, the file is not there, or
+    # ffmpeg/ffprobe cannot read it.
     def play(self) -> None: ...
     # Stops the picture and the sound and puts the playhead back at the start.
     def stop(self) -> None: ...
@@ -775,6 +816,12 @@ class Terrain:
     # The dice the hills were rolled from. Writing a new one lays the map that seed
     # names. A word is as good as a number.
     seed: int | str
+    # The country the ground lays: "meadow", "forest", "desert" or "alpine". Writing
+    # a new one lays the hills again and regrows the stand. `mapBiomes()` is the list.
+    biome: str
+    # How many seeded trees grow on the map. Writing a new count regrows only the
+    # generated stand; anything a script hung on the map stays where it was.
+    treeCount: int
     # Ground colour accepts Vec3, RGB tuples, named colours or hex strings.
     color: Vec3 | str
     @property
@@ -785,6 +832,8 @@ class Terrain:
     # Metres one tile of the skin covers. 1.0 lays a tile every metre; 0 smears the
     # picture once across the whole map.
     textureTiling: float
+    # Frame rate of a layered skin; zero uses the rate painted into the flipbook.
+    textureFps: float
     # Opacity from 0 (invisible) to 255 (opaque).
     transparent: float
     # Whether the ground is drawn at all. Hidden, it still holds its floor: a walker
@@ -850,6 +899,23 @@ class Procedural:
         seed: int | str | None = None,
         out: str | os.PathLike[str] | None = None,
     ) -> str: ...
+    # Paints a surface into an animated `.ktx2`. Each `frames` is its own seeded
+    # take on the same recipe, stored as a layer with a full mip chain; `fps` is
+    # written into the file so a skin pointed at it loops without a script.
+    # `frames` is 8 and `fps` is 8 left alone; two to sixty-four frames are allowed.
+    # The other knobs and `out` follow `texture()`.
+    def flipbook(
+        self,
+        surface: str,
+        *,
+        frames: int | None = None,
+        fps: float | None = None,
+        variation: str | None = None,
+        quality: str | None = None,
+        seed: int | str | None = None,
+        out: str | os.PathLike[str] | None = None,
+    ) -> str: ...
+
     # The surfaces the generator paints.
     def textureTypes(self) -> list[str]: ...
     # The ways one surface can be ruined, which is what a `variation` may be named for
@@ -871,6 +937,9 @@ class Procedural:
     # and is not a body the solver shoves. Skin it like any object -
     # `ground.texture = carbine.procedural.texture("grass")` - and the tile is laid by
     # the metre across it. A quality the engine does not recognise raises ValueError.
+    # `biome` is the country the ground lays - `mapBiomes()` names them - and
+    # `trees` is how many seeded trees grow on it. Left alone the count is what that
+    # biome plants by default: a few on a meadow, a stand in a forest, none in a desert.
     def map(
         self,
         *,
@@ -880,16 +949,37 @@ class Procedural:
         relief: float | None = None,
         quality: str | None = None,
         seed: int | str | None = None,
+        biome: str | None = None,
+        trees: int | None = None,
     ) -> Terrain: ...
+    # Raises a building: floors, walls, windows and a roof hanging under one root as
+    # ordinary nodes, all rolled from `seed` before the first piece is laid. `style`
+    # is one of `buildingStyles()`; `floors`, `width` and `depth` are storeys and metres.
+    def building(
+        self,
+        *,
+        name: str | None = None,
+        parent: Object | Entity | Particle | Terrain | Sound | Video | None = None,
+        position: Vec3 | tuple[float, float, float] | None = None,
+        floors: int | None = None,
+        width: float | None = None,
+        depth: float | None = None,
+        style: str | None = None,
+        seed: int | str | None = None,
+    ) -> Object: ...
+    # The silhouettes a building can be raised as.
+    def buildingStyles(self) -> list[str]: ...
+
     # The qualities a map's `quality` takes, from the coarsest grid to the finest.
     def mapQualities(self) -> list[str]: ...
+    # The countries a map can lay, from the gentlest to the steepest.
+    def mapBiomes(self) -> list[str]: ...
 
 class Packager:
-    """The importer, `carbine.packager`. Carbine loads one format per class of
-    thing — images are `.ktx2`, objects `.glb`, audio `.ogg` — so the engine carries
-    one small loader each instead of forty decoders. This turns an authored file into
-    the format the engine reads; Enginebay does the same work when a file is dropped
-    into a project, and a script can do it in real time."""
+    """The importer, `carbine.packager`. Carbine reads images as `.ktx2` and objects
+    as `.glb`; audio (`.wav`/`.mp3`) and video (`.mp4`) go straight to a node. This
+    turns an authored picture or model into the one format the engine reads; Enginebay
+    does the same work when a file is dropped into a project."""
 
     # Converts a picture to `.ktx2` — BC7 blocks with a full mip chain, the bytes a
     # GPU reads without decoding — and returns the path it wrote. Left alone the file
@@ -901,6 +991,15 @@ class Packager:
     # ValueError, and a folder it cannot make raises OSError. A `pathlib.Path` is as
     # good as a string for either name.
     def image(
+        self, path: str | os.PathLike[str], *, out: str | os.PathLike[str] | None = None
+    ) -> str: ...
+
+    # Converts an authored `.obj` or `.stl` to `.glb`, answering with the path it
+    # wrote; the same `out` rules as `image()` apply. Hand the answer to `obj.model`:
+    # the file's nodes arrive as children, with their transforms and flat colours.
+    # Skins, animation and morph targets have nowhere to live in a Carbine GLB.
+    # Anything else raises ValueError; an unwriteable target raises OSError.
+    def model(
         self, path: str | os.PathLike[str], *, out: str | os.PathLike[str] | None = None
     ) -> str: ...
 

@@ -16,6 +16,10 @@ struct Voice {
     /// Position in the clip's frames, fractional so resampling stays smooth.
     cursor: f64,
     volume: f32,
+    /// -1 hard left, 0 centred, 1 hard right. Only stereo output reads it.
+    pan: f32,
+    /// Distance attenuation applied on top of the script's volume.
+    gain: f32,
     looping: bool,
     playing: bool,
     finished: bool,
@@ -57,17 +61,80 @@ impl Mixer {
     /// Starts a voice, replacing any voice already on that node. Playback begins at
     /// the start of the clip.
     pub fn start(&mut self, node: u64, clip: Clip, volume: f32, looping: bool) {
+        self.start_at(node, clip, volume, looping, 0.0);
+    }
+
+    /// Starts a voice at a playhead, which is what a seek-then-play or a film's
+    /// audio track needs. The cursor is held inside the clip.
+    pub fn start_at(&mut self, node: u64, clip: Clip, volume: f32, looping: bool, seconds: f32) {
+        let frames = clip.frames() as f64;
+        let cursor = if seconds.is_finite() && frames > 0.0 {
+            (seconds.max(0.0) as f64 * clip.sample_rate() as f64).min(frames)
+        } else {
+            0.0
+        };
         self.voices.insert(
             node,
             Voice {
                 clip,
-                cursor: 0.0,
+                cursor,
                 volume: sane_volume(volume),
+                pan: 0.0,
+                gain: 1.0,
                 looping,
-                playing: true,
-                finished: false,
+                playing: frames > 0.0 && cursor < frames,
+                finished: frames == 0.0 || cursor >= frames,
             },
         );
+    }
+
+    /// Moves a live voice to a new playhead without reloading its clip.
+    pub fn seek(&mut self, node: u64, seconds: f32) -> bool {
+        let Some(voice) = self.voices.get_mut(&node) else {
+            return false;
+        };
+        let frames = voice.clip.frames() as f64;
+        if frames == 0.0 {
+            voice.finished = true;
+            voice.playing = false;
+            return true;
+        }
+        voice.cursor = if seconds.is_finite() {
+            (seconds.max(0.0) as f64 * voice.clip.sample_rate() as f64).min(frames)
+        } else {
+            0.0
+        };
+        voice.finished = voice.cursor >= frames;
+        voice.playing = !voice.finished;
+        true
+    }
+
+    pub fn set_pan(&mut self, node: u64, pan: f32) -> bool {
+        match self.voices.get_mut(&node) {
+            Some(voice) => {
+                voice.pan = if pan.is_finite() {
+                    pan.clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                };
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn set_gain(&mut self, node: u64, gain: f32) -> bool {
+        match self.voices.get_mut(&node) {
+            Some(voice) => {
+                voice.gain = if gain.is_finite() {
+                    gain.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                true
+            }
+            None => false,
+        }
     }
 
     /// Stops and forgets one voice. Returns whether there was one.
@@ -186,7 +253,9 @@ impl Mixer {
                         output_channels,
                         clip_channels,
                     );
-                    output[frame * output_channels + channel] += sample * voice.volume;
+                    let level = sane_volume(voice.volume) * voice.gain;
+                    output[frame * output_channels + channel] +=
+                        sample * level * channel_gain(channel, output_channels, voice.pan);
                 }
 
                 voice.cursor += step;
@@ -225,6 +294,19 @@ impl Mixer {
                 }
             }
         }
+    }
+}
+
+/// Stereo balance without losing level at the centre: the two gains add to one.
+/// A mono device ignores pan, which is all it can do.
+fn channel_gain(channel: usize, output_channels: usize, pan: f32) -> f32 {
+    if output_channels < 2 {
+        return 1.0;
+    }
+    if channel == 0 {
+        (1.0 - pan).clamp(0.0, 1.0)
+    } else {
+        (1.0 + pan).clamp(0.0, 1.0)
     }
 }
 
@@ -347,6 +429,45 @@ mod tests {
         mixer.advance(0.25);
 
         assert!((mixer.position(9).unwrap() - 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_voice_can_be_seeked_without_reloading() {
+        let mut mixer = Mixer::new(48_000, 1);
+        mixer.start(1, tone(48_000, 1, 48_000, 0.5), 1.0, false);
+        assert!(mixer.seek(1, 0.25));
+        assert!((mixer.position(1).unwrap() - 0.25).abs() < 1e-5);
+        assert!(mixer.seek(1, 100.0));
+        assert!(mixer.is_finished(1));
+        assert!(!mixer.seek(2, 1.0));
+    }
+
+    #[test]
+    fn panning_moves_a_mono_voice_between_the_speakers() {
+        let mut mixer = Mixer::new(48_000, 2);
+        mixer.start(1, tone(4, 1, 48_000, 1.0), 1.0, false);
+        let mut output = [0.0f32; 2];
+        mixer.set_pan(1, -1.0);
+        mixer.mix(&mut output);
+        assert_eq!(output, [1.0, 0.0]);
+
+        mixer.set_pan(1, 1.0);
+        mixer.mix(&mut output);
+        assert_eq!(output, [0.0, 1.0]);
+
+        mixer.set_pan(1, 0.0);
+        mixer.mix(&mut output);
+        assert_eq!(output, [1.0, 1.0]);
+    }
+
+    #[test]
+    fn distance_gain_fades_a_voice_without_changing_its_volume() {
+        let mut mixer = Mixer::new(48_000, 1);
+        mixer.start(1, tone(4, 1, 48_000, 1.0), 1.0, false);
+        mixer.set_gain(1, 0.25);
+        let mut output = [0.0f32; 1];
+        mixer.mix(&mut output);
+        assert!((output[0] - 0.25).abs() < 1e-6);
     }
 
     #[test]

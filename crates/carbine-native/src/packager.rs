@@ -1,10 +1,11 @@
 //! The Packager: `carbine.packager`.
 //!
-//! One format per class of thing — `.glb` for objects, `.ogg` for audio, `.ktx2` for
-//! images — so the engine carries one loader each instead of forty. This is the same
-//! conversion Enginebay runs when a file is dropped into a project folder, reachable
-//! from a script: pack a picture on the way in and hand the path it returns straight to
-//! `obj.texture`.
+//! One format per class of thing — `.glb` for objects, `.ktx2` for images — so the
+//! engine carries one loader each instead of forty. Audio and video are read directly
+//! and have no converter. This is the same conversion Enginebay runs when a file is
+//! dropped into a project folder, reachable from a script: pack a picture on the way in
+//! and hand the path it returns straight to `obj.texture`, or pack an OBJ/STL for
+//! `obj.model`.
 //!
 //! Everything happens in Rust. This class forwards a path and turns the answer, or the
 //! refusal, into a Python value.
@@ -38,8 +39,19 @@ impl PyPackager {
         Ok(written.display().to_string())
     }
 
+    /// Converts an authored `.obj` or `.stl` to `.glb`, the one model format the
+    /// engine reads, and returns the path it wrote. The destination follows the same
+    /// rules as `image()`. Hand the answer straight to `obj.model`; the file's nodes
+    /// arrive as children. Flat colours survive; skins and animation do not.
+    /// Anything but OBJ/STL raises `ValueError`, an unwriteable target `OSError`.
+    #[pyo3(signature = (path, *, out = None))]
+    fn model(&self, path: PathBuf, out: Option<PathBuf>) -> PyResult<String> {
+        let written = carbine_pack::model(&path, out.as_deref()).map_err(pack_error)?;
+        Ok(written.display().to_string())
+    }
+
     fn __repr__(&self) -> PyResult<String> {
-        Ok("<Packager images to .ktx2>".to_owned())
+        Ok("<Packager images to .ktx2, models to .glb>".to_owned())
     }
 }
 

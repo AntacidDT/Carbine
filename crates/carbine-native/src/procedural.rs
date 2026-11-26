@@ -25,7 +25,7 @@ use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
-use carbine_core::{NodeId, SceneError, Seed, TerrainQuality, VecField};
+use carbine_core::{Biome, BuildingStyle, NodeId, SceneError, Seed, TerrainQuality, VecField};
 
 use crate::math::{PyQuat, PyVec3, extract_vec3};
 use crate::node_id_of;
@@ -194,6 +194,42 @@ impl PyProcedural {
     }
 
     /// The surfaces the generator paints.
+    /// Paints a surface into an animated `.ktx2`: each frame is its own seeded take
+    /// on the same recipe, laid down as a layer with its own mip chain. The frame
+    /// rate is written into the file, so a skin pointed at it loops without a script
+    /// doing the timing. `frames` is 8 and `fps` is 8 left alone.
+    #[pyo3(name = "flipbook")]
+    #[pyo3(signature = (surface, *, frames=None, fps=None, variation=None, quality=None,
+                        seed=None, out=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn create_flipbook(
+        &self,
+        surface: &str,
+        frames: Option<usize>,
+        fps: Option<f64>,
+        variation: Option<&str>,
+        quality: Option<&str>,
+        seed: Option<Bound<'_, PyAny>>,
+        out: Option<PathBuf>,
+    ) -> PyResult<String> {
+        let seed = seed
+            .as_ref()
+            .map(wanted_seed)
+            .transpose()?
+            .unwrap_or_default();
+        let written = carbine_core::save_flipbook(
+            surface,
+            variation,
+            quality,
+            seed,
+            frames.unwrap_or(8),
+            fps.unwrap_or(8.0) as f32,
+            out.as_deref(),
+        )
+        .map_err(paint_error)?;
+        Ok(written.display().to_string())
+    }
+
     #[pyo3(name = "textureTypes")]
     fn texture_types(&self) -> Vec<&'static str> {
         carbine_core::TextureType::NAMES.to_vec()
@@ -232,7 +268,8 @@ impl PyProcedural {
     /// and the tile is laid by the metre across it.
     #[pyo3(name = "map")]
     #[pyo3(signature = (*, name=None, parent=None, size=None, relief=None, quality=None,
-                        seed=None))]
+                        seed=None, biome=None, trees=None))]
+    #[allow(clippy::too_many_arguments)]
     fn create_map(
         &self,
         name: Option<String>,
@@ -241,6 +278,8 @@ impl PyProcedural {
         relief: Option<f64>,
         quality: Option<&str>,
         seed: Option<Bound<'_, PyAny>>,
+        biome: Option<&str>,
+        trees: Option<usize>,
     ) -> PyResult<Terrain> {
         let parent = parent.as_ref().map(node_id_of).transpose()?;
         let size = size
@@ -263,9 +302,19 @@ impl PyProcedural {
             .map(wanted_seed)
             .transpose()?
             .unwrap_or_default();
+        let biome = match biome {
+            Some(name) => Biome::from_name(name).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unknown biome \"{name}\" (available: {})",
+                    Biome::NAMES.join(", ")
+                ))
+            })?,
+            None => Biome::default(),
+        };
+        let trees = trees.unwrap_or_else(|| biome.trees());
 
         let id = with_scene(|scene| {
-            scene.create_terrain_with(name, parent, size, relief, quality, seed)
+            scene.create_terrain_full(name, parent, size, relief, quality, seed, biome, trees)
         })?;
         Ok(Terrain::from_id(id))
     }
@@ -274,6 +323,73 @@ impl PyProcedural {
     #[pyo3(name = "mapQualities")]
     fn map_qualities(&self) -> Vec<&'static str> {
         TerrainQuality::NAMES.to_vec()
+    }
+
+    /// The countries a map can lay, from the gentlest to the steepest.
+    #[pyo3(name = "mapBiomes")]
+    fn map_biomes(&self) -> Vec<&'static str> {
+        Biome::NAMES.to_vec()
+    }
+
+    /// Raises a building: a root node with a floor, four walls, a couple of windows
+    /// per storey and a roof, all hanging as ordinary nodes a script can move or skin.
+    /// Everything is rolled from `seed` before the first piece is laid, so the same
+    /// word raises the same building for anybody. `style` is one of
+    /// `buildingStyles()`; `floors`, `width` and `depth` are in metres and storeys.
+    #[pyo3(name = "building")]
+    #[pyo3(signature = (*, name=None, parent=None, position=None, floors=None,
+                        width=None, depth=None, style=None, seed=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn create_building(
+        &self,
+        name: Option<String>,
+        parent: Option<Bound<'_, PyAny>>,
+        position: Option<Bound<'_, PyAny>>,
+        floors: Option<usize>,
+        width: Option<f64>,
+        depth: Option<f64>,
+        style: Option<&str>,
+        seed: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<crate::object::Object> {
+        let parent = parent.as_ref().map(node_id_of).transpose()?;
+        let position = position
+            .as_ref()
+            .map(extract_vec3)
+            .transpose()?
+            .unwrap_or_default();
+        let style = match style {
+            Some(name) => BuildingStyle::from_name(name).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unknown building style \"{name}\" (available: {})",
+                    BuildingStyle::NAMES.join(", ")
+                ))
+            })?,
+            None => BuildingStyle::House,
+        };
+        let seed = seed
+            .as_ref()
+            .map(wanted_seed)
+            .transpose()?
+            .unwrap_or_default();
+        let id = with_scene(|scene| {
+            scene.create_building(
+                name,
+                parent,
+                position,
+                floors.unwrap_or(2),
+                width.unwrap_or(8.0) as f32,
+                depth.unwrap_or(6.0) as f32,
+                style,
+                seed,
+            )
+        })?;
+        Ok(crate::object::Object::from_id(id))
+    }
+
+    /// The silhouettes a building can be raised as.
+    #[pyo3(name = "buildingStyles")]
+    fn building_styles(&self) -> Vec<&'static str> {
+        BuildingStyle::NAMES.to_vec()
     }
 
     fn __repr__(&self) -> &'static str {
@@ -290,7 +406,8 @@ fn paint_error(error: carbine_core::TextureError) -> PyErr {
         carbine_core::TextureError::Type { .. }
         | carbine_core::TextureError::Variation { .. }
         | carbine_core::TextureError::Quality { .. }
-        | carbine_core::TextureError::Encoder { .. } => PyValueError::new_err(error.to_string()),
+        | carbine_core::TextureError::Encoder { .. }
+        | carbine_core::TextureError::Animation { .. } => PyValueError::new_err(error.to_string()),
     }
 }
 
@@ -888,6 +1005,38 @@ impl Terrain {
         with_scene(|scene| scene.set_terrain_seed(self.id, seed))
     }
 
+    /// The country this map lays: "meadow", "forest", "desert" or "alpine".
+    #[getter]
+    fn biome(&self) -> PyResult<String> {
+        Ok(self
+            .read(|scene| scene.terrain_biome(self.id))?
+            .name()
+            .to_owned())
+    }
+
+    #[setter]
+    fn set_biome(&self, name: &str) -> PyResult<()> {
+        let biome = Biome::from_name(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unknown biome \"{name}\" (available: {})",
+                Biome::NAMES.join(", ")
+            ))
+        })?;
+        with_scene(|scene| scene.set_terrain_biome(self.id, biome))
+    }
+
+    /// How many seeded trees grow on the map. The stand is regenerated when this
+    /// changes; anything a script hung on the map stays where it was.
+    #[getter(treeCount)]
+    fn tree_count(&self) -> PyResult<usize> {
+        self.read(|scene| scene.terrain_tree_count(self.id))
+    }
+
+    #[setter(treeCount)]
+    fn set_tree_count(&self, count: usize) -> PyResult<()> {
+        with_scene(|scene| scene.set_terrain_tree_count(self.id, count))
+    }
+
     /// The colour the ground is painted, from a `Vec3`, a three tuple, a named colour
     /// or a hex string such as `"#eb7a34"`.
     #[getter]
@@ -929,6 +1078,16 @@ impl Terrain {
     #[setter(textureTiling)]
     fn set_texture_tiling(&self, value: f64) -> PyResult<()> {
         set_tiling_on(self.id, value as f32)
+    }
+
+    #[getter(textureFps)]
+    fn texture_fps(&self) -> PyResult<f32> {
+        crate::object::texture_fps_of(self.id)
+    }
+
+    #[setter(textureFps)]
+    fn set_texture_fps(&self, value: f64) -> PyResult<()> {
+        crate::object::set_texture_fps_on(self.id, value as f32)
     }
 
     /// Opacity from 0 (invisible) to 255 (opaque).

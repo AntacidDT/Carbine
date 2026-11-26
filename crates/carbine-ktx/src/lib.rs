@@ -88,6 +88,44 @@ pub fn is_ktx2(bytes: &[u8]) -> bool {
 /// `srgb` marks the texels as display-encoded, which is what an authored picture or a
 /// decal is; data textures that the script does arithmetic on want `false`.
 pub fn pack(width: u32, height: u32, rgba8: &[u8], srgb: bool) -> Result<Vec<u8>, Error> {
+    let chain = mip_chain(width, height, rgba8)?;
+    Ok(assemble(width, height, srgb, &[chain], 0, None))
+}
+
+/// Compress several pictures into one KTX2 file as a flipbook: the array's layers are
+/// the frames, each with its own mip chain, and `fps` travels in the key/value data so
+/// a file plays at the rate it was painted for without a sidecar.
+pub fn pack_flipbook(
+    width: u32,
+    height: u32,
+    frames: &[&[u8]],
+    srgb: bool,
+    fps: f32,
+) -> Result<Vec<u8>, Error> {
+    if frames.is_empty() {
+        return Err(Error::Unsupported("a flipbook with no frames".into()));
+    }
+    if !fps.is_finite() || fps <= 0.0 {
+        return Err(Error::Unsupported(
+            "a frame rate that is not positive".into(),
+        ));
+    }
+    let mut chain = Vec::with_capacity(frames.len());
+    for pixels in frames {
+        chain.push(mip_chain(width, height, pixels)?);
+    }
+    Ok(assemble(
+        width,
+        height,
+        srgb,
+        &chain,
+        frames.len() as u32,
+        Some(fps),
+    ))
+}
+
+/// One level-0 BC7 chain of a square or rectangular picture, biggest level first.
+fn mip_chain(width: u32, height: u32, rgba8: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
     if width == 0 || height == 0 {
         return Err(Error::Unsupported("an image with no pixels".into()));
     }
@@ -119,36 +157,63 @@ pub fn pack(width: u32, height: u32, rgba8: &[u8], srgb: bool) -> Result<Vec<u8>
             size = ((size.0 / 2).max(1), (size.1 / 2).max(1));
         }
     }
+    Ok(chain)
+}
 
-    let index_end = HEADER + levels as usize * LEVEL_INDEX;
+/// Lay the chains out frame by frame, level by level, and write the index each frame
+/// needs. A still file writes one layer, which is what the old loader expects.
+fn assemble(
+    width: u32,
+    height: u32,
+    srgb: bool,
+    frames: &[Vec<Vec<u8>>],
+    layers: u32,
+    fps: Option<f32>,
+) -> Vec<u8> {
+    let levels = frames[0].len();
+    let entries = levels * frames.len().max(1);
+    let index_end = HEADER + entries * LEVEL_INDEX;
+    let dfd_at = index_end;
+    let kvd = fps.map(fps_kvd).unwrap_or_default();
     // The spec puts level 0 on a whole-block boundary; every level after it is already a
     // whole number of blocks, so aligning the start aligns the whole chain.
-    let data_start = (index_end + DFD).div_ceil(16) * 16;
-    let total = data_start + chain.iter().map(|level| level.len()).sum::<usize>();
+    let data_start = (index_end + DFD + kvd.len()).div_ceil(16) * 16;
+    let total = data_start
+        + frames
+            .iter()
+            .flat_map(|chain| chain.iter())
+            .map(|blocks| blocks.len())
+            .sum::<usize>();
 
     let mut bytes = vec![0u8; total];
-    write_header(&mut bytes, width, height, levels, srgb, index_end);
-    bytes[index_end..index_end + DFD].copy_from_slice(&descriptor(srgb));
+    write_header(
+        &mut bytes,
+        width,
+        height,
+        levels as u32,
+        layers,
+        srgb,
+        dfd_at,
+        kvd.len(),
+    );
+    bytes[dfd_at..dfd_at + DFD].copy_from_slice(&descriptor(srgb));
+    let kvd_at = dfd_at + DFD;
+    bytes[kvd_at..kvd_at + kvd.len()].copy_from_slice(&kvd);
 
     let mut at = data_start;
-    for (level, blocks) in chain.iter().enumerate() {
-        bytes[at..at + blocks.len()].copy_from_slice(blocks);
-        put64(&mut bytes, HEADER + level * LEVEL_INDEX, at as u64);
-        put64(
-            &mut bytes,
-            HEADER + level * LEVEL_INDEX + 8,
-            blocks.len() as u64,
-        );
-        // No supercompression, so the stored length is the length on the GPU.
-        put64(
-            &mut bytes,
-            HEADER + level * LEVEL_INDEX + 16,
-            blocks.len() as u64,
-        );
-        at += blocks.len();
+    for (frame, chain) in frames.iter().enumerate() {
+        for (level, blocks) in chain.iter().enumerate() {
+            bytes[at..at + blocks.len()].copy_from_slice(blocks);
+            let entry = HEADER + (frame * levels + level) * LEVEL_INDEX;
+            put64(&mut bytes, entry, at as u64);
+            put64(&mut bytes, entry + 8, blocks.len() as u64);
+            // No supercompression, so the stored length is the length on the GPU.
+            put64(&mut bytes, entry + 16, blocks.len() as u64);
+            at += blocks.len();
+        }
     }
 
-    Ok(bytes)
+    bytes
 }
 
 /// The next mip down: a 2x2 box average, rounding a cut-off edge up to keep every texel.
@@ -189,19 +254,61 @@ fn encoder_error(why: rusty_dds::Error) -> Error {
     Error::Encoder(why.to_string())
 }
 
-fn write_header(bytes: &mut [u8], width: u32, height: u32, levels: u32, srgb: bool, dfd_at: usize) {
+#[allow(clippy::too_many_arguments)]
+fn write_header(
+    bytes: &mut [u8],
+    width: u32,
+    height: u32,
+    levels: u32,
+    layers: u32,
+    srgb: bool,
+    dfd_at: usize,
+    kvd_len: usize,
+) {
     bytes[..MAGIC.len()].copy_from_slice(&MAGIC);
     put32(bytes, 12, if srgb { VK_BC7_SRGB } else { VK_BC7_UNORM });
     put32(bytes, 16, 1);
     put32(bytes, 20, width);
     put32(bytes, 24, height);
     put32(bytes, 28, 0);
-    put32(bytes, 32, 0);
+    put32(bytes, 32, layers);
     put32(bytes, 36, 1);
     put32(bytes, 40, levels);
     put32(bytes, 44, 0);
     put32(bytes, 48, dfd_at as u32);
     put32(bytes, 52, DFD as u32);
+    put32(bytes, 56, (dfd_at + DFD) as u32);
+    put32(bytes, 60, kvd_len as u32);
+}
+
+/// A KTX2 key/value entry: the byte length of key and value, the null-ended key, then
+/// the value. `carbine.fps` is the one key this writer uses.
+fn fps_kvd(fps: f32) -> Vec<u8> {
+    let key = b"carbine.fps\0";
+    let value = fps.to_string();
+    let mut bytes = Vec::with_capacity(4 + key.len() + value.len());
+    bytes.extend_from_slice(&((key.len() + value.len()) as u32).to_le_bytes());
+    bytes.extend_from_slice(key);
+    bytes.extend_from_slice(value.as_bytes());
+    bytes
+}
+
+fn read_fps(kvd: &[u8]) -> Option<f32> {
+    let mut at = 0;
+    while at + 4 <= kvd.len() {
+        let length = u32::from_le_bytes(kvd[at..at + 4].try_into().unwrap()) as usize;
+        at += 4;
+        if length > kvd.len() - at {
+            return None;
+        }
+        let entry = &kvd[at..at + length];
+        at += length;
+        let split = entry.iter().position(|byte| *byte == 0)?;
+        if &entry[..split] == b"carbine.fps" {
+            return std::str::from_utf8(&entry[split + 1..]).ok()?.parse().ok();
+        }
+    }
+    None
 }
 
 /// The one descriptor shape Carbine writes: BC7, 4x4 blocks of 16 bytes, straight alpha.
@@ -231,7 +338,21 @@ pub struct Texture<'a> {
     width: u32,
     height: u32,
     srgb: bool,
+    fps: Option<f32>,
+    frames: Vec<Frame<'a>>,
+}
+
+/// One layer of a flipbook: a full mip chain of one picture.
+#[derive(Debug)]
+pub struct Frame<'a> {
     levels: Vec<Level<'a>>,
+}
+
+impl<'a> Frame<'a> {
+    /// The mip chain of this frame, biggest level first.
+    pub fn levels(&self) -> &[Level<'a>] {
+        &self.levels
+    }
 }
 
 /// One mip level, still in BC7 blocks.
@@ -256,9 +377,24 @@ impl<'a> Texture<'a> {
         self.srgb
     }
 
-    /// The stored chain, biggest level first.
+    /// The stored chain of the first frame, biggest level first. A still image has
+    /// exactly this one chain.
     pub fn levels(&self) -> &[Level<'a>] {
-        &self.levels
+        &self.frames[0].levels
+    }
+
+    /// How many frames this file holds. One means a still image.
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    pub fn frame(&self, index: usize) -> Option<&Frame<'a>> {
+        self.frames.get(index)
+    }
+
+    /// The frame rate painted into the file, if it has one.
+    pub fn fps(&self) -> Option<f32> {
+        self.fps
     }
 }
 
@@ -294,12 +430,10 @@ pub fn read(bytes: &[u8]) -> Result<Texture<'_>, Error> {
     if get32(bytes, 28) > 1 {
         return Err(Error::Unsupported("a 3D texture".into()));
     }
-    if get32(bytes, 32) > 1 {
-        return Err(Error::Unsupported("an array of textures".into()));
-    }
     if get32(bytes, 36) != 1 {
         return Err(Error::Unsupported("a cubemap".into()));
     }
+    let layers = get32(bytes, 32).max(1);
     let levels = get32(bytes, 40);
     if levels == 0 {
         return Err(Error::Unsupported(
@@ -315,7 +449,7 @@ pub fn read(bytes: &[u8]) -> Result<Texture<'_>, Error> {
         return Err(Error::Unsupported("supercompression global data".into()));
     }
 
-    let index_end = HEADER + levels as usize * LEVEL_INDEX;
+    let index_end = HEADER + levels as usize * layers as usize * LEVEL_INDEX;
     let dfd_at = get32(bytes, 48) as usize;
     let dfd_end = dfd_at + get32(bytes, 52) as usize;
     if index_end > dfd_at || dfd_end > bytes.len() {
@@ -325,52 +459,59 @@ pub fn read(bytes: &[u8]) -> Result<Texture<'_>, Error> {
     }
     read_descriptor(&bytes[dfd_at..dfd_end], srgb)?;
 
-    let kvd_end = get32(bytes, 56) as usize + get32(bytes, 60) as usize;
-    if kvd_end > bytes.len() {
+    let kvd_at = get32(bytes, 56) as usize;
+    let kvd_end = kvd_at + get32(bytes, 60) as usize;
+    if kvd_end > bytes.len() || kvd_at < dfd_end {
         return Err(Error::Unsupported(
             "its key/value data runs off the end of the file".into(),
         ));
     }
+    let fps = read_fps(&bytes[kvd_at..kvd_end]);
 
-    let mut chain = Vec::with_capacity(levels as usize);
-    let (mut width_at_level, mut height_at_level) = (width, height);
-    for level in 0..levels {
-        let at = HEADER + level as usize * LEVEL_INDEX;
-        let offset = get64(bytes, at) as usize;
-        let length = get64(bytes, at + 8) as usize;
-        if get64(bytes, at + 16) as usize != length {
-            return Err(Error::Unsupported(format!(
-                "level {level} claims a different size once uncompressed"
-            )));
-        }
-        let expected = level_bytes(width_at_level, height_at_level);
-        if length != expected {
-            return Err(Error::WrongLevelSize {
-                level,
-                expected,
-                found: length,
+    let mut frames = Vec::with_capacity(layers as usize);
+    for frame in 0..layers {
+        let mut chain = Vec::with_capacity(levels as usize);
+        let (mut width_at_level, mut height_at_level) = (width, height);
+        for level in 0..levels {
+            let at = HEADER + (frame as usize * levels as usize + level as usize) * LEVEL_INDEX;
+            let offset = get64(bytes, at) as usize;
+            let length = get64(bytes, at + 8) as usize;
+            if get64(bytes, at + 16) as usize != length {
+                return Err(Error::Unsupported(format!(
+                    "level {level} claims a different size once uncompressed"
+                )));
+            }
+            let expected = level_bytes(width_at_level, height_at_level);
+            if length != expected {
+                return Err(Error::WrongLevelSize {
+                    level,
+                    expected,
+                    found: length,
+                });
+            }
+            let end = offset
+                .checked_add(length)
+                .ok_or(Error::Truncated { level })?;
+            if end > bytes.len() {
+                return Err(Error::Truncated { level });
+            }
+            chain.push(Level {
+                width: width_at_level,
+                height: height_at_level,
+                bytes: &bytes[offset..end],
             });
+            width_at_level = (width_at_level / 2).max(1);
+            height_at_level = (height_at_level / 2).max(1);
         }
-        let end = offset
-            .checked_add(length)
-            .ok_or(Error::Truncated { level })?;
-        if end > bytes.len() {
-            return Err(Error::Truncated { level });
-        }
-        chain.push(Level {
-            width: width_at_level,
-            height: height_at_level,
-            bytes: &bytes[offset..end],
-        });
-        width_at_level = (width_at_level / 2).max(1);
-        height_at_level = (height_at_level / 2).max(1);
+        frames.push(Frame { levels: chain });
     }
 
     Ok(Texture {
         width,
         height,
         srgb,
-        levels: chain,
+        fps,
+        frames,
     })
 }
 
@@ -444,5 +585,27 @@ mod tests {
         assert_eq!(level_bytes(1, 1), 16);
         assert_eq!(level_bytes(5, 5), 64);
         assert_eq!(level_bytes(64, 64), 4096);
+    }
+    #[test]
+    fn a_flipbook_keeps_every_frame_and_its_rate() {
+        let first = vec![24u8; 16 * 16 * 4];
+        let second = vec![200u8; 16 * 16 * 4];
+        let bytes = pack_flipbook(16, 16, &[&first, &second], true, 12.5).unwrap();
+        let read = read(&bytes).unwrap();
+
+        assert_eq!(read.frame_count(), 2);
+        assert_eq!(read.fps(), Some(12.5));
+        assert_eq!(read.frame(0).unwrap().levels().len(), read.levels().len());
+        assert_ne!(
+            read.frame(0).unwrap().levels()[0].bytes,
+            read.frame(1).unwrap().levels()[0].bytes
+        );
+        assert!(read.frame(2).is_none());
+    }
+
+    #[test]
+    fn a_flipbook_needs_frames_and_a_rate() {
+        assert!(pack_flipbook(16, 16, &[], true, 8.0).is_err());
+        assert!(pack_flipbook(16, 16, &[&vec![0u8; 16 * 16 * 4]], true, 0.0).is_err());
     }
 }

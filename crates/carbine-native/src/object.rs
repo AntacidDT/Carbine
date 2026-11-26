@@ -72,6 +72,15 @@ pub(crate) fn set_tiling_on(id: NodeId, value: f32) -> PyResult<()> {
     with_scene(|scene| scene.set_tiling(id, value))
 }
 
+/// Frame rate of a layered skin. Zero leaves the rate painted into the file in charge.
+pub(crate) fn texture_fps_of(id: NodeId) -> PyResult<f32> {
+    with_scene(|scene| scene.texture_fps(id))
+}
+
+pub(crate) fn set_texture_fps_on(id: NodeId, value: f32) -> PyResult<()> {
+    with_scene(|scene| scene.set_texture_fps(id, value))
+}
+
 /// The model file a node wears, written back the way it was asked for. `None` is a
 /// node made of Carbine's own shapes.
 pub(crate) fn model_of(id: NodeId) -> PyResult<Option<String>> {
@@ -808,6 +817,18 @@ impl Object {
     #[setter(textureTiling)]
     fn set_texture_tiling(&self, value: f64) -> PyResult<()> {
         set_tiling_on(self.id, value as f32)
+    }
+
+    /// Frame rate of a layered skin, in frames per second. Zero uses the rate
+    /// painted into the file, so a flipbook animates without a script.
+    #[getter(textureFps)]
+    fn texture_fps(&self) -> PyResult<f32> {
+        texture_fps_of(self.id)
+    }
+
+    #[setter(textureFps)]
+    fn set_texture_fps(&self, value: f64) -> PyResult<()> {
+        set_texture_fps_on(self.id, value as f32)
     }
 
     /// The model this object wears, as the path it was asked for. Assign a `.glb`

@@ -24,6 +24,7 @@ pub(crate) struct Sound {
     pub(crate) source: Option<String>,
     pub(crate) volume: f32,
     pub(crate) looping: bool,
+    pub(crate) spatial: bool,
     pub(crate) playing: bool,
     /// Seconds into the clip as of the last step. The audio layer keeps it current.
     pub(crate) time: f32,
@@ -35,6 +36,7 @@ impl Default for Sound {
             source: None,
             volume: 1.0,
             looping: false,
+            spatial: false,
             playing: false,
             time: 0.0,
         }
@@ -49,6 +51,7 @@ pub struct SoundNode {
     pub source: Option<String>,
     pub volume: f32,
     pub looping: bool,
+    pub spatial: bool,
     pub playing: bool,
     pub time: f32,
 }
@@ -157,6 +160,19 @@ impl Scene {
     /// Whether a script has asked this node to play. The mixer may finish a
     /// non-looping clip and turn this back off; that write comes from the audio
     /// layer, not from a script.
+    /// Whether the voice is placed in the world: panned around the listener and
+    /// faded with distance. Off keeps the old centre-only playback.
+    pub fn sound_spatial(&self, id: NodeId) -> Result<bool, SceneError> {
+        Ok(self.sound(id)?.spatial)
+    }
+
+    pub fn set_sound_spatial(&mut self, id: NodeId, spatial: bool) -> Result<(), SceneError> {
+        self.spread(id, move |scene, member| {
+            scene.sound_mut(member)?.spatial = spatial;
+            Ok(())
+        })
+    }
+
     pub fn sound_playing(&self, id: NodeId) -> Result<bool, SceneError> {
         Ok(self.sound(id)?.playing)
     }
@@ -196,6 +212,7 @@ impl Scene {
                     source: sound.source.clone(),
                     volume: sound.volume,
                     looping: sound.looping,
+                    spatial: sound.spatial,
                     playing: sound.playing,
                     time: sound.time,
                 })

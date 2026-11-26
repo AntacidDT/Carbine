@@ -253,3 +253,52 @@ def test_destroy_takes_the_voice_with_it(quiet, tone):
     assert all(node.id != node_id for node in carbine.scene.root.children)
     with pytest.raises(carbine.DestroyedError):
         _ = sound.volume
+
+
+def test_loop_alias_and_stop(quiet, short):
+    sound = carbine.new("sound")
+    sound.source = short
+
+    assert sound.loop is False
+    sound.play()
+    carbine.step(0.2)
+    assert sound.playing is False, "loop=False plays once"
+
+    sound.loop = True
+    assert sound.looping is True
+    sound.loop = False
+    assert sound.looping is False
+
+    sound.loop = True
+    sound.play()
+    carbine.step(0.2)
+    assert sound.playing is True, "loop=True keeps going"
+
+    sound.stop()
+    assert sound.playing is False
+    assert sound.time == pytest.approx(0.0)
+
+
+def test_seeking_a_sound(quiet, short):
+    sound = carbine.new("sound")
+    sound.source = short
+    sound.loop = True
+    sound.play()
+    carbine.step(0.08)
+    sound.time = 0.01
+    assert sound.time == pytest.approx(0.01, abs=1e-2)
+    carbine.step(0.04)
+    assert sound.time > 0.01
+
+    sound.stop()
+    sound.seek(0.04)
+    assert sound.time == pytest.approx(0.04, abs=1e-2)
+    sound.play()
+    assert sound.time == pytest.approx(0.04, abs=1e-2)
+
+
+def test_spatial_is_a_sound_switch(quiet):
+    sound = carbine.new("sound")
+    assert sound.spatial is False
+    sound.spatial = True
+    assert sound.spatial is True

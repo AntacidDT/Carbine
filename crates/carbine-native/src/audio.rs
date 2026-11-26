@@ -18,6 +18,7 @@ use carbine_audio::{AudioError, Clip, Mixer};
 use carbine_core::{NodeId, Scene, SoundNode};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
+use glam::Vec3;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -82,10 +83,11 @@ impl AudioEngine {
         path: &str,
         volume: f32,
         looping: bool,
+        start: f32,
     ) -> Result<f32, AudioError> {
         let clip = self.clip(path)?;
         let duration = clip.duration();
-        self.lock().start(node.0, clip, volume, looping);
+        self.lock().start_at(node.0, clip, volume, looping, start);
         self.sources.insert(node.0, path.to_owned());
         Ok(duration)
     }
@@ -134,7 +136,9 @@ impl AudioEngine {
             if known.map(String::as_str) != Some(path) {
                 match self.clip(path) {
                     Ok(clip) => {
-                        self.lock().start(id, clip, node.volume, node.looping);
+                        let start = node.time;
+                        self.lock()
+                            .start_at(id, clip, node.volume, node.looping, start);
                         self.sources.insert(id, path.to_owned());
                     }
                     Err(_) => {
@@ -148,6 +152,16 @@ impl AudioEngine {
                 self.lock().set_volume(id, node.volume);
                 self.lock().set_looping(id, node.looping);
             }
+
+            let (pan, gain) = spatial(scene, node.id, node.spatial);
+            self.lock().set_pan(id, pan);
+            self.lock().set_gain(id, gain);
+        }
+
+        for video in scene.video_nodes() {
+            let (pan, gain) = spatial(scene, video.id, video.spatial);
+            self.lock().set_pan(video.id.0, pan);
+            self.lock().set_gain(video.id.0, gain);
         }
 
         // A device pulls the mixer itself. Without one, the world's clock is the only
@@ -189,17 +203,25 @@ pub(crate) fn play(
     path: &str,
     volume: f32,
     looping: bool,
+    start: f32,
 ) -> Result<f32, AudioError> {
-    AUDIO.with(|cell| cell.borrow_mut().play(node, path, volume, looping))
+    AUDIO.with(|cell| cell.borrow_mut().play(node, path, volume, looping, start))
 }
 
 /// Starts a decoded clip on a node. Used by the video layer, whose sound track is
 /// already in memory rather than at a path the mixer could load.
-pub(crate) fn play_clip(node: NodeId, clip: Clip, volume: f32, looping: bool) {
+pub(crate) fn play_clip(node: NodeId, clip: Clip, volume: f32, looping: bool, start: f32) {
     AUDIO.with(|cell| {
         cell.borrow_mut()
             .lock()
-            .start(node.0, clip, volume, looping);
+            .start_at(node.0, clip, volume, looping, start);
+    });
+}
+
+/// Moves a voice's playhead, for a script's seek or a film's audio track.
+pub(crate) fn seek(node: NodeId, seconds: f32) {
+    AUDIO.with(|cell| {
+        cell.borrow().lock().seek(node.0, seconds);
     });
 }
 
@@ -239,6 +261,25 @@ pub(crate) fn stop_all() {
         engine.output = None;
         engine.tried_output = false;
     });
+}
+
+/// Where a voice sits for the listener: pan from camera right, and a gentle
+/// distance fade. A script that left the voice non-spatial gets the old centred,
+/// full-volume sound.
+fn spatial(scene: &Scene, id: NodeId, enabled: bool) -> (f32, f32) {
+    if !enabled {
+        return (0.0, 1.0);
+    }
+    let camera = scene.camera();
+    let place = scene.node_world_position(id).unwrap_or(camera.position);
+    let relative = place - camera.position;
+    let forward = (camera.target - camera.position).normalize_or_zero();
+    let right = forward.cross(Vec3::Z).normalize_or_zero();
+    let direction = relative.normalize_or_zero();
+    let pan = direction.dot(right).clamp(-1.0, 1.0);
+    let distance = relative.length();
+    let gain = 1.0 / (1.0 + (distance / 12.0).powi(2));
+    (pan, gain.clamp(0.0, 1.0))
 }
 
 pub(crate) fn audio_error(error: AudioError) -> PyErr {

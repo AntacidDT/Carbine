@@ -180,7 +180,16 @@ impl Scene {
         // A copy of a map wears the same ground: the heights it was laid from come
         // along, so the copy is floor anything standing on it is caught by, not just
         // a picture of hills.
-        let ground = self.world.get::<crate::terrain::Terrain>(source).cloned();
+        // The old forest hangs off the original; a copy grows its own from the same
+        // seed instead of pointing at a stand it does not own.
+        let ground = self
+            .world
+            .get::<crate::terrain::Terrain>(source)
+            .cloned()
+            .map(|mut hills| {
+                hills.forest = None;
+                hills
+            });
         let sound = self.world.get::<crate::sound::Sound>(source).cloned();
         let video = self.world.get::<crate::video::Video>(source).cloned();
 
@@ -248,6 +257,9 @@ impl Scene {
         }
         if flying {
             self.copy_particles(id, fresh)?;
+        }
+        if self.is_terrain(fresh)? {
+            self.grow_forest(fresh)?;
         }
 
         Ok(fresh)

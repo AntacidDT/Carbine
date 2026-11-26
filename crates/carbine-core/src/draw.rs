@@ -2,8 +2,8 @@ use glam::{Mat4, Vec3};
 
 use crate::mesh::{MeshData, MeshHandle};
 use crate::node::{
-    Children, MAX_ALPHA, NodeId, NodeMesh, NodeTexture, ObjectColor, Opacity, Scene, TextureTiling,
-    Transform,
+    Children, MAX_ALPHA, NodeId, NodeMesh, NodeTexture, ObjectColor, Opacity, Scene, TextureFps,
+    TextureTiling, Transform,
 };
 use crate::ui::Ui;
 
@@ -24,6 +24,8 @@ pub struct DrawItem<'a> {
     /// How many metres of this object one tile of its skin covers. Nil is the whole
     /// picture across the face, which is what a model's own UVs already are.
     pub tiling: f32,
+    /// Frame rate for a layered skin; zero uses the file's own rate.
+    pub fps: f32,
 }
 
 impl Scene {
@@ -70,6 +72,11 @@ impl Scene {
                     .get::<TextureTiling>(entity)
                     .map(|tiling| tiling.0)
                     .unwrap_or(1.0);
+                let fps = self
+                    .world
+                    .get::<TextureFps>(entity)
+                    .map(|rate| rate.0)
+                    .unwrap_or(0.0);
                 items.push(DrawItem {
                     node: id,
                     handle: mesh.handle,
@@ -80,6 +87,7 @@ impl Scene {
                     texture,
                     video,
                     tiling,
+                    fps,
                 });
             }
 

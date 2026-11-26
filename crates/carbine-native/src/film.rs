@@ -78,6 +78,7 @@ impl FilmEngine {
         path: &str,
         volume: f32,
         looping: bool,
+        start: f32,
     ) -> Result<Meta, String> {
         let mut meta = probe(path)?;
         // A phone video can be 4K. Cap the decoded frame so a screen in a scene
@@ -91,9 +92,9 @@ impl FilmEngine {
         // probe and the frame decoder are required.
         let audio = carbine_audio::load_mp4_audio(path).ok().flatten();
         if let Some(clip) = &audio {
-            audio::play_clip(node, clip.clone(), volume, looping);
+            audio::play_clip(node, clip.clone(), volume, looping, start);
         }
-        let (receiver, child) = spawn_frames(path, meta)?;
+        let (receiver, child) = spawn_frames(path, meta, start)?;
         self.films.insert(
             node.0,
             Playback {
@@ -128,6 +129,44 @@ impl FilmEngine {
         }
     }
 
+    fn seek(&mut self, node: NodeId, seconds: f32) {
+        let Some(film) = self.films.get(&node.0) else {
+            return;
+        };
+        let source = film.source.clone();
+        let meta = film.meta;
+        let volume = film.volume;
+        let looping = film.looping;
+        let audio_clip = film.audio.clone();
+        let at = if seconds.is_finite() {
+            seconds.max(0.0).min(meta.duration.max(0.0))
+        } else {
+            0.0
+        };
+
+        let (receiver, child) = match spawn_frames(&source, meta, at) {
+            Ok(spawned) => spawned,
+            Err(_) => return,
+        };
+        audio::seek(node, at);
+        self.films.insert(
+            node.0,
+            Playback {
+                source,
+                meta,
+                receiver,
+                child,
+                audio: audio_clip,
+                volume,
+                looping,
+                last: None,
+                pending: None,
+                uploaded: None,
+                ended: false,
+            },
+        );
+    }
+
     fn restart(&mut self, node: NodeId) {
         let Some(film) = self.films.get(&node.0) else {
             return;
@@ -138,12 +177,12 @@ impl FilmEngine {
         let volume = film.volume;
         let audio_clip = film.audio.clone();
 
-        let (receiver, child) = match spawn_frames(&source, meta) {
+        let (receiver, child) = match spawn_frames(&source, meta, 0.0) {
             Ok(spawned) => spawned,
             Err(_) => return,
         };
         if let Some(clip) = &audio_clip {
-            audio::play_clip(node, clip.clone(), volume, looping);
+            audio::play_clip(node, clip.clone(), volume, looping, 0.0);
         }
         self.films.insert(
             node.0,
@@ -193,7 +232,14 @@ impl FilmEngine {
                     continue;
                 };
 
-                let time = node.time + dt.max(0.0);
+                // The sound card never drifts: when a film has a track its mixer
+                // voice is the clock, and pictures are chosen to match it. A silent
+                // film, or a machine with no device, uses the game clock instead.
+                let time = if film.audio.is_some() {
+                    audio::position(node.id).unwrap_or(node.time + dt.max(0.0))
+                } else {
+                    node.time + dt.max(0.0)
+                };
                 let _ = scene.set_video_time(node.id, time);
 
                 loop {
@@ -254,8 +300,18 @@ impl FilmEngine {
     }
 }
 
-pub(crate) fn play(node: NodeId, path: &str, volume: f32, looping: bool) -> Result<Meta, String> {
-    FILMS.with(|cell| cell.borrow_mut().play(node, path, volume, looping))
+pub(crate) fn play(
+    node: NodeId,
+    path: &str,
+    volume: f32,
+    looping: bool,
+    start: f32,
+) -> Result<Meta, String> {
+    FILMS.with(|cell| cell.borrow_mut().play(node, path, volume, looping, start))
+}
+
+pub(crate) fn seek(node: NodeId, seconds: f32) {
+    FILMS.with(|cell| cell.borrow_mut().seek(node, seconds));
 }
 
 pub(crate) fn stop(node: NodeId) {
@@ -344,10 +400,19 @@ fn fraction(text: &str) -> Option<f32> {
     }
 }
 
-fn spawn_frames(path: &str, meta: Meta) -> Result<(Receiver<Frame>, Arc<Mutex<Child>>), String> {
+fn spawn_frames(
+    path: &str,
+    meta: Meta,
+    start: f32,
+) -> Result<(Receiver<Frame>, Arc<Mutex<Child>>), String> {
     let scale = format!("scale={}:{}", meta.width, meta.height);
-    let mut child = Command::new("ffmpeg")
-        .args(["-v", "error", "-i", path, "-an", "-sn", "-vf", &scale])
+    let mut command = Command::new("ffmpeg");
+    command.args(["-v", "error"]);
+    if start > 0.0 {
+        command.args(["-ss", &start.to_string()]);
+    }
+    let mut child = command
+        .args(["-i", path, "-an", "-sn", "-vf", &scale])
         .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -373,7 +438,7 @@ fn spawn_frames(path: &str, meta: Meta) -> Result<(Receiver<Frame>, Arc<Mutex<Ch
                 break;
             }
             let frame = Frame {
-                pts: index as f32 / meta.fps.max(1.0),
+                pts: start + index as f32 / meta.fps.max(1.0),
                 rgba: buffer.clone(),
             };
             if sender.send(frame).is_err() {

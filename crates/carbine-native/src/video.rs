@@ -166,6 +166,18 @@ impl Video {
         Ok(())
     }
 
+    /// The same switch under its short name: `video.loop = True` keeps the film
+    /// going, False makes `play()` show it once.
+    #[getter(r#loop)]
+    fn loop_flag(&self) -> PyResult<bool> {
+        with_scene(|scene| scene.video_looping(self.id))
+    }
+
+    #[setter(r#loop)]
+    fn set_loop_flag(&self, looping: bool) -> PyResult<()> {
+        self.set_looping(looping)
+    }
+
     #[getter]
     fn playing(&self) -> PyResult<bool> {
         with_scene(|scene| scene.video_playing(self.id))
@@ -176,10 +188,39 @@ impl Video {
         if playing { self.play() } else { self.stop() }
     }
 
-    /// The playhead in seconds, as of the last step or frame.
+    /// The playhead in seconds, as of the last step or frame. Writing it seeks the
+    /// decoder and the sound track together; a stopped film starts there next time.
     #[getter]
     fn time(&self) -> PyResult<f32> {
         with_scene(|scene| scene.video_time(self.id))
+    }
+
+    #[setter]
+    fn set_time(&self, seconds: f64) -> PyResult<()> {
+        let seconds = if seconds.is_finite() {
+            seconds.max(0.0) as f32
+        } else {
+            0.0
+        };
+        with_scene(|scene| scene.set_video_time(self.id, seconds))?;
+        film::seek(self.id, seconds);
+        Ok(())
+    }
+
+    /// Moves the picture and its sound to a new place without stopping.
+    fn seek(&self, seconds: f64) -> PyResult<()> {
+        self.set_time(seconds)
+    }
+
+    /// Whether the film's sound is placed in the world around the listener.
+    #[getter]
+    fn spatial(&self) -> PyResult<bool> {
+        with_scene(|scene| scene.video_spatial(self.id))
+    }
+
+    #[setter]
+    fn set_spatial(&self, spatial: bool) -> PyResult<()> {
+        with_scene(|scene| scene.set_video_spatial(self.id, spatial))
     }
 
     /// How long the film runs, in seconds. Zero until it has been started once.
@@ -207,7 +248,7 @@ impl Video {
     /// Probes the film, starts its picture and its sound. Raises `ValueError` when
     /// no source is set, the file is not there, or `ffmpeg`/`ffprobe` cannot read it.
     fn play(&self) -> PyResult<()> {
-        let (path, volume, looping) = with_scene(|scene| {
+        let (path, volume, looping, time) = with_scene(|scene| {
             let path = scene
                 .video_source(self.id)?
                 .ok_or_else(|| SceneError::BadVideo {
@@ -218,14 +259,15 @@ impl Video {
                 path,
                 scene.video_volume(self.id)?,
                 scene.video_looping(self.id)?,
+                scene.video_time(self.id)?,
             ))
         })?;
 
-        let meta = film::play(self.id, &path, volume, looping).map_err(film::video_error)?;
+        let meta = film::play(self.id, &path, volume, looping, time).map_err(film::video_error)?;
         with_scene(|scene| {
             scene.set_video_metadata(self.id, meta.width, meta.height, meta.fps, meta.duration)?;
             scene.set_video_playing(self.id, true)?;
-            scene.set_video_time(self.id, 0.0)?;
+            scene.set_video_time(self.id, time)?;
             Ok(())
         })
     }

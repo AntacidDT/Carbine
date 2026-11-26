@@ -95,3 +95,80 @@ def test_a_file_that_is_not_a_picture_is_refused(tmp_path):
 
     with pytest.raises(ValueError, match="could not be read as a picture"):
         carbine.packager.image(str(tmp_path / "ghost.png"))
+
+
+OBJ = "o Triangle\nv 0 0 0\nv 2 0 0\nv 0 3 0\nf 1 2 3\n"
+STL = (
+    "solid slab\nfacet normal 0 0 1\nouter loop\n"
+    "vertex 0 0 0\nvertex 2 0 0\nvertex 0 3 0\n"
+    "endloop\nendfacet\nendsolid slab\n"
+)
+
+
+def test_an_authored_obj_is_packed_beside_its_source(tmp_path):
+    source = tmp_path / "triangle.obj"
+    source.write_text(OBJ)
+
+    built = carbine.packager.model(source)
+
+    assert built == str(tmp_path / "triangle.glb")
+    with open(built, "rb") as file:
+        assert file.read(4) == b"glTF", "the one container the engine's loader reads"
+
+
+def test_an_authored_stl_is_packed_beside_its_source(tmp_path):
+    source = tmp_path / "slab.stl"
+    source.write_text(STL)
+
+    built = carbine.packager.model(source)
+
+    assert built == str(tmp_path / "slab.glb")
+    assert pathlib.Path(built).stat().st_size > 0
+
+
+def test_the_packed_model_can_be_worn_with_its_vertices(tmp_path):
+    source = tmp_path / "triangle.obj"
+    source.write_text(OBJ)
+    built = carbine.packager.model(source)
+
+    holder = carbine.new("Model")
+    try:
+        holder.model = built
+        assert holder.model == built
+        assert len(holder.children) == 1
+        child = holder.children[0]
+        assert child.name == "Triangle"
+        assert child.mesh.vertexCount == 3
+        assert child.mesh.triangleCount == 1
+        assert child.mesh.positions[1].x == pytest.approx(2.0)
+        assert child.mesh.positions[2].y == pytest.approx(3.0)
+    finally:
+        holder.destroy()
+
+
+def test_a_model_can_go_into_a_folder_or_an_exact_name(tmp_path):
+    source = tmp_path / "chair.obj"
+    source.write_text(OBJ)
+    folder = tmp_path / "built"
+    folder.mkdir()
+
+    assert carbine.packager.model(source, out=folder) == str(folder / "chair.glb")
+    fresh = tmp_path / "fresh"
+    assert carbine.packager.model(source, out=f"{fresh}{os.sep}") == str(
+        fresh / "chair.glb"
+    )
+    named = tmp_path / "seat.glb"
+    assert carbine.packager.model(source, out=named) == str(named)
+
+
+def test_a_file_that_is_not_a_model_is_refused(tmp_path):
+    notes = tmp_path / "notes.txt"
+    notes.write_text("words, not triangles")
+
+    with pytest.raises(ValueError, match="notes.txt") as error:
+        carbine.packager.model(str(notes))
+    assert "could not be read as a model" in str(error.value), error
+    assert "obj and stl" in str(error.value), error
+
+    with pytest.raises(ValueError, match="could not be read as a model"):
+        carbine.packager.model(str(tmp_path / "ghost.obj"))

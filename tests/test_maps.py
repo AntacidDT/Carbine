@@ -202,3 +202,42 @@ def test_walker_is_held_up_by_the_map(ground):
     assert player.grounded
     assert player.position.z >= 5.0 - 1e-2, "the walker stands on the lifted map"
     assert abs(player.velocity.z) < 1e-2
+
+def test_map_biomes_list(ground):
+    assert carbine.procedural.mapBiomes() == ["meadow", "forest", "desert", "alpine"]
+
+
+def test_map_biome_lays_the_ground_and_grows_trees(ground):
+    woods = carbine.procedural.map(
+        size=(32.0, 32.0), relief=8.0, seed="woods", biome="forest", trees=6
+    )
+    assert woods.biome == "forest"
+    assert woods.treeCount == 6
+    stands = [child for child in woods.children if child.name == "Trees"]
+    assert len(stands) == 1
+    assert len(stands[0].children) == 6
+
+    meadow = carbine.procedural.map(
+        size=(32.0, 32.0), relief=8.0, seed="woods", biome="meadow", trees=0
+    )
+    assert meadow.biome == "meadow"
+    assert meadow.treeCount == 0
+    assert meadow.children == []
+
+    woods.biome = "desert"
+    assert woods.biome == "desert"
+    with pytest.raises(ValueError, match="tundra"):
+        woods.biome = "tundra"
+
+
+def test_map_tree_count_regrows_the_stand(ground):
+    ground_map = carbine.procedural.map(seed="trees", biome="forest", trees=5)
+    kept = carbine.new("cube", name="Kept", parent=ground_map)
+    old_stand = next(child for child in ground_map.children if child.name == "Trees")
+
+    ground_map.treeCount = 2
+    assert ground_map.treeCount == 2
+    assert kept in ground_map.children
+    assert old_stand not in ground_map.children
+    stand = next(child for child in ground_map.children if child.name == "Trees")
+    assert len(stand.children) == 2

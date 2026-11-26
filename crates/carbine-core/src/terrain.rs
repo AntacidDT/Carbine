@@ -21,7 +21,7 @@ use crate::node::{
     Opacity, Parent, Scene, SceneError, TextureTiling, Transform, Visible,
 };
 use crate::player::GROUND_HEIGHT;
-use crate::procgen::{Seed, fbm2};
+use crate::procgen::{Rng, Seed, fbm2, salt};
 
 /// The kind word for a node that is ground to walk on.
 pub const KIND: &str = "terrain";
@@ -76,6 +76,67 @@ impl TerrainQuality {
     }
 }
 
+/// The kind of country a map lays. A biome is the shape of the ground and what grows
+/// on it, not a palette: the same seed in the same biome lays the same hills for anyone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Biome {
+    #[default]
+    Meadow,
+    Forest,
+    Desert,
+    Alpine,
+}
+
+impl Biome {
+    pub const NAMES: &[&str] = &["meadow", "forest", "desert", "alpine"];
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name.trim().to_lowercase().as_str() {
+            "meadow" | "plain" | "plains" | "grass" => Self::Meadow,
+            "forest" | "wood" | "woods" | "woodland" => Self::Forest,
+            "desert" | "dune" | "dunes" | "sand" => Self::Desert,
+            "alpine" | "mountain" | "mountains" | "peak" => Self::Alpine,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Meadow => "meadow",
+            Self::Forest => "forest",
+            Self::Desert => "desert",
+            Self::Alpine => "alpine",
+        }
+    }
+
+    /// How many trees a biome plants when a script does not name a count. A desert
+    /// grows none and a forest grows a stand; the other two are in between.
+    pub fn trees(self) -> usize {
+        match self {
+            Self::Meadow => 4,
+            Self::Forest => 24,
+            Self::Desert => 0,
+            Self::Alpine => 2,
+        }
+    }
+
+    /// The height field this country is made of. Every shape stays in 0..relief so a
+    /// valley sits at the node and no peak stands taller than the relief the script
+    /// named, whichever biome was asked for.
+    fn height(self, field: f32, u: f32, _v: f32) -> f32 {
+        let shaped = match self {
+            Self::Meadow => field.powf(1.4),
+            Self::Forest => (field * 0.9).powf(1.2),
+            Self::Desert => {
+                let ridge = (u * FEATURES * 2.0 + field * 3.0).sin() * 0.5 + 0.5;
+                field * 0.25 + ridge * 0.75
+            }
+            Self::Alpine => field.powf(2.2),
+        };
+        shaped.clamp(0.0, 1.0)
+    }
+}
+
 /// The ground a map lays: its reach, how tall its hills are, how finely it is counted,
 /// the dice it was rolled from, and the heights that came out. The heights are kept so
 /// the floor under a walker is read straight off the grid rather than summed again.
@@ -85,6 +146,11 @@ pub(crate) struct Terrain {
     pub(crate) relief: f32,
     pub(crate) quality: TerrainQuality,
     pub(crate) seed: Seed,
+    pub(crate) biome: Biome,
+    pub(crate) trees: usize,
+    /// The node holding the generated stand, so a relayout can regrow only the trees
+    /// and leave anything a script hung on the map where it was.
+    pub(crate) forest: Option<NodeId>,
     pub(crate) heights: Vec<f32>,
 }
 
@@ -126,9 +192,12 @@ impl Terrain {
 /// metres, so the same seed names the same shape whichever size it is stretched to.
 const FEATURES: f32 = 3.0;
 
+/// The ceiling a generator may plant on one map.
+const MAX_TREES: usize = 300;
+
 /// The heights a map is laid from: rolling hills out of the seeded field, lifted by the
 /// relief so the valleys sit at the node and the peaks rise above it.
-fn heights(relief: f32, quality: TerrainQuality, seed: Seed) -> Vec<f32> {
+fn heights(relief: f32, quality: TerrainQuality, seed: Seed, biome: Biome) -> Vec<f32> {
     let cells = quality.cells();
     let octaves = quality.octaves();
     let mut out = Vec::with_capacity((cells + 1) * (cells + 1));
@@ -139,7 +208,7 @@ fn heights(relief: f32, quality: TerrainQuality, seed: Seed) -> Vec<f32> {
             let field = fbm2(u * FEATURES, v * FEATURES, seed, octaves);
             // Valleys settle towards the node and hills stand up out of them, so a map
             // reads as ground rising rather than a sheet hung halfway through the air.
-            out.push(field.powf(1.4) * relief.max(0.0));
+            out.push(biome.height(field, u, v) * relief.max(0.0));
         }
     }
     out
@@ -211,13 +280,15 @@ impl Scene {
         name: Option<String>,
         parent: Option<NodeId>,
     ) -> Result<NodeId, SceneError> {
-        self.create_terrain_with(
+        self.create_terrain_full(
             name,
             parent,
             Vec2::new(64.0, 64.0),
             6.0,
             TerrainQuality::default(),
             Seed::default(),
+            Biome::default(),
+            0,
         )
     }
 
@@ -232,6 +303,33 @@ impl Scene {
         quality: TerrainQuality,
         seed: Seed,
     ) -> Result<NodeId, SceneError> {
+        let biome = Biome::default();
+        self.create_terrain_full(
+            name,
+            parent,
+            size,
+            relief,
+            quality,
+            seed,
+            biome,
+            biome.trees(),
+        )
+    }
+
+    /// The whole map in one ask, including the country it is made of and how many
+    /// trees grow on it. Every knob is written before the ground or the stand is laid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_terrain_full(
+        &mut self,
+        name: Option<String>,
+        parent: Option<NodeId>,
+        size: Vec2,
+        relief: f32,
+        quality: TerrainQuality,
+        seed: Seed,
+        biome: Biome,
+        trees: usize,
+    ) -> Result<NodeId, SceneError> {
         let parent_id = parent.unwrap_or(self.root());
         self.entity(parent_id)?;
         self.branch_allows(parent_id, false)?;
@@ -242,8 +340,9 @@ impl Scene {
         } else {
             6.0
         };
-        let field = heights(relief, quality, seed);
+        let field = heights(relief, quality, seed, biome);
         let data = mesh(size, quality, &field);
+        let trees = trees.min(MAX_TREES);
 
         let id = self.reserve();
         let handle = self.next_mesh_handle();
@@ -272,13 +371,67 @@ impl Scene {
                     relief,
                     quality,
                     seed,
+                    biome,
+                    trees,
+                    forest: None,
                     heights: field,
                 },
             ))
             .id();
         self.insert(id, entity);
         self.attach(id, parent_id);
+        self.grow_forest(id)?;
         Ok(id)
+    }
+
+    /// How many trees a generator may plant on one map. A script can ask for more and
+    /// gets this ceiling instead of a scene with ten thousand nodes in it.
+    /// Grows the stand again after the ground beneath it changed. The trees hang under
+    /// one group node, so only the generated ones go; a script's own children stay.
+    pub(crate) fn grow_forest(&mut self, id: NodeId) -> Result<(), SceneError> {
+        let (old, count, size, seed) = {
+            let field = self.terrain(id)?;
+            (field.forest, field.trees, field.size, field.seed)
+        };
+        if let Some(forest) = old {
+            self.destroy(forest)?;
+        }
+        if count == 0 {
+            self.terrain_mut(id)?.forest = None;
+            return Ok(());
+        }
+
+        let group = self.create_model(Some("Trees".to_owned()), Some(id))?;
+        for index in 0..count {
+            let mut dice = Rng::new(salt(seed, 1_000 + index));
+            let place = dice.inside(Vec3::new(size.x * 0.88, size.y * 0.88, 0.0));
+            let height = self.terrain(id)?.sample(place.x, place.y).unwrap_or(0.0);
+            let tall = 2.0 + dice.between(0.0, 1.4);
+            let trunk = self.create("cube", Some(format!("Tree {}", index + 1)), Some(group))?;
+            self.set_vec_field(
+                trunk,
+                crate::node::VecField::Size,
+                Vec3::new(0.28, 0.28, tall),
+            )?;
+            self.set_vec_field(
+                trunk,
+                crate::node::VecField::Position,
+                Vec3::new(place.x, place.y, height + tall * 0.5),
+            )?;
+            self.set_color(trunk, Vec3::new(0.647, 0.165, 0.165))?;
+            self.set_anchored(trunk, true)?;
+
+            let crown = self.create("sphere", Some("Crown".to_owned()), Some(trunk))?;
+            self.set_vec_field(crown, crate::node::VecField::Size, Vec3::new(1.5, 1.5, 1.4))?;
+            self.set_vec_field(
+                crown,
+                crate::node::VecField::Position,
+                Vec3::new(0.0, 0.0, tall * 0.5),
+            )?;
+            self.set_color(crown, Vec3::new(0.0, 0.502, 0.0))?;
+        }
+        self.terrain_mut(id)?.forest = Some(group);
+        Ok(())
     }
 
     pub fn is_terrain(&self, id: NodeId) -> Result<bool, SceneError> {
@@ -354,6 +507,38 @@ impl Scene {
         })
     }
 
+    /// The country this map lays: meadow, forest, desert or alpine.
+    pub fn terrain_biome(&self, id: NodeId) -> Result<Biome, SceneError> {
+        Ok(self.terrain(id)?.biome)
+    }
+
+    pub fn set_terrain_biome(&mut self, id: NodeId, biome: Biome) -> Result<(), SceneError> {
+        self.spread(id, move |scene, member| {
+            scene.terrain_mut(member)?.biome = biome;
+            scene.relayout(member)
+        })
+    }
+
+    pub fn set_terrain_biome_name(&mut self, id: NodeId, name: &str) -> Result<(), SceneError> {
+        let biome = Biome::from_name(name)
+            .ok_or_else(|| SceneError::UnknownBiome(name.trim().to_owned()))?;
+        self.set_terrain_biome(id, biome)
+    }
+
+    /// How many seeded trees grow on this map. Changing it regrows only the generated
+    /// stand; what a script added to the map stays put.
+    pub fn terrain_tree_count(&self, id: NodeId) -> Result<usize, SceneError> {
+        Ok(self.terrain(id)?.trees)
+    }
+
+    pub fn set_terrain_tree_count(&mut self, id: NodeId, count: usize) -> Result<(), SceneError> {
+        let count = count.min(MAX_TREES);
+        self.spread(id, move |scene, member| {
+            scene.terrain_mut(member)?.trees = count;
+            scene.grow_forest(member)
+        })
+    }
+
     fn terrain_mut(&mut self, id: NodeId) -> Result<Mut<'_, Terrain>, SceneError> {
         self.component_mut::<Terrain>(id)
     }
@@ -361,11 +546,17 @@ impl Scene {
     /// Sum the heights again and draw the mesh they name, on a fresh handle so the
     /// renderer uploads the new ground rather than keeping the old one cached.
     fn relayout(&mut self, id: NodeId) -> Result<(), SceneError> {
-        let (size, relief, quality, seed) = {
+        let (size, relief, quality, seed, biome) = {
             let field = self.terrain(id)?;
-            (field.size, field.relief, field.quality, field.seed)
+            (
+                field.size,
+                field.relief,
+                field.quality,
+                field.seed,
+                field.biome,
+            )
         };
-        let field = heights(relief, quality, seed);
+        let field = heights(relief, quality, seed, biome);
         let data = mesh(size, quality, &field);
         let handle = self.next_mesh_handle();
         self.terrain_mut(id)?.heights = field;
@@ -373,6 +564,7 @@ impl Scene {
         self.world
             .entity_mut(entity)
             .insert(NodeMesh { handle, data });
+        self.grow_forest(id)?;
         Ok(())
     }
 
@@ -579,6 +771,84 @@ mod tests {
         let seed = Seed::of("elsewhere");
         scene.set_terrain_seed(id, seed).unwrap();
         assert_eq!(scene.terrain_seed(id).unwrap(), seed.0);
+    }
+
+    #[test]
+    fn a_biome_lays_its_own_ground_and_grows_a_stand() {
+        let mut scene = Scene::new();
+        let forest = scene
+            .create_terrain_full(
+                Some("Wood".to_owned()),
+                None,
+                Vec2::new(32.0, 32.0),
+                8.0,
+                TerrainQuality::Low,
+                Seed::of("woods"),
+                Biome::Forest,
+                6,
+            )
+            .unwrap();
+        assert_eq!(scene.terrain_biome(forest).unwrap(), Biome::Forest);
+        assert_eq!(scene.terrain_tree_count(forest).unwrap(), 6);
+
+        let stand = scene.children(forest).unwrap();
+        assert_eq!(stand.len(), 1, "one group holds the generated trees");
+        assert_eq!(scene.name(stand[0]).unwrap(), "Trees");
+        let trunks = scene.children(stand[0]).unwrap();
+        assert_eq!(trunks.len(), 6);
+        for trunk in trunks {
+            assert_eq!(
+                scene.children(trunk).unwrap().len(),
+                1,
+                "a crown under each trunk"
+            );
+        }
+
+        // The same seed in another country lays different hills.
+        let meadow = scene
+            .create_terrain_full(
+                None,
+                None,
+                Vec2::new(32.0, 32.0),
+                8.0,
+                TerrainQuality::Low,
+                Seed::of("woods"),
+                Biome::Meadow,
+                0,
+            )
+            .unwrap();
+        assert_ne!(
+            scene.mesh(forest).unwrap().positions,
+            scene.mesh(meadow).unwrap().positions
+        );
+        assert!(scene.children(meadow).unwrap().is_empty());
+    }
+
+    #[test]
+    fn changing_the_stand_regrows_only_the_trees() {
+        let mut scene = Scene::new();
+        let id = map(&mut scene, Seed::of("stand"));
+        scene.set_terrain_tree_count(id, 5).unwrap();
+        let old_stand = scene.children(id).unwrap()[0];
+
+        // A thing a script hung on the map is not part of the stand.
+        let kept = scene
+            .create("cube", Some("Kept".to_owned()), Some(id))
+            .unwrap();
+        scene.set_terrain_tree_count(id, 2).unwrap();
+
+        let children = scene.children(id).unwrap();
+        assert_eq!(children.len(), 2, "the kept node and a new stand");
+        assert!(children.contains(&kept));
+        assert!(!children.contains(&old_stand));
+        let new_stand = children.into_iter().find(|child| *child != kept).unwrap();
+        assert_eq!(scene.children(new_stand).unwrap().len(), 2);
+
+        scene.set_terrain_biome_name(id, "desert").unwrap();
+        assert_eq!(scene.terrain_biome(id).unwrap(), Biome::Desert);
+        assert_eq!(scene.terrain_tree_count(id).unwrap(), 2);
+        let error = scene.set_terrain_biome_name(id, "tundra").unwrap_err();
+        assert!(error.to_string().contains("tundra"), "{error}");
     }
 
     #[test]

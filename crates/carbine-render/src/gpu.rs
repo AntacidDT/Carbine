@@ -1064,6 +1064,24 @@ struct VideoTexture {
     height: u32,
 }
 
+/// One cached skin. A still image holds its whole mip chain on the GPU; a flipbook
+/// holds the level-zero blocks of every frame and swaps them into one texture as the
+/// playhead advances, which keeps the shader and the bind group unchanged.
+struct Skin {
+    view: wgpu::TextureView,
+    animation: Option<Animation>,
+}
+
+struct Animation {
+    texture: wgpu::Texture,
+    frames: Vec<Vec<u8>>,
+    width: u32,
+    height: u32,
+    fps: f32,
+    started: std::time::Instant,
+    showing: usize,
+}
+
 struct Pipeline {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
@@ -1094,7 +1112,7 @@ pub struct Gpu {
     meshes: HashMap<MeshHandle, GpuMesh>,
     /// `None` records a skin that could not be read, so a broken file is opened
     /// once rather than once per frame.
-    skins: HashMap<String, Option<wgpu::TextureView>>,
+    skins: HashMap<String, Option<Skin>>,
     /// The white pixel every untextured object is skinned with.
     plain: wgpu::TextureView,
     /// The frame a video node is showing, by node id. Frames are uploaded by the
@@ -1434,7 +1452,7 @@ impl Gpu {
             match runs.last_mut().filter(|run| run.0 == skin_key) {
                 Some(run) => run.3 += 1,
                 None => {
-                    let skin = self.skin_for(item.texture);
+                    let skin = self.skin_for(item.texture, 0.0);
                     runs.push((skin_key, skin, instances.len() as u32 - 1, 1));
                 }
             }
@@ -1444,7 +1462,7 @@ impl Gpu {
         // item may be a plain shape, a packed skin or a live video frame.
         let ui_skins: Vec<wgpu::TextureView> = ui_items
             .iter()
-            .map(|item| self.pick_skin(item.video, item.texture))
+            .map(|item| self.pick_skin(item.video, item.texture, item.fps))
             .collect();
 
         self.text_cache
@@ -1895,42 +1913,98 @@ impl Gpu {
         self.videos.get(&id).map(|frame| frame.view.clone())
     }
 
-    fn pick_skin(&mut self, video: Option<u64>, texture: Option<&str>) -> wgpu::TextureView {
+    fn pick_skin(
+        &mut self,
+        video: Option<u64>,
+        texture: Option<&str>,
+        fps: f32,
+    ) -> wgpu::TextureView {
         if let Some(id) = video
             && let Some(view) = self.video_for(id)
         {
             return view;
         }
-        self.skin_for(texture)
+        self.skin_for(texture, fps)
     }
 
     fn item_skin(&mut self, item: &carbine_core::DrawItem<'_>) -> wgpu::TextureView {
-        self.pick_skin(item.video, item.texture)
+        self.pick_skin(item.video, item.texture, item.fps)
     }
 
     /// The skin for a path, reading and uploading it the first time it is asked
-    /// for. A file that is not a packed image leaves the object in its own colour;
-    /// the core is what tells the script about it.
-    fn skin_for(&mut self, path: Option<&str>) -> wgpu::TextureView {
+    /// for. A layered file animates from its own frames; a script may write a frame
+    /// rate over that rate. A broken file leaves the object in its own colour; the
+    /// core is what tells the script about it.
+    fn skin_for(&mut self, path: Option<&str>, fps: f32) -> wgpu::TextureView {
         let Some(path) = path else {
             return self.plain.clone();
         };
         if !self.skins.contains_key(path) {
             let skin = std::fs::read(path).ok().and_then(|bytes| {
                 let texture = carbine_ktx::read(&bytes).ok()?;
-                Some(upload_packed(
-                    &self.device,
-                    &self.queue,
-                    "carbine skin",
-                    &texture,
-                ))
+                if texture.frame_count() > 1 {
+                    let first = texture.frame(0)?.levels().first()?.bytes;
+                    let (gpu, view) = upload_bc7(
+                        &self.device,
+                        &self.queue,
+                        "carbine flipbook",
+                        texture.width(),
+                        texture.height(),
+                        first,
+                    );
+                    let frames = (0..texture.frame_count())
+                        .filter_map(|index| {
+                            texture
+                                .frame(index)?
+                                .levels()
+                                .first()
+                                .map(|level| level.bytes.to_vec())
+                        })
+                        .collect();
+                    Some(Skin {
+                        view,
+                        animation: Some(Animation {
+                            texture: gpu,
+                            frames,
+                            width: texture.width(),
+                            height: texture.height(),
+                            fps: texture.fps().unwrap_or(8.0).max(0.1),
+                            started: std::time::Instant::now(),
+                            showing: 0,
+                        }),
+                    })
+                } else {
+                    Some(Skin {
+                        view: upload_packed(&self.device, &self.queue, "carbine skin", &texture),
+                        animation: None,
+                    })
+                }
             });
             self.skins.insert(path.to_owned(), skin);
         }
-        match &self.skins[path] {
-            Some(view) => view.clone(),
-            None => self.plain.clone(),
+        let Some(skin) = self.skins.get_mut(path).and_then(|entry| entry.as_mut()) else {
+            return self.plain.clone();
+        };
+        let Some(animation) = skin.animation.as_mut() else {
+            return skin.view.clone();
+        };
+        if animation.frames.len() > 1 {
+            let rate = if fps > 0.0 { fps } else { animation.fps };
+            let index = (animation.started.elapsed().as_secs_f32() * rate) as usize
+                % animation.frames.len();
+            if index != animation.showing {
+                let bytes = &animation.frames[index];
+                write_bc7_frame(
+                    &self.queue,
+                    &animation.texture,
+                    animation.width,
+                    animation.height,
+                    bytes,
+                );
+                animation.showing = index;
+            }
         }
+        skin.view.clone()
     }
 
     pub fn present(&self, texture: wgpu::SurfaceTexture) {
@@ -2317,6 +2391,65 @@ fn ensure_mesh<'a>(
 /// The chain's own transfer flag stays in the file. Carbine's pipeline is
 /// display-referred — a colour reaches the screen exactly as it is stored — so a
 /// texel has to do the same, and an sRGB-decoded sample would darken every picture.
+/// Create the single-mip BC7 texture a flipbook swaps frames into.
+fn upload_bc7(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    width: u32,
+    height: u32,
+    bytes: &[u8],
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Bc7RgbaUnorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    write_bc7_frame(queue, &texture, width, height, bytes);
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+/// Replace level zero of a flipbook with one frame's BC7 blocks.
+fn write_bc7_frame(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+    bytes: &[u8],
+) {
+    let columns = width.div_ceil(4);
+    let rows = height.div_ceil(4);
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(columns * 16),
+            rows_per_image: Some(rows),
+        },
+        wgpu::Extent3d {
+            width: columns * 4,
+            height: rows * 4,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
 fn upload_packed(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

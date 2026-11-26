@@ -178,6 +178,8 @@ pub enum TextureError {
     Encoder { why: String },
     /// The bytes were ready and had nowhere to go.
     Write { path: String, why: String },
+    /// A flipbook that could not be painted or compressed.
+    Animation { why: String },
 }
 
 impl fmt::Display for TextureError {
@@ -209,6 +211,7 @@ impl fmt::Display for TextureError {
                 f,
                 "the generated texture could not be written to \"{path}\": {why}"
             ),
+            Self::Animation { why } => write!(f, "the flipbook could not be painted: {why}"),
         }
     }
 }
@@ -891,6 +894,106 @@ pub fn save(
         why: why.to_string(),
     })?;
 
+    Ok(written)
+}
+
+/// The frames a flipbook is painted from, as tightly packed RGBA8, with the tile's
+/// width. Each frame is painted from its own salt of the seed, so the same word paints
+/// the same animation for anybody and the frames stay different from one another.
+pub fn flipbook_pixels(
+    kind: &str,
+    variation: Option<&str>,
+    quality: Option<&str>,
+    seed: Seed,
+    frames: usize,
+) -> Result<(u32, Vec<Vec<u8>>), TextureError> {
+    if frames < 2 {
+        return Err(TextureError::Animation {
+            why: "a flipbook needs at least two frames".to_owned(),
+        });
+    }
+    if frames > 64 {
+        return Err(TextureError::Animation {
+            why: "a flipbook holds at most sixty-four frames".to_owned(),
+        });
+    }
+    let (kind, variation, quality) = named(kind, variation, quality)?;
+    let painted = (0..frames)
+        .map(|index| Canvas::new(quality, salt(seed, 2_000 + index)).paint(kind, variation))
+        .collect();
+    Ok((quality.size(), painted))
+}
+
+/// A flipbook as a layered `.ktx2`: every frame is a BC7 chain with its own mips, and
+/// the frame rate travels inside the file so a texture plays at the rate it was painted.
+pub fn flipbook(
+    kind: &str,
+    variation: Option<&str>,
+    quality: Option<&str>,
+    seed: Seed,
+    frames: usize,
+    fps: f32,
+) -> Result<Vec<u8>, TextureError> {
+    if !fps.is_finite() || fps <= 0.0 {
+        return Err(TextureError::Animation {
+            why: "the frame rate must be a positive number".to_owned(),
+        });
+    }
+    let (size, painted) = flipbook_pixels(kind, variation, quality, seed, frames)?;
+    let slices: Vec<&[u8]> = painted.iter().map(Vec::as_slice).collect();
+    carbine_ktx::pack_flipbook(size, size, &slices, true, fps).map_err(|why| {
+        TextureError::Animation {
+            why: why.to_string(),
+        }
+    })
+}
+
+/// Paints a flipbook and writes it, answering with the path it wrote.
+pub fn save_flipbook(
+    kind: &str,
+    variation: Option<&str>,
+    quality: Option<&str>,
+    seed: Seed,
+    frames: usize,
+    fps: f32,
+    out: Option<&Path>,
+) -> Result<PathBuf, TextureError> {
+    let (kind, variation, quality) = named(kind, variation, quality)?;
+    let bytes = flipbook(
+        kind.name(),
+        variation,
+        Some(quality.name()),
+        seed,
+        frames,
+        fps,
+    )?;
+    let base = format!(
+        "{}_{}_{}_s{}_{}f_{}fps",
+        kind.name(),
+        variation.unwrap_or("plain"),
+        quality.name(),
+        seed.0,
+        frames,
+        fps
+    );
+    let written = match out {
+        Some(directory) if names_a_folder(directory) => directory.join(base).with_extension("ktx2"),
+        Some(exact) => exact.to_path_buf(),
+        None => PathBuf::from(format!("{base}.ktx2")),
+    };
+    if let Some(directory) = written
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(directory).map_err(|why| TextureError::Write {
+            path: written.display().to_string(),
+            why: why.to_string(),
+        })?;
+    }
+    std::fs::write(&written, bytes).map_err(|why| TextureError::Write {
+        path: written.display().to_string(),
+        why: why.to_string(),
+    })?;
     Ok(written)
 }
 

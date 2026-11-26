@@ -19,6 +19,7 @@ pub(crate) struct Video {
     pub(crate) source: Option<String>,
     pub(crate) volume: f32,
     pub(crate) looping: bool,
+    pub(crate) spatial: bool,
     pub(crate) playing: bool,
     pub(crate) time: f32,
     pub(crate) width: u32,
@@ -33,6 +34,7 @@ impl Default for Video {
             source: None,
             volume: 1.0,
             looping: false,
+            spatial: false,
             playing: false,
             time: 0.0,
             width: 0,
@@ -50,6 +52,7 @@ pub struct VideoNode {
     pub source: Option<String>,
     pub volume: f32,
     pub looping: bool,
+    pub spatial: bool,
     pub playing: bool,
     pub time: f32,
 }
@@ -139,6 +142,19 @@ impl Scene {
         })
     }
 
+    /// Whether the voice is placed in the world: panned around the listener and
+    /// faded with distance. Off keeps the old centre-only playback.
+    pub fn video_spatial(&self, id: NodeId) -> Result<bool, SceneError> {
+        Ok(self.video(id)?.spatial)
+    }
+
+    pub fn set_video_spatial(&mut self, id: NodeId, spatial: bool) -> Result<(), SceneError> {
+        self.spread(id, move |scene, member| {
+            scene.video_mut(member)?.spatial = spatial;
+            Ok(())
+        })
+    }
+
     pub fn video_playing(&self, id: NodeId) -> Result<bool, SceneError> {
         Ok(self.video(id)?.playing)
     }
@@ -220,6 +236,7 @@ impl Scene {
                     source: video.source.clone(),
                     volume: video.volume,
                     looping: video.looping,
+                    spatial: video.spatial,
                     playing: video.playing,
                     time: video.time,
                 })

@@ -1,5 +1,7 @@
 mod atmosphere;
+mod building;
 mod camera;
+mod chess;
 mod collision;
 mod disaster;
 mod draw;
@@ -28,7 +30,12 @@ mod video;
 pub use atmosphere::{
     Atmosphere, DeviceKind, Gpu, Light, LightQuality, LightType, Precipitation, auto_quality,
 };
+pub use building::{BuildingStyle, KIND as BUILDING_KIND};
 pub use camera::{Camera, CameraMode, UP};
+pub use chess::{
+    ChessBoard, ChessError, Color, Kind as PieceKind, Move as ChessMove, Status as ChessStatus,
+    square_index, square_name,
+};
 pub use collision::CollisionType;
 pub use disaster::{Disaster, DisasterKind};
 pub use draw::DrawItem;
@@ -50,10 +57,12 @@ pub use primitives::UI_KINDS as UI_SHAPE_KINDS;
 pub use procgen::{Rng, Seed, fbm2, fbm3, hash, noise2, noise3, salt, scatter};
 pub use sky::Sky;
 pub use sound::{KIND as SOUND_KIND, SoundNode};
-pub use terrain::{KIND as TERRAIN_KIND, TerrainQuality};
+pub use terrain::{Biome, KIND as TERRAIN_KIND, TerrainQuality};
 pub use texture::{
-    TextureError, TextureQuality, TextureType, generate as generate_texture,
-    pixels as texture_pixels, save as save_texture, variations as texture_variations,
+    TextureError, TextureQuality, TextureType, flipbook as generate_flipbook,
+    flipbook_pixels as flipbook_texture_pixels, generate as generate_texture,
+    pixels as texture_pixels, save as save_texture, save_flipbook,
+    variations as texture_variations,
 };
 pub use ui::{UiItem, UiText};
 pub use vehicle::{DRIVER_SEAT_KIND, HandlingType, KIND as VEHICLE_KIND, SEAT_KIND};

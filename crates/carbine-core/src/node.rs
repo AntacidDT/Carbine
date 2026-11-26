@@ -101,6 +101,11 @@ pub(crate) struct NodeTexture(pub(crate) Option<String>);
 #[derive(Component)]
 pub(crate) struct TextureTiling(pub(crate) f32);
 
+/// How fast a layered skin advances its frames, in frames per second. Zero means
+/// "use the rate painted into the file", so a flipbook needs no script to animate.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct TextureFps(pub(crate) f32);
+
 impl Default for TextureTiling {
     fn default() -> Self {
         Self(1.0)
@@ -156,6 +161,7 @@ pub enum SceneError {
     UnknownLightType(String),
     UnknownHandling(String),
     UnknownTerrainQuality(String),
+    UnknownBiome(String),
     BadTime(String),
     BadTexture { path: String, why: String },
     BadModel { path: String, why: String },
@@ -291,6 +297,11 @@ impl fmt::Display for SceneError {
                 formatter,
                 "unknown terrain quality \"{quality}\" (available: {})",
                 crate::terrain::TerrainQuality::NAMES.join(", ")
+            ),
+            Self::UnknownBiome(biome) => write!(
+                formatter,
+                "unknown biome \"{biome}\" (available: {})",
+                crate::terrain::Biome::NAMES.join(", ")
             ),
             Self::BadTime(clock) => write!(
                 formatter,
@@ -711,6 +722,12 @@ impl Scene {
         Ok(())
     }
 
+    /// The node's place in world metres, after every parent transform has been
+    /// composed. The audio layer uses it to pan a voice around the listener.
+    pub fn node_world_position(&self, id: NodeId) -> Result<Vec3, SceneError> {
+        Ok(self.global_matrix(id)?.transform_point3(Vec3::ZERO))
+    }
+
     pub fn vec_field(&self, id: NodeId, field: VecField) -> Result<Vec3, SceneError> {
         if matches!(field, VecField::Color) {
             return Ok(self.component::<ObjectColor>(id)?.0);
@@ -859,6 +876,25 @@ impl Scene {
     /// How many metres of this node one tile of its skin covers.
     pub fn tiling(&self, id: NodeId) -> Result<f32, SceneError> {
         Ok(self.component::<TextureTiling>(id)?.0)
+    }
+
+    /// The frame rate of a layered skin, or zero to use the rate in the file.
+    pub fn texture_fps(&self, id: NodeId) -> Result<f32, SceneError> {
+        let entity = self.entity(id)?;
+        Ok(self
+            .world
+            .get::<TextureFps>(entity)
+            .map(|rate| rate.0)
+            .unwrap_or(0.0))
+    }
+
+    /// Writes a frame rate over the one painted into a flipbook. Zero hands the
+    /// timing back to the file.
+    pub fn set_texture_fps(&mut self, id: NodeId, fps: f32) -> Result<(), SceneError> {
+        let fps = if fps.is_finite() { fps.max(0.0) } else { 0.0 };
+        let entity = self.entity(id)?;
+        self.world.entity_mut(entity).insert(TextureFps(fps));
+        Ok(())
     }
 
     pub(crate) fn tile(&mut self, id: NodeId, metres: f32) -> Result<(), SceneError> {

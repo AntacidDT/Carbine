@@ -171,6 +171,18 @@ impl Sound {
         Ok(())
     }
 
+    /// The same switch under its short name: `sound.loop = True` keeps it going,
+    /// False makes one `play()` play the clip once.
+    #[getter(r#loop)]
+    fn loop_flag(&self) -> PyResult<bool> {
+        self.read(|scene| scene.sound_looping(self.id))
+    }
+
+    #[setter(r#loop)]
+    fn set_loop_flag(&self, looping: bool) -> PyResult<()> {
+        self.set_looping(looping)
+    }
+
     /// Whether the node has been asked to play. A non-looping clip that has finished
     /// reads `False`; a looping one keeps reading `True` until `stop()`.
     #[getter]
@@ -183,13 +195,43 @@ impl Sound {
         if playing { self.play() } else { self.stop() }
     }
 
-    /// Seconds into the clip as of the last step or frame.
+    /// Seconds into the clip as of the last step or frame. Writing it seeks a
+    /// playing voice; a stopped sound starts from there on the next `play()`.
     #[getter]
     fn time(&self) -> PyResult<f32> {
         if let Some(position) = audio::position(self.id) {
             return Ok(position);
         }
         self.read(|scene| scene.sound_time(self.id))
+    }
+
+    #[setter]
+    fn set_time(&self, seconds: f64) -> PyResult<()> {
+        let seconds = if seconds.is_finite() {
+            seconds.max(0.0) as f32
+        } else {
+            0.0
+        };
+        with_scene(|scene| scene.set_sound_time(self.id, seconds))?;
+        audio::seek(self.id, seconds);
+        Ok(())
+    }
+
+    /// Moves the playhead without stopping the voice.
+    fn seek(&self, seconds: f64) -> PyResult<()> {
+        self.set_time(seconds)
+    }
+
+    /// Whether this voice is placed in the world: panned around the listener and
+    /// faded with distance.
+    #[getter]
+    fn spatial(&self) -> PyResult<bool> {
+        self.read(|scene| scene.sound_spatial(self.id))
+    }
+
+    #[setter]
+    fn set_spatial(&self, spatial: bool) -> PyResult<()> {
+        with_scene(|scene| scene.set_sound_spatial(self.id, spatial))
     }
 
     /// How long the file runs, in seconds. The first ask loads and caches it.
@@ -202,10 +244,11 @@ impl Sound {
         }
     }
 
-    /// Loads the source and starts it from the beginning. Raises `ValueError` when no
-    /// source is set, the file is not there, or it is not a readable `.wav`/`.mp3`.
+    /// Loads the source and starts it at the current playhead (the start, unless a
+    /// script sought somewhere). Raises `ValueError` when no source is set, the file
+    /// is not there, or it is not a readable `.wav`/`.mp3`.
     fn play(&self) -> PyResult<()> {
-        let (path, volume, looping) = with_scene(|scene| {
+        let (path, volume, looping, time) = with_scene(|scene| {
             let path = scene
                 .sound_source(self.id)?
                 .ok_or_else(|| SceneError::BadSound {
@@ -216,13 +259,14 @@ impl Sound {
                 path,
                 scene.sound_volume(self.id)?,
                 scene.sound_looping(self.id)?,
+                scene.sound_time(self.id)?,
             ))
         })?;
 
-        audio::play(self.id, &path, volume, looping).map_err(audio::audio_error)?;
+        audio::play(self.id, &path, volume, looping, time).map_err(audio::audio_error)?;
         with_scene(|scene| {
             scene.set_sound_playing(self.id, true)?;
-            scene.set_sound_time(self.id, 0.0)?;
+            scene.set_sound_time(self.id, time)?;
             Ok(())
         })
     }

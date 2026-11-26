@@ -4,7 +4,7 @@ use glam::{Mat4, Vec3};
 use crate::mesh::{MeshData, MeshHandle};
 use crate::node::{
     Children, MAX_ALPHA, NodeId, NodeKind, NodeMesh, NodeTexture, ObjectColor, Opacity, Scene,
-    SceneError, VecField,
+    SceneError, TextureFps, VecField,
 };
 use crate::primitives;
 
@@ -320,6 +320,11 @@ impl Scene {
                     sides: ui.sides.max(3) as f32,
                     outline: ui.outline,
                     text: self.world.get::<UiText>(entity),
+                    fps: self
+                        .world
+                        .get::<TextureFps>(entity)
+                        .map(|rate| rate.0)
+                        .unwrap_or(0.0),
                     texture: self
                         .world
                         .get::<NodeTexture>(entity)
@@ -363,6 +368,8 @@ pub struct UiItem<'a> {
     pub texture: Option<&'a str>,
     /// A live video texture for the element, by node id.
     pub video: Option<u64>,
+    /// Frame rate for a layered skin; zero uses the file's own rate.
+    pub fps: f32,
 }
 
 fn finite_clamp(value: f32, min: f32, max: f32) -> f32 {

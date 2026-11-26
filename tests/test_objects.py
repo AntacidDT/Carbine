@@ -444,3 +444,16 @@ def test_node_count_and_identity():
     finally:
         first.destroy()
     assert carbine.scene.nodeCount == before
+
+
+def test_the_alien_answers():
+    sayings = {
+        "ONLY AN ALIEN CAN DEFEAT A MITTEN",
+        "MY GAMBIT MY LEGACY MY PRECIOUS",
+        "ARE YOU NOT ENTERTAINED?!",
+        "I have become alien, the destroyer of Caro-Kann",
+        "She could beat humans, but not an alien.",
+        "I PREMOVED THE GAME!! WHILE SHAVING!!!",
+        "SHES UNBEATABLE? ALMOST, WITH THE SOLE EXCEPTION OF ME!",
+    }
+    assert {carbine.alien() for _ in range(40)} <= sayings

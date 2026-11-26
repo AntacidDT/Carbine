@@ -275,3 +275,41 @@ def test_image_can_live_on_the_ui(headless, authored):
     panel.destroy()
     carbine.render()
     assert with_image != bytes(carbine.readPixels()), "the overlay image was drawn"
+
+
+def test_loop_alias_is_a_switch(quiet, clip):
+    film = carbine.new("video")
+    film.source = clip
+
+    assert film.loop is False
+    film.loop = True
+    assert film.looping is True
+    film.loop = False
+    assert film.looping is False
+
+
+def test_seeking_a_film(quiet, clip):
+    film = carbine.new("video")
+    film.source = clip
+    film.play()
+    carbine.step(0.1)
+    film.time = 0.05
+    assert film.time == pytest.approx(0.05, abs=1e-2)
+    carbine.step(0.05)
+    assert film.time > 0.05
+
+    film.stop()
+    film.seek(0.1)
+    film.play()
+    assert film.time == pytest.approx(0.1, abs=1e-2)
+
+
+def test_a_films_sound_can_be_placed(quiet, voiced):
+    film = carbine.new("video")
+    film.source = voiced
+    assert film.spatial is False
+    film.spatial = True
+    film.play()
+    carbine.step(0.05)
+    assert film.spatial is True
+    assert film.playing is True
